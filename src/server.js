@@ -1484,15 +1484,54 @@ if (
     handoffReason: null,
   });
 
+const startedAt =
+  new Date().toISOString();
 
+const updatedJob =
   await updateJob(
     latestJob.id,
     {
       status: "processing",
-      started_at:
-        new Date().toISOString(),
+      started_at: startedAt,
     }
   );
+
+await appendJobToGoogleSheet({
+  jobId:
+    updatedJob.id,
+
+  customerId:
+    customer.id,
+
+  customerName:
+    customer.display_name || "",
+
+  platform,
+
+  phone:
+    phoneForDb,
+
+  businessName:
+    updatedJob.business_name || "",
+
+  reviewUrl:
+    updatedJob.review_url || "",
+
+  price:
+    updatedJob.price || "",
+
+  status:
+    updatedJob.status || "processing",
+
+  startedAt,
+
+  removedAt:
+    "",
+
+  paidAt:
+    "",
+});
+
 
 
   await saveMessage({
