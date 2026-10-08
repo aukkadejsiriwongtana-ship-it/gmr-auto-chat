@@ -37,7 +37,12 @@ import {
   getOneStarReviews,
 } from "./services/reviewProvider.js";
 
-
+import {
+  getNewestReviews,
+  getLowestReviews,
+  getRecentReviews,
+  getOneStarReviews,
+} from "./services/reviewProvider.js";
 
 
 const app = express();
