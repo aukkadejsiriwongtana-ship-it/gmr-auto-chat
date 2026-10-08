@@ -415,3 +415,51 @@ export async function createAuditLog({
 
   return data;
 }
+
+// =========================================================
+// REVIEW CANDIDATE
+// =========================================================
+
+export async function saveReviewCandidate({
+  customerId,
+  jobId = null,
+  businessName = null,
+  placeId = null,
+  mapUrl = null,
+  reviewerName = null,
+  rating = null,
+  reviewText = null,
+  reviewDate = null,
+  reviewUrl = null,
+  providerReviewId = null,
+  isRecent = null,
+  isVisible = null,
+  hasText = null,
+}) {
+  const { data, error } = await supabase
+    .from("gmr_reviews")
+    .insert({
+      customer_id: customerId,
+      job_id: jobId,
+      business_name: businessName,
+      place_id: placeId,
+      map_url: mapUrl,
+      reviewer_name: reviewerName,
+      rating,
+      review_text: reviewText,
+      review_date: reviewDate,
+      review_url: reviewUrl,
+      provider_review_id: providerReviewId,
+      is_recent: isRecent,
+      is_visible: isVisible,
+      has_text: hasText,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
