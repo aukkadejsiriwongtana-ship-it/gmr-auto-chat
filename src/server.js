@@ -1500,64 +1500,45 @@ const updatedJob =
     }
   );
 
-await appendJobToGoogleSheet({
-  jobId:
-    updatedJob.id,
+try {
+  await appendJobToGoogleSheet({
+    jobId: updatedJob.id,
+    customerId: customer.id,
+    customerName: customer.display_name || "",
+    platform,
+    phone: phoneForDb,
+    businessName: updatedJob.business_name || "",
+    reviewUrl: updatedJob.review_url || "",
+    price: updatedJob.price || "",
+    status: updatedJob.status || "processing",
+    startedAt,
+    removedAt: "",
+    paidAt: "",
+  });
+} catch (error) {
+  console.error(
+    "GOOGLE SHEET NOTIFY FAILED:",
+    error
+  );
+}
 
-  customerId:
-    customer.id,
-
-  customerName:
-    customer.display_name || "",
-
-  platform,
-
-  phone:
-    phoneForDb,
-
-  businessName:
-    updatedJob.business_name || "",
-
-  reviewUrl:
-    updatedJob.review_url || "",
-
-  price:
-    updatedJob.price || "",
-
-  status:
-    updatedJob.status || "processing",
-
-  startedAt,
-
-  removedAt:
-    "",
-
-  paidAt:
-    "",
-});
-
-await sendJobToLineGroup({
-  jobId:
-    updatedJob.id,
-
-  customerName:
-    customer.display_name || "",
-
-  platform,
-
-  phone:
-    phoneForDb,
-
-  businessName:
-    updatedJob.business_name || "",
-
-  reviewUrl:
-    updatedJob.review_url || "",
-
-  price:
-    updatedJob.price || "",
-});
-
+try {
+  await sendJobToLineGroup({
+    jobId: updatedJob.id,
+    customerName: customer.display_name || "",
+    platform,
+    phone: phoneForDb,
+    businessName: updatedJob.business_name || "",
+    reviewUrl: updatedJob.review_url || "",
+    price: updatedJob.price || "",
+  });
+} catch (error) {
+  console.error(
+    "LINE GROUP NOTIFY FAILED:",
+    error
+  );
+}
+  
   await saveMessage({
     customerId: customer.id,
     platform,
