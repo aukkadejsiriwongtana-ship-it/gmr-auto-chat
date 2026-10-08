@@ -2159,6 +2159,34 @@ app.get("/test-google-sheet", async (req, res) => {
   }
 });
 
+app.post("/line/webhook", async (req, res) => {
+  try {
+    const events =
+      req.body?.events || [];
+
+    for (const event of events) {
+      console.log(
+        "LINE EVENT SOURCE:",
+        JSON.stringify(
+          event.source,
+          null,
+          2
+        )
+      );
+    }
+
+    res.sendStatus(200);
+
+  } catch (error) {
+    console.error(
+      "LINE WEBHOOK ERROR:",
+      error
+    );
+
+    res.sendStatus(500);
+  }
+});
+
 app.listen(PORT, () => {
   console.log(
     `GMR Auto Chat running on port ${PORT}`
