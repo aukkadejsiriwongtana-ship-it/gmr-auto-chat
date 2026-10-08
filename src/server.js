@@ -21,6 +21,10 @@ import {
   INPUT_TYPES,
 } from "./services/inputClassifier.js";
 
+import {
+  searchPlaceByText,
+} from "./services/googleMapsService.js";
+
 const app = express();
 
 const PORT = process.env.PORT || 10000;
@@ -443,6 +447,52 @@ app.get("/test-message", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message,
+    });
+  }
+});
+
+// =========================================================
+// GOOGLE MAPS TEST
+// =========================================================
+
+app.get("/test-map-search", async (req, res) => {
+  try {
+
+    const query =
+      req.query.q;
+
+    if (!query) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Missing q parameter",
+      });
+    }
+
+    const results =
+      await searchPlaceByText(
+        query
+      );
+
+    res.status(200).json({
+      ok: true,
+      query,
+      count:
+        results.length,
+      results,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "TEST MAP SEARCH ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error:
+        error.message,
     });
   }
 });
