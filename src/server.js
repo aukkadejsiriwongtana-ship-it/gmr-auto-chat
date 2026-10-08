@@ -1266,6 +1266,112 @@ if (
     botReply,
   };
 }
+
+if (
+  conversation.state ===
+  GMR_STATES.WAITING_CONFIRM
+) {
+  const normalized =
+    String(message || "")
+      .trim()
+      .toLowerCase();
+
+  const confirmWords = [
+    "ยืนยัน",
+    "ยืนยันครับ",
+    "ยืนยันค่ะ",
+    "ok",
+    "okay",
+    "ตกลง",
+    "เริ่มได้เลย",
+    "เริ่มงานได้เลย",
+    "จัดการเลย",
+    "confirm",
+    "confirmed",
+    "go ahead",
+    "proceed",
+  ];
+
+  const isConfirmed =
+    confirmWords.includes(normalized);
+
+  if (!isConfirmed) {
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      confirmed: false,
+      botReply: null,
+      note: "Waiting for customer confirmation",
+    };
+  }
+
+  const template =
+    await getTemplate(
+      "script_4_request_phone",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "script_4_request_phone template not found"
+    );
+  }
+
+  const botReply =
+    template.content;
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PHONE
+    );
+
+  await updateConversationState({
+    customerId: customer.id,
+    state: nextState,
+    handoff: false,
+    handoffReason: null,
+  });
+
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (latestJob) {
+    await updateJob(
+      latestJob.id,
+      {
+        status: "waiting_phone",
+      }
+    );
+  }
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    jobId: latestJob?.id || null,
+    stateBefore: conversation.state,
+    stateAfter: nextState,
+    confirmed: true,
+    botReply,
+  };
+}
   
   // -------------------------------------------------------
   // OTHER STATES
