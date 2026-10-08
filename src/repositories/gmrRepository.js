@@ -1,17 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
 
-import {
-  getOrCreateCustomer,
-  getOrCreateConversation,
-  getTemplate,
-  saveMessage,
-  updateConversationState,
-  updateLastUserMessage,
-  updateLastBotMessage,
-  createJob,
-} from "./repositories/gmrRepository.js";
-
-
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
