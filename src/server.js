@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 
 import {
+  getCustomerByPlatformUserId,
+  getConversationByCustomerId,
   getOrCreateCustomer,
   getOrCreateConversation,
   getTemplate,
