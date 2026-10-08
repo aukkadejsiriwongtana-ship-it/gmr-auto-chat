@@ -542,16 +542,490 @@ if (
   // -----------------------------------------------------
 
   if (isYes) {
+
+  // -----------------------------------------------------
+  // 1. หา Job ล่าสุดของลูกค้า
+  // -----------------------------------------------------
+
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (!latestJob) {
+    throw new Error(
+      "No job found for confirmed map"
+    );
+  }
+
+  if (!latestJob.place_id) {
+    throw new Error(
+      "Job has no place_id"
+    );
+  }
+
+
+  // -----------------------------------------------------
+  // 2. ตรวจรีวิวล่าสุด
+  // -----------------------------------------------------
+
+  const newestResult =
+    await getNewestReviews(
+      latestJob.place_id
+    );
+
+  const recentReviews =
+    getRecentReviews(
+      newestResult.reviews,
+      14
+    );
+
+
+  // -----------------------------------------------------
+  // 3. ถ้ามีรีวิวใหม่ <= 14 วัน
+  // → Script 2
+  // → WAITING_REVIEW_SELECTION
+  // -----------------------------------------------------
+
+  if (recentReviews.length > 0) {
+
+    const template =
+      await getTemplate(
+        "script_2_recent_reviews",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "script_2_recent_reviews template not found"
+      );
+    }
+
+
+    let botReply =
+      template.content.replace(
+        "{{review_count}}",
+        String(
+          recentReviews.length
+        )
+      );
+
+
+    // ต่อท้ายลิงก์รีวิวทุกอัน
+    const reviewLines =
+      recentReviews
+        .map(
+          (review, index) => {
+
+            const reviewer =
+              review.reviewerName ||
+              "ไม่ทราบชื่อ";
+
+            const rating =
+              review.rating ||
+              "-";
+
+            const dateText =
+              review.dateText ||
+              "";
+
+            const reviewUrl =
+              review.reviewUrl ||
+              "";
+
+            return [
+              `${index + 1}. ${reviewer}`,
+              `⭐ ${rating}`,
+              dateText,
+              reviewUrl,
+            ]
+              .filter(Boolean)
+              .join("\n");
+          }
+        )
+        .join("\n\n");
+
+
+    if (reviewLines) {
+      botReply +=
+        `\n\n${reviewLines}`;
+    }
+
+
+    // บันทึก reviews ลง DB
+    for (
+      const review of recentReviews
+    ) {
+      await saveReviewCandidate({
+        customerId:
+          customer.id,
+
+        jobId:
+          latestJob.id,
+
+        businessName:
+          latestJob.business_name,
+
+        placeId:
+          latestJob.place_id,
+
+        mapUrl:
+          latestJob.map_url,
+
+        reviewerName:
+          review.reviewerName,
+
+        rating:
+          review.rating,
+
+        reviewText:
+          review.text,
+
+        reviewDate:
+          review.isoDate,
+
+        reviewUrl:
+          review.reviewUrl,
+
+        providerReviewId:
+          review.reviewId,
+
+        isRecent: true,
+
+        isVisible: true,
+
+        hasText:
+          Boolean(
+            review.text &&
+            review.text.trim()
+          ),
+      });
+    }
+
+
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.WAITING_REVIEW_SELECTION
+      );
+
+
+    await updateConversationState({
+      customerId:
+        customer.id,
+
+      state:
+        nextState,
+
+      handoff:
+        false,
+
+      handoffReason:
+        null,
+    });
+
+
+    await updateJob(
+      latestJob.id,
+      {
+        review_case:
+          "recent_review",
+
+        status:
+          "draft",
+      }
+    );
+
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
     return {
       ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      mapConfirmed: true,
-      botReply: null,
-      nextAction: "CHECK_GOOGLE_REVIEWS",
+
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        nextState,
+
+      mapConfirmed:
+        true,
+
+      reviewCase:
+        "recent_review",
+
+      recentCount:
+        recentReviews.length,
+
+      botReply,
     };
   }
+
+
+  // -----------------------------------------------------
+  // 4. ไม่มีรีวิวใหม่
+  // ตรวจ Lowest ต่อ
+  // -----------------------------------------------------
+
+  const lowestResult =
+    await getLowestReviews(
+      latestJob.place_id
+    );
+
+  const oneStarReviews =
+    getOneStarReviews(
+      lowestResult.reviews
+    );
+
+
+  // -----------------------------------------------------
+  // 5. พบ 1 ดาว
+  // → Script 1
+  // → WAITING_PRICE
+  // -----------------------------------------------------
+
+  if (oneStarReviews.length > 0) {
+
+    const template =
+      await getTemplate(
+        "script_1_old_review",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "script_1_old_review template not found"
+      );
+    }
+
+    const botReply =
+      template.content;
+
+
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.WAITING_PRICE
+      );
+
+
+    await updateConversationState({
+      customerId:
+        customer.id,
+
+      state:
+        nextState,
+
+      handoff:
+        false,
+
+      handoffReason:
+        null,
+    });
+
+
+    await updateJob(
+      latestJob.id,
+      {
+        review_case:
+          "old_review",
+
+        status:
+          "waiting_price",
+      }
+    );
+
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    return {
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        nextState,
+
+      mapConfirmed:
+        true,
+
+      reviewCase:
+        "old_review",
+
+      oneStarCount:
+        oneStarReviews.length,
+
+      botReply,
+    };
+  }
+
+
+  // -----------------------------------------------------
+  // 6. Lowest แล้วไม่พบ 1 ดาว
+  // → Script 3.4
+  // → WAITING_PRICE
+  // -----------------------------------------------------
+
+  const template =
+    await getTemplate(
+      "script_3_4_hidden_one_star",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "script_3_4_hidden_one_star template not found"
+    );
+  }
+
+  const botReply =
+    template.content;
+
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PRICE
+    );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  await updateJob(
+    latestJob.id,
+    {
+      review_case:
+        "hidden_one_star",
+
+      review_visible:
+        false,
+
+      review_has_text:
+        false,
+
+      status:
+        "waiting_price",
+    }
+  );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    mapConfirmed:
+      true,
+
+    reviewCase:
+      "hidden_one_star",
+
+    oneStarCount: 0,
+
+    botReply,
+  };
+}
 
   // -----------------------------------------------------
   // ลูกค้าตอบ "ไม่ใช่"
