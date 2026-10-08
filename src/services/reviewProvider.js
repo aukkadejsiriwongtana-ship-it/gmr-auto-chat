@@ -1,10 +1,3 @@
-import {
-  getNewestReviews,
-  getLowestReviews,
-  getRecentReviews,
-  getOneStarReviews,
-} from "./services/reviewProvider.js";
-
 const SERPAPI_API_KEY =
   process.env.SERPAPI_API_KEY;
 
