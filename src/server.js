@@ -9,6 +9,7 @@ import {
   updateConversationState,
   updateLastUserMessage,
   updateLastBotMessage,
+  createJob,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -311,21 +312,160 @@ async function processTestMessage({
     // -----------------------------------------------------
 
     if (
-      classification.type ===
-      INPUT_TYPES.BUSINESS_NAME
-    ) {
-      return {
-        ok: true,
-        customerId: customer.id,
-        stateBefore: conversation.state,
-        stateAfter: conversation.state,
-        inputType: classification.type,
-        confidence: classification.confidence,
-        botReply: null,
-        nextAction:
-          "BUSINESS_NAME_LOOKUP",
-      };
-    }
+  classification.type ===
+  INPUT_TYPES.BUSINESS_NAME
+) {
+
+  // 1. ค้นชื่อธุรกิจใน Google Places
+  const places =
+    await searchPlaceByText(message);
+
+  // หาไม่เจอ
+  if (!places.length) {
+
+    const botReply =
+      "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ";
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      inputType: classification.type,
+      botReply,
+      placeFound: false,
+    };
+  }
+
+
+  // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
+  const place = places[0];
+
+
+  // 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
+  const template =
+    await getTemplate(
+      "confirm_map",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "confirm_map template not found"
+    );
+  }
+
+
+  // 4. แทน {{map_url}} ด้วย URL จริง
+  const botReply =
+    template.content.replace(
+      "{{map_url}}",
+      place.mapUrl
+    );
+
+
+  // 5. สร้าง Draft Job เก็บข้อมูล Map ไว้
+  const job = await createJob({
+    customerId: customer.id,
+    businessName:
+      place.businessName,
+    placeId:
+      place.placeId,
+    mapUrl:
+      place.mapUrl,
+    status: "draft",
+  });
+
+
+  // 6. เปลี่ยน State
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION
+    );
+
+
+  await updateConversationState({
+    customerId: customer.id,
+    state: nextState,
+    handoff: false,
+    handoffReason: null,
+  });
+
+
+  // 7. บันทึกข้อความ Bot
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  // 8. ส่งผลกลับ
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    inputType:
+      classification.type,
+
+    placeFound: true,
+
+    place: {
+      placeId:
+        place.placeId,
+
+      businessName:
+        place.businessName,
+
+      formattedAddress:
+        place.formattedAddress,
+
+      mapUrl:
+        place.mapUrl,
+
+      rating:
+        place.rating,
+
+      userRatingCount:
+        place.userRatingCount,
+    },
+
+    botReply,
+  };
+}
 
 
     // -----------------------------------------------------
