@@ -502,3 +502,54 @@ export async function selectReviewCandidate(
 
   return data;
 }
+
+// =========================================================
+// QUOTES
+// =========================================================
+
+export async function createQuote({
+  jobId,
+  amount,
+  currency = "THB",
+  quotedBy = "sales",
+  quoteMessage = null,
+  script3Sent = false,
+}) {
+  const { data, error } = await supabase
+    .from("gmr_quotes")
+    .insert({
+      job_id: jobId,
+      amount,
+      currency,
+      quoted_by: quotedBy,
+      quote_message: quoteMessage,
+      script3_sent: script3Sent,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function updateQuote(
+  quoteId,
+  updates
+) {
+  const { data, error } = await supabase
+    .from("gmr_quotes")
+    .update(updates)
+    .eq("id", quoteId)
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
