@@ -2192,6 +2192,36 @@ app.post("/line/webhook", async (req, res) => {
   }
 });
 
+app.get("/test-line-group", async (req, res) => {
+  try {
+    await sendJobToLineGroup({
+      jobId: "TEST_JOB_LINE_001",
+      customerName: "Test Customer",
+      platform: "line",
+      phone: "+66812345678",
+      businessName: "Wraptor Thailand",
+      reviewUrl: "https://www.google.com/maps/reviews/test",
+      price: 5000,
+    });
+
+    res.status(200).json({
+      ok: true,
+      message: "LINE group notification sent",
+    });
+
+  } catch (error) {
+    console.error(
+      "TEST LINE GROUP ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(
     `GMR Auto Chat running on port ${PORT}`
