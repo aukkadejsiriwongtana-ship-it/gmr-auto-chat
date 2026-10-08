@@ -463,3 +463,42 @@ export async function saveReviewCandidate({
 
   return data;
 }
+
+export async function getReviewCandidatesByJobId(
+  jobId
+) {
+  const { data, error } = await supabase
+    .from("gmr_reviews")
+    .select("*")
+    .eq("job_id", jobId)
+    .eq("is_recent", true)
+    .order("created_at", {
+      ascending: true,
+    });
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+export async function selectReviewCandidate(
+  reviewId
+) {
+  const { data, error } = await supabase
+    .from("gmr_reviews")
+    .update({
+      selected_by_customer: true,
+    })
+    .eq("id", reviewId)
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
