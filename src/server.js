@@ -2222,6 +2222,139 @@ app.get("/test-line-group", async (req, res) => {
   }
 });
 
+app.get("/test-mark-removed", async (req, res) => {
+  try {
+    const platform =
+      req.query.platform || "line";
+
+    const platformUserId =
+      req.query.platformUserId;
+
+    if (!platformUserId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing platformUserId",
+      });
+    }
+
+    const customer =
+      await getCustomerByPlatformUserId(
+        platform,
+        platformUserId
+      );
+
+    if (!customer) {
+      return res.status(404).json({
+        ok: false,
+        error: "Customer not found",
+      });
+    }
+
+    const conversation =
+      await getConversationByCustomerId(
+        customer.id
+      );
+
+    if (!conversation) {
+      throw new Error(
+        "Conversation not found"
+      );
+    }
+
+    const latestJob =
+      await getLatestJobByCustomerId(
+        customer.id
+      );
+
+    if (!latestJob) {
+      throw new Error(
+        "No active job found"
+      );
+    }
+
+    const removedAt =
+      new Date().toISOString();
+
+    const updatedJob =
+      await updateJob(
+        latestJob.id,
+        {
+          status: "removed",
+          removed_at: removedAt,
+        }
+      );
+
+    const template =
+      await getTemplate(
+        "removed_payment",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "removed_payment template not found"
+      );
+    }
+
+    const botReply =
+      template.content;
+
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.REMOVED_WAITING_PAYMENT
+      );
+
+    await updateConversationState({
+      customerId: customer.id,
+      state: nextState,
+      handoff: false,
+      handoffReason: null,
+    });
+
+    await updateJob(
+      latestJob.id,
+      {
+        status: "waiting_payment",
+      }
+    );
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return res.status(200).json({
+      ok: true,
+      customerId: customer.id,
+      jobId: updatedJob.id,
+      stateBefore: conversation.state,
+      stateAfter: nextState,
+      removedAt,
+      botReply,
+    });
+
+  } catch (error) {
+    console.error(
+      "TEST MARK REMOVED ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(
     `GMR Auto Chat running on port ${PORT}`
