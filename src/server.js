@@ -1,8 +1,10 @@
 import "dotenv/config";
 import express from "express";
 
+
 import {
   appendJobToGoogleSheet,
+  updateJobInGoogleSheet,
 } from "./services/googleSheetsService.js";
 
 import {
@@ -2318,6 +2320,21 @@ app.get("/test-mark-removed", async (req, res) => {
         status: "waiting_payment",
       }
     );
+
+    try {
+  await updateJobInGoogleSheet({
+    jobId: latestJob.id,
+    status: "waiting_payment",
+    removedAt,
+    paidAt: "",
+  });
+} catch (error) {
+  console.error(
+    "GOOGLE SHEET UPDATE FAILED:",
+    error
+  );
+}
+
 
     await saveMessage({
       customerId: customer.id,
