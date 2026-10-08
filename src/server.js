@@ -13,6 +13,8 @@ import {
   getLatestJobByCustomerId,
   updateJob,
   saveReviewCandidate,
+  getReviewCandidatesByJobId,
+selectReviewCandidate,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -1103,6 +1105,163 @@ if (
   };
 }
 
+  if (
+  conversation.state ===
+  GMR_STATES.WAITING_REVIEW_SELECTION
+) {
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (!latestJob) {
+    throw new Error(
+      "No job found while waiting for review selection"
+    );
+  }
+
+  const candidates =
+    await getReviewCandidatesByJobId(
+      latestJob.id
+    );
+
+  if (!candidates.length) {
+    throw new Error(
+      "No review candidates found"
+    );
+  }
+
+  const normalized =
+    String(message || "").trim();
+
+  let selectedReview = null;
+
+  // ลูกค้าพิมพ์ 1 / 2 / 3
+  const numericChoice =
+    Number(normalized);
+
+  if (
+    Number.isInteger(numericChoice) &&
+    numericChoice >= 1 &&
+    numericChoice <= candidates.length
+  ) {
+    selectedReview =
+      candidates[numericChoice - 1];
+  }
+
+  // ลูกค้าส่งลิงก์รีวิวกลับมา
+  if (
+    !selectedReview &&
+    normalized.startsWith("http")
+  ) {
+    selectedReview =
+      candidates.find(
+        (review) =>
+          review.review_url === normalized
+      ) || null;
+  }
+
+  // ยังเลือกไม่สำเร็จ
+  if (!selectedReview) {
+    const botReply =
+      `เลือกรายการที่ต้องการดำเนินการได้เลยครับ โดยพิมพ์หมายเลข 1-${candidates.length} หรือส่งลิงก์รีวิวกลับมาได้ครับ`;
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      selected: false,
+      botReply,
+    };
+  }
+
+  // mark ว่าเลือกแล้ว
+  const selected =
+    await selectReviewCandidate(
+      selectedReview.id
+    );
+
+  // update job ให้ผูกกับ review ที่เลือก
+  await updateJob(
+    latestJob.id,
+    {
+      review_url:
+        selected.review_url,
+
+      review_case:
+        "recent_review",
+
+      status:
+        "waiting_price",
+    }
+  );
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PRICE
+    );
+
+  await updateConversationState({
+    customerId: customer.id,
+    state: nextState,
+    handoff: false,
+    handoffReason: null,
+  });
+
+  const botReply =
+    "รับทราบครับ เดี๋ยวเจ้าหน้าที่ตรวจสอบและแจ้งราคาสำหรับรีวิวนี้ให้ครับ";
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    jobId: latestJob.id,
+    stateBefore: conversation.state,
+    stateAfter: nextState,
+    selected: true,
+    selectedReview: {
+      reviewerName:
+        selected.reviewer_name,
+
+      rating:
+        selected.rating,
+
+      reviewText:
+        selected.review_text,
+
+      reviewUrl:
+        selected.review_url,
+    },
+    botReply,
+  };
+}
   
   // -------------------------------------------------------
   // OTHER STATES
