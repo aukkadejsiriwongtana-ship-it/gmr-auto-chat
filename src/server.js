@@ -14,7 +14,9 @@ import {
   updateJob,
   saveReviewCandidate,
   getReviewCandidatesByJobId,
-selectReviewCandidate,
+  selectReviewCandidate,
+  createQuote,
+  updateQuote,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -1564,6 +1566,219 @@ app.get("/test-lowest-reviews", async (req, res) => {
       ok: false,
       error:
         error.message,
+    });
+  }
+});
+
+// =========================================================
+// SALES QUOTE TEST
+// =========================================================
+
+app.get("/test-sales-quote", async (req, res) => {
+  try {
+
+    const platform =
+      req.query.platform || "line";
+
+    const platformUserId =
+      req.query.platformUserId;
+
+    const amount =
+      Number(req.query.amount);
+
+    if (!platformUserId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing platformUserId",
+      });
+    }
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid amount",
+      });
+    }
+
+
+    // หา customer
+    const customer =
+      await getCustomerByPlatformUserId(
+        platform,
+        platformUserId
+      );
+
+    if (!customer) {
+      return res.status(404).json({
+        ok: false,
+        error: "Customer not found",
+      });
+    }
+
+
+    // หา conversation
+    const conversation =
+      await getConversationByCustomerId(
+        customer.id
+      );
+
+    if (!conversation) {
+      throw new Error(
+        "Conversation not found"
+      );
+    }
+
+
+    if (
+      conversation.state !==
+      GMR_STATES.WAITING_PRICE
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          `Customer is not waiting for price. Current state: ${conversation.state}`,
+      });
+    }
+
+
+    // หา job ล่าสุด
+    const latestJob =
+      await getLatestJobByCustomerId(
+        customer.id
+      );
+
+    if (!latestJob) {
+      throw new Error(
+        "No active job found"
+      );
+    }
+
+
+    const salesMessage =
+      `สำหรับรีวิวดังกล่าว ราคา ${amount.toLocaleString("th-TH")} บาท/รีวิว`;
+
+
+    // บันทึกราคาใน Job
+    await updateJob(
+      latestJob.id,
+      {
+        price: amount,
+        currency: "THB",
+        status: "waiting_confirm",
+      }
+    );
+
+
+    // สร้าง quote
+    const quote =
+      await createQuote({
+        jobId: latestJob.id,
+        amount,
+        currency: "THB",
+        quotedBy: "sales",
+        quoteMessage: salesMessage,
+        script3Sent: false,
+      });
+
+
+    // อ่าน Script 3
+    const template =
+      await getTemplate(
+        "script_3_after_quote",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "script_3_after_quote template not found"
+      );
+    }
+
+
+    const script3 =
+      template.content;
+
+
+    // Bot reply = ราคาจาก Sales + Script 3
+    const botReply =
+      `${salesMessage}\n\n${script3}`;
+
+
+    // เปลี่ยน State
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.WAITING_CONFIRM
+      );
+
+
+    await updateConversationState({
+      customerId: customer.id,
+      state: nextState,
+      handoff: false,
+      handoffReason: null,
+    });
+
+
+    await updateQuote(
+      quote.id,
+      {
+        script3_sent: true,
+      }
+    );
+
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    return res.status(200).json({
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      quoteId:
+        quote.id,
+
+      amount,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        nextState,
+
+      botReply,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "TEST SALES QUOTE ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
     });
   }
 });
