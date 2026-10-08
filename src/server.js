@@ -16,6 +16,11 @@ import {
   transitionState,
 } from "./flows/gmrStateMachine.js";
 
+import {
+  classifyInput,
+  INPUT_TYPES,
+} from "./services/inputClassifier.js";
+
 const app = express();
 
 const PORT = process.env.PORT || 10000;
@@ -48,9 +53,8 @@ app.get("/test-supabase", async (req, res) => {
       language: "th",
     });
 
-    const conversation = await getOrCreateConversation(
-      customer.id
-    );
+    const conversation =
+      await getOrCreateConversation(customer.id);
 
     const template = await getTemplate(
       "welcome",
@@ -83,6 +87,7 @@ async function processTestMessage({
   platform,
   platformUserId,
   message,
+  messageType = "text",
   displayName = "Test User",
 }) {
 
@@ -94,13 +99,13 @@ async function processTestMessage({
     throw new Error("Missing platformUserId");
   }
 
-  if (!message) {
+  if (!message && messageType === "text") {
     throw new Error("Missing message");
   }
 
 
   // -------------------------------------------------------
-  // 1. หา หรือ สร้าง customer
+  // 1. CUSTOMER
   // -------------------------------------------------------
 
   const customer = await getOrCreateCustomer({
@@ -112,7 +117,7 @@ async function processTestMessage({
 
 
   // -------------------------------------------------------
-  // 2. หา หรือ สร้าง conversation
+  // 2. CONVERSATION
   // -------------------------------------------------------
 
   const conversation =
@@ -120,26 +125,28 @@ async function processTestMessage({
 
 
   // -------------------------------------------------------
-  // 3. บันทึกข้อความลูกค้า
+  // 3. SAVE INBOUND MESSAGE
   // -------------------------------------------------------
 
   await saveMessage({
     customerId: customer.id,
     platform,
     direction: "inbound",
-    messageType: "text",
-    messageText: message,
+    messageType,
+    messageText: message || null,
   });
 
 
-  await updateLastUserMessage(
-    customer.id,
-    message
-  );
+  if (message) {
+    await updateLastUserMessage(
+      customer.id,
+      message
+    );
+  }
 
 
   // -------------------------------------------------------
-  // 4. เช็ก handoff ก่อน
+  // 4. HANDOFF CHECK
   // -------------------------------------------------------
 
   if (
@@ -153,14 +160,14 @@ async function processTestMessage({
       stateAfter: conversation.state,
       handoff: true,
       botReply: null,
-      note: "Conversation is currently in human handoff mode",
+      note:
+        "Conversation is currently in human handoff mode",
     };
   }
 
 
   // -------------------------------------------------------
-  // 5. STATE = NEW
-  // ลูกค้าทักครั้งแรก
+  // 5. NEW CUSTOMER
   // -------------------------------------------------------
 
   if (conversation.state === GMR_STATES.NEW) {
@@ -183,8 +190,6 @@ async function processTestMessage({
       GMR_STATES.WAITING_MAP
     );
 
-
-    // เปลี่ยน state
     await updateConversationState({
       customerId: customer.id,
       state: nextState,
@@ -192,8 +197,6 @@ async function processTestMessage({
       handoffReason: null,
     });
 
-
-    // เก็บข้อความ bot
     await saveMessage({
       customerId: customer.id,
       platform,
@@ -202,27 +205,24 @@ async function processTestMessage({
       messageText: botReply,
     });
 
-
     await updateLastBotMessage(
       customer.id,
       botReply
     );
-
 
     return {
       ok: true,
       customerId: customer.id,
       stateBefore: conversation.state,
       stateAfter: nextState,
+      inputType: null,
       botReply,
     };
   }
 
 
   // -------------------------------------------------------
-  // 6. STATE = WAITING_MAP
-  // ตอนนี้ยังไม่ทำ Map logic
-  // จะทำใน Step ต่อไป
+  // 6. WAITING_MAP
   // -------------------------------------------------------
 
   if (
@@ -230,20 +230,120 @@ async function processTestMessage({
     GMR_STATES.WAITING_MAP
   ) {
 
+    const classification = classifyInput({
+      messageType,
+      text: message || "",
+    });
+
+
+    // -----------------------------------------------------
+    // MAP URL
+    // -----------------------------------------------------
+
+    if (
+      classification.type ===
+      INPUT_TYPES.MAP_URL
+    ) {
+      return {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        inputType: classification.type,
+        confidence: classification.confidence,
+        botReply: null,
+        nextAction:
+          "MAP_LOOKUP_FLOW_3_1",
+      };
+    }
+
+
+    // -----------------------------------------------------
+    // REVIEW URL
+    // -----------------------------------------------------
+
+    if (
+      classification.type ===
+      INPUT_TYPES.REVIEW_URL
+    ) {
+      return {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        inputType: classification.type,
+        confidence: classification.confidence,
+        botReply: null,
+        nextAction:
+          "DIRECT_REVIEW_FLOW_3_2",
+      };
+    }
+
+
+    // -----------------------------------------------------
+    // IMAGE REVIEW
+    // -----------------------------------------------------
+
+    if (
+      classification.type ===
+      INPUT_TYPES.IMAGE_REVIEW
+    ) {
+      return {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        inputType: classification.type,
+        confidence: classification.confidence,
+        botReply: null,
+        nextAction:
+          "IMAGE_REVIEW_FLOW_3_3",
+      };
+    }
+
+
+    // -----------------------------------------------------
+    // BUSINESS NAME
+    // -----------------------------------------------------
+
+    if (
+      classification.type ===
+      INPUT_TYPES.BUSINESS_NAME
+    ) {
+      return {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        inputType: classification.type,
+        confidence: classification.confidence,
+        botReply: null,
+        nextAction:
+          "BUSINESS_NAME_LOOKUP",
+      };
+    }
+
+
+    // -----------------------------------------------------
+    // OTHER TEXT
+    // -----------------------------------------------------
+
     return {
       ok: true,
       customerId: customer.id,
       stateBefore: conversation.state,
       stateAfter: conversation.state,
+      inputType: classification.type,
+      confidence: classification.confidence,
       botReply: null,
-      note:
-        "Customer is waiting to submit Google Map / Review link. Map classifier will be added next.",
+      nextAction:
+        "FAQ_OR_GENERAL_TEXT",
     };
   }
 
 
   // -------------------------------------------------------
-  // STATE อื่น ๆ
+  // OTHER STATES
   // -------------------------------------------------------
 
   return {
@@ -279,7 +379,10 @@ app.post("/test-message", async (req, res) => {
           "Test User",
 
         message:
-          req.body.message,
+          req.body.message || "",
+
+        messageType:
+          req.body.messageType || "text",
       });
 
     res.status(200).json(result);
@@ -301,7 +404,6 @@ app.post("/test-message", async (req, res) => {
 
 // =========================================================
 // GET TEST MESSAGE
-// สำหรับทดสอบง่าย ๆ จาก browser
 // =========================================================
 
 app.get("/test-message", async (req, res) => {
@@ -323,6 +425,10 @@ app.get("/test-message", async (req, res) => {
         message:
           req.query.message ||
           "สนใจบริการครับ",
+
+        messageType:
+          req.query.messageType ||
+          "text",
       });
 
     res.status(200).json(result);
