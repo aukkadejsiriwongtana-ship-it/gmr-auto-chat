@@ -30,14 +30,19 @@ import {
   getPlaceReviews,
 } from "./services/googleReviewService.js";
 
+import {
+  getNewestReviews,
+  getLowestReviews,
+  getRecentReviews,
+  getOneStarReviews,
+} from "./services/reviewProvider.js";
+
+
+
+
 const app = express();
-
 const PORT = process.env.PORT || 10000;
-
 app.use(express.json());
-
-
-
 
 // =========================================================
 // HEALTH CHECK
@@ -802,6 +807,128 @@ app.get("/test-place-reviews", async (req, res) => {
     res.status(500).json({
       ok: false,
       error: error.message,
+    });
+  }
+});
+
+// =========================================================
+// TEST NEWEST REVIEWS
+// =========================================================
+
+app.get("/test-newest-reviews", async (req, res) => {
+  try {
+
+    const placeId =
+      req.query.placeId;
+
+    if (!placeId) {
+      return res
+        .status(400)
+        .json({
+          ok: false,
+          error:
+            "Missing placeId",
+        });
+    }
+
+    const result =
+      await getNewestReviews(
+        placeId
+      );
+
+    const recentReviews =
+      getRecentReviews(
+        result.reviews,
+        14
+      );
+
+    res.status(200).json({
+      ok: true,
+
+      totalReturned:
+        result.reviews.length,
+
+      recentCount:
+        recentReviews.length,
+
+      recentReviews,
+
+      reviews:
+        result.reviews,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "TEST NEWEST REVIEWS ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error:
+        error.message,
+    });
+  }
+});
+
+
+// =========================================================
+// TEST LOWEST REVIEWS
+// =========================================================
+
+app.get("/test-lowest-reviews", async (req, res) => {
+  try {
+
+    const placeId =
+      req.query.placeId;
+
+    if (!placeId) {
+      return res
+        .status(400)
+        .json({
+          ok: false,
+          error:
+            "Missing placeId",
+        });
+    }
+
+    const result =
+      await getLowestReviews(
+        placeId
+      );
+
+    const oneStarReviews =
+      getOneStarReviews(
+        result.reviews
+      );
+
+    res.status(200).json({
+      ok: true,
+
+      totalReturned:
+        result.reviews.length,
+
+      oneStarCount:
+        oneStarReviews.length,
+
+      oneStarReviews,
+
+      reviews:
+        result.reviews,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "TEST LOWEST REVIEWS ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error:
+        error.message,
     });
   }
 });
