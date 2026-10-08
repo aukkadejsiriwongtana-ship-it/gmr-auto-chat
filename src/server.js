@@ -19,6 +19,7 @@ import {
   selectReviewCandidate,
   createQuote,
   updateQuote,
+  updateCustomerPhone,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -1369,6 +1370,163 @@ if (
     stateBefore: conversation.state,
     stateAfter: nextState,
     confirmed: true,
+    botReply,
+  };
+}
+
+if (
+  conversation.state ===
+  GMR_STATES.WAITING_PHONE
+) {
+  const rawPhone =
+    String(message || "").trim();
+
+  const normalizedPhone =
+    rawPhone.replace(/[^\d+]/g, "");
+
+  const thaiPhonePattern =
+    /^(?:\+66|0)\d{8,9}$/;
+
+  if (
+    !thaiPhonePattern.test(
+      normalizedPhone
+    )
+  ) {
+    const botReply =
+      "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678";
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      phoneAccepted: false,
+      botReply,
+    };
+  }
+
+
+  // แปลง 0812345678 -> +66812345678
+  let phoneForDb =
+    normalizedPhone;
+
+  if (
+    phoneForDb.startsWith("0")
+  ) {
+    phoneForDb =
+      "+66" +
+      phoneForDb.slice(1);
+  }
+
+
+  await updateCustomerPhone(
+    customer.id,
+    phoneForDb
+  );
+
+
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (!latestJob) {
+    throw new Error(
+      "No active job found while receiving phone"
+    );
+  }
+
+
+  const template =
+    await getTemplate(
+      "script_5_started",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "script_5_started template not found"
+    );
+  }
+
+  const botReply =
+    template.content;
+
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.IN_PROGRESS
+    );
+
+
+  await updateConversationState({
+    customerId: customer.id,
+    state: nextState,
+    handoff: false,
+    handoffReason: null,
+  });
+
+
+  await updateJob(
+    latestJob.id,
+    {
+      status: "processing",
+      started_at:
+        new Date().toISOString(),
+    }
+  );
+
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    phoneAccepted:
+      true,
+
+    phone:
+      phoneForDb,
+
     botReply,
   };
 }
