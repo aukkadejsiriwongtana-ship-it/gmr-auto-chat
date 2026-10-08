@@ -1,0 +1,17 @@
+{
+  "name": "gmr-auto-chat",
+  "version": "1.0.0",
+  "description": "Google Review Management Auto Chat",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "openai": "^6.8.1"
+  }
+}
