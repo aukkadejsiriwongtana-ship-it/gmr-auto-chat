@@ -2372,6 +2372,41 @@ app.get("/test-mark-removed", async (req, res) => {
   }
 });
 
+app.get("/test-google-sheet-update", async (req, res) => {
+  try {
+    const result =
+      await updateJobInGoogleSheet({
+        jobId:
+          "3db297f6-9fb1-4d2f-941e-8e56181e929f",
+
+        status:
+          "waiting_payment",
+
+        removedAt:
+          new Date().toISOString(),
+
+        paidAt:
+          "",
+      });
+
+    return res.status(200).json({
+      ok: true,
+      result,
+    });
+
+  } catch (error) {
+    console.error(
+      "TEST GOOGLE SHEET UPDATE ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(
     `GMR Auto Chat running on port ${PORT}`
