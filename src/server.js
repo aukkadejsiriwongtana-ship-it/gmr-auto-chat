@@ -6,6 +6,10 @@ import {
 } from "./services/googleSheetsService.js";
 
 import {
+  sendJobToLineGroup,
+} from "./services/lineGroupService.js";
+
+import {
   getCustomerByPlatformUserId,
   getConversationByCustomerId,
   getOrCreateCustomer,
@@ -1532,7 +1536,27 @@ await appendJobToGoogleSheet({
     "",
 });
 
+await sendJobToLineGroup({
+  jobId:
+    updatedJob.id,
 
+  customerName:
+    customer.display_name || "",
+
+  platform,
+
+  phone:
+    phoneForDb,
+
+  businessName:
+    updatedJob.business_name || "",
+
+  reviewUrl:
+    updatedJob.review_url || "",
+
+  price:
+    updatedJob.price || "",
+});
 
   await saveMessage({
     customerId: customer.id,
