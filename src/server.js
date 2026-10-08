@@ -2,6 +2,10 @@ import "dotenv/config";
 import express from "express";
 
 import {
+  appendJobToGoogleSheet,
+} from "./services/googleSheetsService.js";
+
+import {
   getCustomerByPlatformUserId,
   getConversationByCustomerId,
   getOrCreateCustomer,
@@ -2053,6 +2057,68 @@ app.get("/test-sales-quote", async (req, res) => {
 // =========================================================
 // START SERVER
 // =========================================================
+
+app.get("/test-google-sheet", async (req, res) => {
+  try {
+
+    const result =
+      await appendJobToGoogleSheet({
+        jobId:
+          "TEST_JOB_001",
+
+        customerId:
+          "TEST_CUSTOMER_001",
+
+        customerName:
+          "Test Customer",
+
+        platform:
+          "line",
+
+        phone:
+          "+66812345678",
+
+        businessName:
+          "Wraptor Thailand",
+
+        reviewUrl:
+          "https://www.google.com/maps/reviews/test",
+
+        price:
+          5000,
+
+        status:
+          "processing",
+
+        startedAt:
+          new Date().toISOString(),
+
+        removedAt:
+          "",
+
+        paidAt:
+          "",
+      });
+
+    res.status(200).json({
+      ok: true,
+      sheetResult: result,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "TEST GOOGLE SHEET ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error:
+        error.message,
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(
