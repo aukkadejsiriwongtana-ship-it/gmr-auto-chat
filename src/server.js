@@ -10,6 +10,9 @@ import {
   updateLastUserMessage,
   updateLastBotMessage,
   createJob,
+  getLatestJobByCustomerId,
+  updateJob,
+  saveReviewCandidate,
 } from "./repositories/gmrRepository.js";
 
 import {
