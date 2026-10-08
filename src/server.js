@@ -485,7 +485,138 @@ async function processTestMessage({
     };
   }
 
+// -------------------------------------------------------
+// 7. MAP_FOUND_WAITING_CONFIRMATION
+// -------------------------------------------------------
 
+if (
+  conversation.state ===
+  GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION
+) {
+  const normalized = String(message || "")
+    .trim()
+    .toLowerCase();
+
+  const yesWords = [
+    "ใช่",
+    "ใช่ครับ",
+    "ใช่ค่ะ",
+    "ถูกต้อง",
+    "ถูกครับ",
+    "ถูกค่ะ",
+    "yes",
+    "y",
+    "yeah",
+    "yep",
+    "ok",
+    "okay",
+  ];
+
+  const noWords = [
+    "ไม่ใช่",
+    "ไม่ใช่ครับ",
+    "ไม่ใช่ค่ะ",
+    "ผิด",
+    "ผิดร้าน",
+    "no",
+    "n",
+    "nope",
+  ];
+
+  const isYes = yesWords.includes(normalized);
+  const isNo = noWords.includes(normalized);
+
+  // -----------------------------------------------------
+  // ลูกค้าตอบ "ใช่"
+  // -----------------------------------------------------
+
+  if (isYes) {
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      mapConfirmed: true,
+      botReply: null,
+      nextAction: "CHECK_GOOGLE_REVIEWS",
+    };
+  }
+
+  // -----------------------------------------------------
+  // ลูกค้าตอบ "ไม่ใช่"
+  // → HANDOFF
+  // -----------------------------------------------------
+
+  if (isNo) {
+    const nextState = transitionState(
+      conversation.state,
+      GMR_STATES.HANDOFF
+    );
+
+    await updateConversationState({
+      customerId: customer.id,
+      state: nextState,
+      handoff: true,
+      handoffReason: "CUSTOMER_REJECTED_MAP",
+    });
+
+    const botReply =
+      "รับทราบครับ เดี๋ยวให้เจ้าหน้าที่ช่วยตรวจสอบ Google Map ที่ถูกต้องให้อีกครั้งครับ";
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: nextState,
+      mapConfirmed: false,
+      handoff: true,
+      botReply,
+    };
+  }
+
+  // -----------------------------------------------------
+  // ลูกค้าพิมพ์อย่างอื่น
+  // -----------------------------------------------------
+
+  const botReply =
+    'รบกวนยืนยันว่าเป็น Google Map นี้หรือไม่ครับ พิมพ์ "ใช่" หรือ "ไม่ใช่" ได้เลยครับ';
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    botReply,
+  };
+}
+
+  
   // -------------------------------------------------------
   // OTHER STATES
   // -------------------------------------------------------
