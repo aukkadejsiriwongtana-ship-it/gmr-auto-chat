@@ -26,11 +26,17 @@ import {
   searchPlaceByText,
 } from "./services/googleMapsService.js";
 
+import {
+  getPlaceReviews,
+} from "./services/googleReviewService.js";
+
 const app = express();
 
 const PORT = process.env.PORT || 10000;
 
 app.use(express.json());
+
+
 
 
 // =========================================================
@@ -764,6 +770,38 @@ app.get("/test-map-search", async (req, res) => {
       ok: false,
       error:
         error.message,
+    });
+  }
+});
+
+app.get("/test-place-reviews", async (req, res) => {
+  try {
+    const placeId = req.query.placeId;
+
+    if (!placeId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing placeId",
+      });
+    }
+
+    const result =
+      await getPlaceReviews(placeId);
+
+    res.status(200).json({
+      ok: true,
+      result,
+    });
+
+  } catch (error) {
+    console.error(
+      "TEST PLACE REVIEWS ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error: error.message,
     });
   }
 });
