@@ -2033,36 +2033,59 @@ if (
   const thaiPhonePattern =
     /^(?:\+66|0)\d{8,9}$/;
 
-  if (
-    !thaiPhonePattern.test(
-      normalizedPhone
-    )
-  ) {
-    const botReply =
-      "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678";
-
-    await saveMessage({
-      customerId: customer.id,
+ if (
+  !thaiPhonePattern.test(
+    normalizedPhone
+  )
+) {
+  const faqResult =
+    await sendGlobalFaqIfMatched({
+      customer,
+      conversation,
       platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
+      message,
     });
 
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
+  if (faqResult.matched) {
     return {
       ok: true,
       customerId: customer.id,
       stateBefore: conversation.state,
       stateAfter: conversation.state,
       phoneAccepted: false,
-      botReply,
+      faqMatched: true,
+      botReply:
+        faqResult.botReply,
+      note:
+        "Global FAQ answered while waiting for phone. State preserved.",
     };
   }
+
+  const botReply =
+    "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678";
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    phoneAccepted: false,
+    botReply,
+  };
+}
 
 
   // แปลง 0812345678 -> +66812345678
