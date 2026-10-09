@@ -2925,6 +2925,9 @@ if (
       }
     );
 
+    // กันไม่ให้รูปไหลเข้า flow ข้อความเดิม
+    continue;
+
   } catch (error) {
     console.error(
       "LINE IMAGE DOWNLOAD FAILED:",
