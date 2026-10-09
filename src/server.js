@@ -2970,14 +2970,7 @@ if (
 
   continue;
 }
-
-
-const paymentJob =
-  await getJobById(
-    pendingPayment.job_id
-  );
-
-
+    
     const paymentJob =
       await getJobById(
         pendingPayment.job_id
