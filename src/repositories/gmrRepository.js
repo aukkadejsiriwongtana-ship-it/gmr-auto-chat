@@ -650,6 +650,26 @@ export async function getJobByLineGroupMessageId(
   return data;
 }
 
+export async function getJobById(
+  jobId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "id",
+        jobId
+      )
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 
 export async function getCustomerById(
   customerId
