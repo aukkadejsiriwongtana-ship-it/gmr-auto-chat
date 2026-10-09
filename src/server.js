@@ -1223,6 +1223,7 @@ if (
     );
 
   // update job ให้ผูกกับ review ที่เลือก
+  const updatedJob =
   await updateJob(
     latestJob.id,
     {
@@ -1249,6 +1250,42 @@ if (
     handoff: false,
     handoffReason: null,
   });
+
+  try {
+  const lineGroupResult =
+    await sendJobToLineGroup({
+      jobId:
+        updatedJob.id,
+
+      customerName:
+        customer.display_name || "",
+
+      businessName:
+        updatedJob.business_name || "",
+
+      reviewerName:
+        selected.reviewer_name || "",
+
+      reviewUrl:
+        selected.review_url || "",
+    });
+
+  if (lineGroupResult?.messageId) {
+    await updateJob(
+      updatedJob.id,
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
+      }
+    );
+  }
+
+} catch (error) {
+  console.error(
+    "PRICE REQUEST LINE GROUP FAILED:",
+    error
+  );
+}
 
   const botReply =
     "รับทราบครับ เดี๋ยวเจ้าหน้าที่ตรวจสอบและแจ้งราคาสำหรับรีวิวนี้ให้ครับ";
