@@ -120,7 +120,12 @@ const recipientNameMatch =
   Boolean(expectedName) &&
   Boolean(slipRecipientName) &&
   slipRecipientName === expectedName;
-
+  
+if (!recipientNameMatch) {
+  reasons.push(
+    "RECIPIENT_NAME_MISMATCH"
+  );
+}
   // -----------------------------------------
   // BILLER ID CHECK
   // -----------------------------------------
