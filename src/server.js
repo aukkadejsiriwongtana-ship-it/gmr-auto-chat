@@ -1545,34 +1545,28 @@ return {
       ) || null;
   }
 
-  // ยังเลือกไม่สำเร็จ
-  if (!selectedReview) {
-    const botReply =
-      `เลือกรายการที่ต้องการดำเนินการได้เลยครับ โดยพิมพ์หมายเลข 1-${candidates.length} หรือส่งลิงก์รีวิวกลับมาได้ครับ`;
+ // ยังเลือกไม่สำเร็จ
+if (!selectedReview) {
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason:
+      "UNHANDLED_MESSAGE_IN_REVIEW_SELECTION",
+  });
 
-    await saveMessage({
-      customerId: customer.id,
-      platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
-    });
-
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
-    return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      selected: false,
-      botReply,
-    };
-  }
-
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    selected: false,
+    botReply: null,
+    softHandoff: true,
+    note:
+      "Human attention requested while waiting for review selection",
+  };
+}
   // mark ว่าเลือกแล้ว
   const selected =
     await selectReviewCandidate(
