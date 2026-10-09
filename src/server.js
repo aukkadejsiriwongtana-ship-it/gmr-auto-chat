@@ -20,6 +20,7 @@ import {
 
 import {
   getCustomerByPlatformUserId,
+  getCustomerById,
   getConversationByCustomerId,
   getOrCreateCustomer,
   getOrCreateConversation,
@@ -30,6 +31,7 @@ import {
   updateLastBotMessage,
   createJob,
   getLatestJobByCustomerId,
+  getJobByLineGroupMessageId,
   updateJob,
   saveReviewCandidate,
   getReviewCandidatesByJobId,
@@ -2200,6 +2202,246 @@ app.get("/test-google-sheet", async (req, res) => {
   }
 });
 
+async function processLineGroupPrice({
+  quotedMessageId,
+  text,
+}) {
+  if (!quotedMessageId) {
+    return {
+      ok: false,
+      handled: false,
+      reason: "NOT_A_REPLY",
+    };
+  }
+
+  // รองรับ:
+  // 5900
+  // 5,900
+  // 5900 บาท
+  // 5,900 บาท
+  const normalizedText =
+    String(text || "")
+      .trim()
+      .replace(/,/g, "");
+
+  const priceMatch =
+    normalizedText.match(
+      /^(\d+(?:\.\d{1,2})?)\s*(?:บาท|thb)?$/i
+    );
+
+  if (!priceMatch) {
+    return {
+      ok: false,
+      handled: true,
+      reason: "INVALID_PRICE",
+    };
+  }
+
+  const amount =
+    Number(priceMatch[1]);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    return {
+      ok: false,
+      handled: true,
+      reason: "INVALID_PRICE",
+    };
+  }
+
+
+  // หา Job จากข้อความที่เซลล์กด Reply
+  const job =
+    await getJobByLineGroupMessageId(
+      quotedMessageId
+    );
+
+  if (!job) {
+    return {
+      ok: false,
+      handled: true,
+      reason: "JOB_NOT_FOUND",
+    };
+  }
+
+
+  if (
+    job.status !== "waiting_price"
+  ) {
+    return {
+      ok: false,
+      handled: true,
+      reason: "JOB_NOT_WAITING_PRICE",
+      jobId: job.id,
+    };
+  }
+
+
+  // หา Customer ของ Job นี้
+  const customer =
+    await getCustomerById(
+      job.customer_id
+    );
+
+  if (!customer) {
+    throw new Error(
+      "Customer not found for price job"
+    );
+  }
+
+
+  const conversation =
+    await getConversationByCustomerId(
+      customer.id
+    );
+
+  if (!conversation) {
+    throw new Error(
+      "Conversation not found for price job"
+    );
+  }
+
+
+  if (
+    conversation.state !==
+    GMR_STATES.WAITING_PRICE
+  ) {
+    return {
+      ok: false,
+      handled: true,
+      reason: "CUSTOMER_NOT_WAITING_PRICE",
+      currentState:
+        conversation.state,
+    };
+  }
+
+
+  const salesMessage =
+    `สำหรับรีวิวดังกล่าว ราคา ${amount.toLocaleString("th-TH")} บาท/รีวิว`;
+
+
+  // บันทึกราคา
+  await updateJob(
+    job.id,
+    {
+      price: amount,
+      currency: "THB",
+      status: "waiting_confirm",
+    }
+  );
+
+
+  // สร้าง Quote
+  const quote =
+    await createQuote({
+      jobId: job.id,
+      amount,
+      currency: "THB",
+      quotedBy:
+        "line_group_sales",
+      quoteMessage:
+        salesMessage,
+      script3Sent:
+        false,
+    });
+
+
+  // ดึง Script 3
+  const template =
+    await getTemplate(
+      "script_3_after_quote",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "script_3_after_quote template not found"
+    );
+  }
+
+
+  const botReply =
+    `${salesMessage}\n\n${template.content}`;
+
+
+  // WAITING_PRICE -> WAITING_CONFIRM
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_CONFIRM
+    );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+    state:
+      nextState,
+    handoff:
+      false,
+    handoffReason:
+      null,
+  });
+
+
+  await updateQuote(
+    quote.id,
+    {
+      script3_sent:
+        true,
+    }
+  );
+
+
+  // ส่งหาลูกค้าจริง
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
+    platformUserId:
+      customer.platform_user_id,
+    text:
+      botReply,
+  });
+
+
+  // เก็บ outbound log
+  await saveMessage({
+    customerId:
+      customer.id,
+    platform:
+      customer.platform,
+    direction:
+      "outbound",
+    messageType:
+      "text",
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+    handled: true,
+    jobId:
+      job.id,
+    customerId:
+      customer.id,
+    amount,
+    stateBefore:
+      conversation.state,
+    stateAfter:
+      nextState,
+  };
+}
+
 app.post("/line/webhook", async (req, res) => {
   try {
     const LINE_CHANNEL_SECRET =
@@ -2274,18 +2516,148 @@ app.post("/line/webhook", async (req, res) => {
       // ไม่ส่งเข้าระบบลูกค้า
       // ========================================
 
-      if (
-        event.source?.type === "group"
-      ) {
-        console.log(
-          "LINE GROUP EVENT:",
-          JSON.stringify(
-            event.source
-          )
-        );
+    if (
+  event.source?.type === "group"
+) {
+  const LINE_GROUP_ID =
+    process.env.LINE_GROUP_ID;
 
-        continue;
-      }
+  // รับคำสั่งเฉพาะ Group ของทีมเรา
+  if (
+    event.source.groupId !==
+    LINE_GROUP_ID
+  ) {
+    continue;
+  }
+
+
+  // รับเฉพาะข้อความ text
+  if (
+    event.type !== "message" ||
+    event.message?.type !== "text"
+  ) {
+    continue;
+  }
+
+
+  const groupText =
+    event.message.text || "";
+
+  const quotedMessageId =
+    event.message
+      ?.quotedMessageId || null;
+
+
+  console.log(
+    "LINE SALES GROUP PRICE:",
+    {
+      text:
+        groupText,
+      quotedMessageId,
+    }
+  );
+
+
+  try {
+    const priceResult =
+      await processLineGroupPrice({
+        quotedMessageId,
+        text:
+          groupText,
+      });
+
+
+    // ไม่ได้กด Reply
+    if (
+      priceResult.reason ===
+      "NOT_A_REPLY"
+    ) {
+      continue;
+    }
+
+
+    // Reply ถูกงาน แต่พิมพ์ราคาไม่ถูก
+    if (
+      priceResult.reason ===
+      "INVALID_PRICE"
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ กรุณาพิมพ์เฉพาะราคา เช่น 5900"
+      );
+
+      continue;
+    }
+
+
+    // หา Job จาก Reply นี้ไม่เจอ
+    if (
+      priceResult.reason ===
+      "JOB_NOT_FOUND"
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ หางานนี้ไม่เจอ กรุณา Reply ข้อความ 💰 รอเสนอราคา ของงานนั้นครับ"
+      );
+
+      continue;
+    }
+
+
+    // งานนี้ถูกเสนอราคาไปแล้ว
+    if (
+      priceResult.reason ===
+      "JOB_NOT_WAITING_PRICE"
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ งานนี้ไม่ได้อยู่ในสถานะรอราคาแล้วครับ"
+      );
+
+      continue;
+    }
+
+
+    if (
+      priceResult.reason ===
+      "CUSTOMER_NOT_WAITING_PRICE"
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ ลูกค้ารายนี้ไม่ได้อยู่ในขั้นตอนรอราคาแล้วครับ"
+      );
+
+      continue;
+    }
+
+
+    // สำเร็จ
+    if (priceResult.ok) {
+      await replyLineTextMessage(
+        event.replyToken,
+        `✅ แจ้งราคาลูกค้าแล้ว\nราคา ${priceResult.amount.toLocaleString("th-TH")} บาท/รีวิว`
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      "LINE GROUP PRICE ERROR:",
+      error
+    );
+
+    try {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ระบบแจ้งราคาไม่สำเร็จ กรุณาลองใหม่อีกครั้ง"
+      );
+    } catch {
+      // ไม่ต้อง throw ซ้ำ
+    }
+  }
+
+
+  continue;
+}
 
 
       // ========================================
