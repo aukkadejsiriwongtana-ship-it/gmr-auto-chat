@@ -41,8 +41,9 @@ import {
   createJob,
   getLatestJobByCustomerId,
   hasPaymentByCustomerId,
-  isPaymentReferenceUsed,
-  getLatestJobWithMapByCustomerId,
+isPaymentReferenceUsed,
+createPayment,
+getLatestJobWithMapByCustomerId,
   getJobByLineGroupMessageId,
   updateJob,
   saveReviewCandidate,
@@ -3082,6 +3083,104 @@ if (!transactionReference) {
 } else {
   paymentVerification.checks.referenceUnique =
     true;
+}
+
+  // -----------------------------------------
+// SAVE VERIFIED PAYMENT
+// -----------------------------------------
+
+const paymentAllowed =
+  latestJob.status ===
+  "removed_waiting_payment";
+
+if (!paymentAllowed) {
+  paymentVerification.verified = false;
+  paymentVerification.status =
+    "NEEDS_REVIEW";
+
+  if (
+    !paymentVerification.reasons.includes(
+      "JOB_NOT_WAITING_PAYMENT"
+    )
+  ) {
+    paymentVerification.reasons.push(
+      "JOB_NOT_WAITING_PAYMENT"
+    );
+  }
+
+  paymentVerification.checks.jobWaitingPayment =
+    false;
+} else {
+  paymentVerification.checks.jobWaitingPayment =
+    true;
+}
+
+
+if (paymentVerification.verified) {
+  const verifiedAt =
+    new Date().toISOString();
+
+  const payment =
+    await createPayment({
+      jobId:
+        latestJob.id,
+
+      amount:
+        latestJob.price,
+
+      paymentMethod:
+        process.env.PAYMENT_RECIPIENT_TYPE ||
+        "KTC_BILLER",
+
+      slipReceived:
+        true,
+
+      slipUrl:
+        null,
+
+      paymentVerified:
+        true,
+
+      verifiedAt,
+
+      transactionReference:
+        transactionReference,
+
+      transactionDate:
+        imageClassification.transactionDate ||
+        null,
+
+      transactionTime:
+        imageClassification.transactionTime ||
+        null,
+
+      recipientName:
+        imageClassification.recipientName ||
+        imageClassification.recipientBankOrBiller ||
+        null,
+
+      recipientBillerId:
+        imageClassification.recipientBillerId ||
+        null,
+
+      recipientCardLast4:
+        imageClassification.recipientCardLast4 ||
+        null,
+    });
+
+  console.log(
+    "PAYMENT SAVED:",
+    {
+      paymentId:
+        payment.id,
+
+      jobId:
+        latestJob.id,
+
+      verified:
+        true,
+    }
+  );
 }
 
   console.log(
