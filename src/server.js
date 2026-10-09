@@ -987,28 +987,26 @@ directRating,
   const botReply =
     "เช็คแล้วดำเนินการได้ครับ";
 
-
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
-  });
-
-
-  await updateLastBotMessage(
+await saveMessage({
+  customerId:
     customer.id,
-    botReply
-  );
+
+  platform,
+
+  direction:
+    "outbound",
+
+  messageType:
+    "text",
+
+  messageText:
+    botReply,
+});
+
+await updateLastBotMessage(
+  customer.id,
+  botReply
+);
 
 
   // ========================================
@@ -1142,35 +1140,56 @@ directRating,
   const places =
     await searchPlaceByText(message);
 
-  // หาไม่เจอ
   if (!places.length) {
+  const botReply =
+    "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ";
 
-    const botReply =
-      "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ";
 
-    await saveMessage({
-      customerId: customer.id,
-      platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
-    });
-
-    await updateLastBotMessage(
+  await saveMessage({
+    customerId:
       customer.id,
-      botReply
-    );
 
-    return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      inputType: classification.type,
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
       botReply,
-      placeFound: false,
-    };
-  }
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok:
+      true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    inputType:
+      classification.type,
+
+    botReply,
+
+    placeFound:
+      false,
+  };
+}
 
 
   // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
@@ -1883,147 +1902,198 @@ if (recentOneStarReviews.length > 0) {
   // → WAITING_PRICE
   // -----------------------------------------------------
 
-  if (oneStarReviews.length > 0) {
+ if (oneStarReviews.length > 0) {
 
-    const template =
-      await getTemplate(
-        "script_1_old_review",
-        customer.language || "th"
-      );
+  const template =
+    await getTemplate(
+      "script_1_old_review",
+      customer.language || "th"
+    );
 
-    if (!template) {
-      throw new Error(
-        "script_1_old_review template not found"
-      );
-    }
-
-    const botReply =
-      template.content;
+  if (!template) {
+    throw new Error(
+      "script_1_old_review template not found"
+    );
+  }
 
 
-    const nextState =
-      transitionState(
-        conversation.state,
-        GMR_STATES.WAITING_PRICE
-      );
+  const botReply1 =
+    "จากที่เช็คบนแมพมี รีวิว 1 ดาวที่มีอายุงานนานแล้ว (> 2 สัปดาห์)\n\n" +
+    "ขั้นตอนการยื่นตรวจสอบจะทำได้ยากกว่า\n\n" +
+    "หากมีรีวิวเพิ่งลงภายใน 2 สัปดาห์ แนะนำส่งมาให้เช็คทันที จะดำเนินการได้ง่ายกว่าครับ";
 
 
-    await updateConversationState({
-      customerId:
-        customer.id,
-
-      state:
-        nextState,
-
-      handoff:
-        false,
-
-      handoffReason:
-        null,
-    });
+  const botReply2 =
+    "แต่ถ้ายังต้องการดำเนินการกับรีวิว 1 ดาวตัวปัจจุบัน\n\n" +
+    "ส่งลิงก์รีวิว หรือรูปรีวิวที่ต้องการลบมาได้เลยครับ เดี๋ยวเช็คราคาให้ก่อน";
 
 
-    const updatedJob =
-  await updateJob(
-    latestJob.id,
-    {
-      review_case:
-        "old_review",
+  const botReply =
+    null;
 
-      status:
-        "waiting_price",
-    }
-  );
 
-  try {
-  const lineGroupResult =
-    await sendJobToLineGroup({
-      jobId:
-        updatedJob.id,
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PRICE
+    );
 
-      jobType:
-        "old_review",
 
-  customerName:
-  customer.display_name ||
-  "",
+  await updateConversationState({
+    customerId:
+      customer.id,
 
-      businessName:
-        updatedJob.business_name || "",
+    state:
+      nextState,
 
-      mapUrl:
-        updatedJob.map_url || "",
-    });
+    handoff:
+      false,
 
-  if (lineGroupResult?.messageId) {
+    handoffReason:
+      null,
+  });
+
+
+  const updatedJob =
     await updateJob(
-      updatedJob.id,
+      latestJob.id,
       {
-        line_group_message_id:
-          lineGroupResult.messageId,
+        review_case:
+          "old_review",
+
+        status:
+          "waiting_price",
       }
     );
-  }
-
-} catch (error) {
-  console.error(
-    "OLD REVIEW PRICE REQUEST FAILED:",
-    error
-  );
-}
 
 
-    await saveMessage({
-      customerId:
-        customer.id,
-
-      platform,
-
-      direction:
-        "outbound",
-
-      messageType:
-        "text",
-
-      messageText:
-        botReply,
-    });
+  await sendMessageToCustomer({
+    platform,
+    platformUserId,
+    text:
+      botReply1,
+  });
 
 
-    await updateLastBotMessage(
-      customer.id,
-      botReply
+  await sendMessageToCustomer({
+    platform,
+    platformUserId,
+    text:
+      botReply2,
+  });
+
+
+  try {
+    const lineGroupResult =
+      await sendJobToLineGroup({
+        jobId:
+          updatedJob.id,
+
+        jobType:
+          "old_review",
+
+        customerName:
+          customer.display_name ||
+          "",
+
+        businessName:
+          updatedJob.business_name ||
+          "",
+
+        mapUrl:
+          updatedJob.map_url ||
+          "",
+      });
+
+
+    if (
+      lineGroupResult?.messageId
+    ) {
+      await updateJob(
+        updatedJob.id,
+        {
+          line_group_message_id:
+            lineGroupResult.messageId,
+        }
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      "OLD REVIEW PRICE REQUEST FAILED:",
+      error
     );
-
-
-    return {
-      ok: true,
-
-      customerId:
-        customer.id,
-
-      jobId:
-        latestJob.id,
-
-      stateBefore:
-        conversation.state,
-
-      stateAfter:
-        nextState,
-
-      mapConfirmed:
-        true,
-
-      reviewCase:
-        "old_review",
-
-      oneStarCount:
-        oneStarReviews.length,
-
-      botReply,
-    };
   }
 
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply1,
+  });
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply2,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply2
+  );
+
+
+  return {
+    ok:
+      true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    mapConfirmed:
+      true,
+
+    reviewCase:
+      "old_review",
+
+    oneStarCount:
+      oneStarReviews.length,
+
+    botReply,
+  };
+}
 
   // -----------------------------------------------------
   // 6. Lowest แล้วไม่พบ 1 ดาว
