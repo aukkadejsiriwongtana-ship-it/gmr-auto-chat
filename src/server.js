@@ -808,51 +808,15 @@ if (
     directResult.review;
 
 
-  // ========================================
-  // รับเฉพาะรีวิว 1 ดาว
-  // ========================================
+// ========================================
+// รีวิวที่ลูกค้าส่งมาโดยตรง
+// รับดำเนินการได้ทุก Rating
+// ========================================
 
-  if (
-    Number(
-      directReview.rating
-    ) !== 1
-  ) {
-    const botReply =
-      "ตอนนี้ทางเรารับดำเนินการเฉพาะรีวิว 1 ดาวครับ";
-
-    await saveMessage({
-      customerId:
-        customer.id,
-      platform,
-      direction:
-        "outbound",
-      messageType:
-        "text",
-      messageText:
-        botReply,
-    });
-
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
-    return {
-      ok: true,
-      customerId:
-        customer.id,
-      stateBefore:
-        conversation.state,
-      stateAfter:
-        conversation.state,
-      directReview: true,
-      accepted: false,
-      rating:
-        directReview.rating,
-      botReply,
-    };
-  }
-
+const directRating =
+  Number(
+    directReview.rating
+  ) || null;
 
   // ========================================
   // รีวิวถูกต้อง → สร้าง Job
@@ -910,8 +874,8 @@ if (
       directReview.reviewerName,
 
     rating:
-      directReview.rating,
-
+directRating,
+    
     reviewText:
       directReview.text,
 
@@ -1082,7 +1046,7 @@ if (
       directReview.reviewerName,
 
     rating:
-      directReview.rating,
+  directRating,
 
     botReply,
   };
