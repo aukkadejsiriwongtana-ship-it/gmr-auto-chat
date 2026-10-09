@@ -2920,6 +2920,19 @@ if (
       }
     );
 
+    await updateConversationState({
+  customerId:
+    paymentCustomer.id,
+
+  state:
+    GMR_STATES.WAITING_MAP,
+
+  handoff:
+    false,
+
+  handoffReason:
+    null,
+});
 
     try {
       await updateJobInGoogleSheet({
@@ -3650,8 +3663,12 @@ if (!transactionReference) {
 // -----------------------------------------
 
 const paymentAllowed =
-  latestJob.status ===
-  "removed_waiting_payment";
+  [
+    "waiting_payment",
+    "removed_waiting_payment",
+  ].includes(
+    latestJob.status
+  );
 
 if (!paymentAllowed) {
   paymentVerification.verified = false;
@@ -3728,6 +3745,99 @@ if (paymentVerification.verified) {
         null,
     });
 
+await updateJob(
+  latestJob.id,
+  {
+    status:
+      "paid",
+
+    paid_at:
+      verifiedAt,
+  }
+);
+
+
+try {
+  await updateJobInGoogleSheet({
+    jobId:
+      latestJob.id,
+
+    status:
+      "paid",
+
+    paidAt:
+      verifiedAt,
+  });
+} catch (error) {
+  console.error(
+    "AUTO PAYMENT SHEET UPDATE FAILED:",
+    error
+  );
+}
+
+
+const customerReply =
+  "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
+
+
+try {
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
+
+    platformUserId:
+      customer.platform_user_id,
+
+    text:
+      customerReply,
+  });
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      customer.platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      customerReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    customerReply
+  );
+
+} catch (error) {
+  console.error(
+    "AUTO PAYMENT CUSTOMER REPLY FAILED:",
+    error
+  );
+}
+
+
+// งานนี้จบแล้ว
+// เตรียมรับงานใหม่จากลูกค้าคนเดิมได้ทันที
+await updateConversationState({
+  customerId:
+    customer.id,
+
+  state:
+    GMR_STATES.WAITING_MAP,
+
+  handoff:
+    false,
+
+  handoffReason:
+    null,
+});
+  
   console.log(
     "PAYMENT SAVED:",
     {
