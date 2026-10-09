@@ -551,6 +551,7 @@ export async function createPendingPayment({
   recipientName = null,
   recipientBillerId = null,
   recipientCardLast4 = null,
+  slipFilePath = null,
   verificationReasons = [],
 }) {
   const { data, error } =
@@ -579,6 +580,9 @@ export async function createPendingPayment({
           "pending",
         verification_reasons:
           verificationReasons,
+
+        slip_file_path:
+  slipFilePath,
       })
       .select()
       .single();
