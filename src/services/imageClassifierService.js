@@ -61,7 +61,11 @@ Return ONLY JSON in this exact structure:
   "amount": null,
   "bankName": null,
   "transactionDate": null,
-  "reference": null
+  "transactionTime": null,
+  "reference": null,
+  "recipientName": null,
+  "recipientBankOrBiller": null,
+  "recipientAccountMasked": null
 }
 
 Allowed type values:
