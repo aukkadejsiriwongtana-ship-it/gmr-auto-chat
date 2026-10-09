@@ -695,10 +695,10 @@ if (
   // 1. หา Job ล่าสุดของลูกค้า
   // -----------------------------------------------------
 
-  const latestJob =
-    await getLatestJobByCustomerId(
-      customer.id
-    );
+ const latestJob =
+  await getLatestJobWithMapByCustomerId(
+    customer.id
+  );
 
   if (!latestJob) {
     throw new Error(
