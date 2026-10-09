@@ -1488,8 +1488,7 @@ const imageReviews =
         jobId:
           updatedJob.id,
 
-        jobType:
-          "direct_review",
+        jobType: "image_review"
 
         customerName:
           customer.display_name ||
