@@ -4384,8 +4384,8 @@ if (
 
  if (!businessName) {
   const botReply =
-    "จากรูปนี้ยังไม่เห็นชื่อ Google Map ชัดเจนครับ\n\n" +
-    "รบกวนส่งภาพรีวิวที่เห็นชื่อ Google Map ด้านบน หรือส่งชื่อ/ลิงก์ Google Map มาได้เลยครับ";
+    
+    "รบกวนแจ้งชื่อแมพ หรือ ส่งชื่อลิงก์ Google Map เพื่อให้เช็ค code หลังบ้านให้ได้เลยครับ";
 
 
   await saveMessage({
