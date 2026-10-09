@@ -723,26 +723,151 @@ if (
     }
 
 
-    // -----------------------------------------------------
-    // REVIEW URL
-    // -----------------------------------------------------
+  // -----------------------------------------------------
+// REVIEW URL
+// DIRECT REVIEW FLOW 3.2
+// -----------------------------------------------------
 
-    if (
-      classification.type ===
-      INPUT_TYPES.REVIEW_URL
-    ) {
-      return {
-        ok: true,
-        customerId: customer.id,
-        stateBefore: conversation.state,
-        stateAfter: conversation.state,
-        inputType: classification.type,
-        confidence: classification.confidence,
-        botReply: null,
-        nextAction:
-          "DIRECT_REVIEW_FLOW_3_2",
-      };
+if (
+  classification.type ===
+  INPUT_TYPES.REVIEW_URL
+) {
+  const reviewUrl =
+    String(message || "").trim();
+
+  const job =
+    await createJob({
+      customerId:
+        customer.id,
+
+      reviewUrl,
+
+      reviewCase:
+        "direct_review",
+
+      reviewVisible:
+        true,
+
+      status:
+        "waiting_price",
+    });
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PRICE
+    );
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+  const botReply =
+    "เช็คแล้วดำเนินการได้ครับ";
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  try {
+    const lineGroupResult =
+      await sendJobToLineGroup({
+        jobId:
+          job.id,
+
+        jobType:
+          "direct_review",
+
+        customerName:
+          customer.display_name ||
+          "",
+
+        businessName:
+          "",
+
+        reviewerName:
+          "",
+
+        reviewAgeDays:
+          null,
+
+        reviewUrl:
+          reviewUrl,
+
+        mapUrl:
+          "",
+      });
+
+    if (lineGroupResult?.messageId) {
+      await updateJob(
+        job.id,
+        {
+          line_group_message_id:
+            lineGroupResult.messageId,
+        }
+      );
     }
+
+  } catch (error) {
+    console.error(
+      "DIRECT REVIEW PRICE REQUEST FAILED:",
+      error
+    );
+  }
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    inputType:
+      classification.type,
+
+    directReview:
+      true,
+
+    reviewUrl,
+
+    botReply,
+  };
+}
 
 
     // -----------------------------------------------------
