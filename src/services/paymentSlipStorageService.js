@@ -108,3 +108,30 @@ export async function uploadPaymentSlip({
       data.signedUrl,
   };
 }
+
+export async function deletePaymentSlip(
+  filePath
+) {
+  if (!filePath) {
+    return {
+      deleted: false,
+      reason: "NO_FILE_PATH",
+    };
+  }
+
+  const { error } =
+    await supabase.storage
+      .from(BUCKET_NAME)
+      .remove([
+        filePath,
+      ]);
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    deleted: true,
+    filePath,
+  };
+}
