@@ -1,6 +1,10 @@
 import "dotenv/config";
 import express from "express";
 
+import {
+  sendMessageToCustomer,
+} from "./services/customerMessagingService.js";
+
 
 import {
   appendJobToGoogleSheet,
@@ -2335,7 +2339,19 @@ app.get("/test-mark-removed", async (req, res) => {
   );
 }
 
-
+try {
+  await sendMessageToCustomer({
+    platform,
+    platformUserId,
+    text: botReply,
+  });
+} catch (error) {
+  console.error(
+    "CUSTOMER NOTIFY FAILED:",
+    error
+  );
+}
+    
     await saveMessage({
       customerId: customer.id,
       platform,
