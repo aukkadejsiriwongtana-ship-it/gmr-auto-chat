@@ -153,10 +153,17 @@ async function processTestMessage({
   }
 
 
+
+  
   // -------------------------------------------------------
   // 1. CUSTOMER
   // -------------------------------------------------------
-
+const existingCustomer =
+  await getCustomerByPlatformUserId(
+    platform,
+    platformUserId
+  );
+  
   const customer = await getOrCreateCustomer({
     platform,
     platformUserId,
@@ -193,7 +200,7 @@ async function processTestMessage({
     );
   }
 
-
+  
   // -------------------------------------------------------
   // 4. HANDOFF CHECK
   // -------------------------------------------------------
