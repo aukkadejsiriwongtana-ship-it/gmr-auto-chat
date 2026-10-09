@@ -99,19 +99,23 @@ if (dataId) {
       : [];
 
   return {
-    reviews:
-      reviews.map(
-        normalizeReview
-      ),
+  reviews:
+    reviews.map(
+      normalizeReview
+    ),
 
-    nextPageToken:
-      data.serpapi_pagination
-        ?.next_page_token ||
-      null,
+  nextPageToken:
+    data.serpapi_pagination
+      ?.next_page_token ||
+    null,
 
-    rawCount:
-      reviews.length,
-  };
+  rawCount:
+    reviews.length,
+
+  placeInfo:
+    data.place_info ||
+    null,
+};
 }
 
 
@@ -426,10 +430,13 @@ export async function getReviewFromDirectUrl(
 
 
   let nextPageToken =
-    null;
+  null;
 
-  let pageCount =
-    0;
+let placeInfo =
+  null;
+
+let pageCount =
+  0;
 
   const maxPages =
     5;
@@ -445,7 +452,13 @@ export async function getReviewFromDirectUrl(
 
         nextPageToken,
       });
-
+if (
+  !placeInfo &&
+  result.placeInfo
+) {
+  placeInfo =
+    result.placeInfo;
+}
 
     // ถ้ามี reviewId → หา review ตรงตัว
     if (reviewId) {
@@ -461,13 +474,20 @@ export async function getReviewFromDirectUrl(
 
       if (matchedReview) {
         return {
-          found: true,
-          reason: null,
-          dataId,
-          reviewId,
-          review:
-            matchedReview,
-        };
+  found: true,
+  reason: null,
+  dataId,
+  reviewId,
+
+  placeInfo,
+
+  businessName:
+    placeInfo?.title ||
+    null,
+
+  review:
+    matchedReview,
+};
       }
     }
 
@@ -499,11 +519,15 @@ export async function getReviewFromDirectUrl(
 
 
   return {
-    found: false,
-    reason:
-      "REVIEW_NOT_FOUND",
-    dataId,
-    reviewId,
-    review: null,
-  };
+  found: false,
+  reason:
+    "REVIEW_NOT_FOUND",
+  dataId,
+  reviewId,
+  placeInfo,
+  businessName:
+    placeInfo?.title ||
+    null,
+  review: null,
+};
 }
