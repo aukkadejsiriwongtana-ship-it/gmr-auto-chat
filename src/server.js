@@ -41,6 +41,7 @@ import {
   createJob,
   getLatestJobByCustomerId,
   hasPaymentByCustomerId,
+  isPaymentReferenceUsed,
   getLatestJobWithMapByCustomerId,
   getJobByLineGroupMessageId,
   updateJob,
@@ -3031,6 +3032,54 @@ if (
       expectedAmount:
         latestJob.price,
     });
+
+  const transactionReference =
+  imageClassification.reference
+    ? String(
+        imageClassification.reference
+      ).trim()
+    : null;
+
+let referenceAlreadyUsed = false;
+
+if (transactionReference) {
+  referenceAlreadyUsed =
+    await isPaymentReferenceUsed(
+      transactionReference
+    );
+}
+
+
+// -----------------------------------------
+// REFERENCE CHECK
+// -----------------------------------------
+
+if (!transactionReference) {
+  paymentVerification.verified = false;
+  paymentVerification.status =
+    "NEEDS_REVIEW";
+
+  paymentVerification.reasons.push(
+    "PAYMENT_REFERENCE_MISSING"
+  );
+
+  paymentVerification.checks.referenceUnique =
+    false;
+} else if (referenceAlreadyUsed) {
+  paymentVerification.verified = false;
+  paymentVerification.status =
+    "NEEDS_REVIEW";
+
+  paymentVerification.reasons.push(
+    "PAYMENT_REFERENCE_ALREADY_USED"
+  );
+
+  paymentVerification.checks.referenceUnique =
+    false;
+} else {
+  paymentVerification.checks.referenceUnique =
+    true;
+}
 
   console.log(
     "PAYMENT VERIFICATION:",
