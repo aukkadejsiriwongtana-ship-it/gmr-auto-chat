@@ -788,6 +788,32 @@ export async function getReviewCandidatesByJobId(
   return data || [];
 }
 
+export async function getReviewsByJobId(
+  jobId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_reviews")
+      .select("*")
+      .eq(
+        "job_id",
+        jobId
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 
 export async function selectReviewCandidate(
   reviewId
