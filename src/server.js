@@ -4382,20 +4382,61 @@ if (
   // → แจ้ง Sales
   // ----------------------------------------
 
-  if (!businessName) {
-    await triggerHumanAttention({
-      customer,
-      conversation,
+ if (!businessName) {
+  const botReply =
+    "จากรูปนี้ยังไม่เห็นชื่อ Google Map ชัดเจนครับ\n\n" +
+    "รบกวนส่งภาพรีวิวที่เห็นชื่อ Google Map ด้านบน หรือส่งชื่อ/ลิงก์ Google Map มาได้เลยครับ";
 
-      message:
-        "[ลูกค้าส่งรูปรีวิว]",
 
-      reason:
-        "REVIEW_SCREENSHOT_BUSINESS_NAME_NOT_FOUND",
-    });
+  await saveMessage({
+    customerId:
+      customer.id,
 
-    continue;
-  }
+    platform:
+      "line",
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  await replyLineTextMessage(
+    replyToken,
+    botReply
+  );
+
+
+  console.log(
+    "REVIEW SCREENSHOT BUSINESS NAME MISSING:",
+    {
+      customerId:
+        customer.id,
+
+      reviewerName:
+        imageClassification.reviewerName ||
+        null,
+
+      rating:
+        imageClassification.rating ||
+        null,
+    }
+  );
+
+
+  continue;
+}
 
 
   // ----------------------------------------
