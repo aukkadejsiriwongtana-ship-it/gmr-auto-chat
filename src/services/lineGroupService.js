@@ -61,14 +61,35 @@ export async function sendJobToLineGroup({
     }
   );
 
-  const data =
-    await response.text();
+  const responseText =
+  await response.text();
 
-  if (!response.ok) {
-    throw new Error(
-      `LINE push failed: ${response.status} ${data}`
-    );
+let data = {};
+
+if (responseText) {
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    data = {};
   }
-
-  return true;
 }
+
+if (!response.ok) {
+  throw new Error(
+    `LINE push failed: ${response.status} ${responseText}`
+  );
+}
+
+const messageId =
+  data?.sentMessages?.[0]?.id || null;
+
+if (!messageId) {
+  throw new Error(
+    "LINE push succeeded but no sent message ID was returned"
+  );
+}
+
+return {
+  ok: true,
+  messageId: String(messageId),
+};
