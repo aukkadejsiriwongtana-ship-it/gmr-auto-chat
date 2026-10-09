@@ -13,22 +13,39 @@ if (!SERPAPI_API_KEY) {
 // =========================================================
 
 async function fetchGoogleMapsReviews({
-  placeId,
+  placeId = null,
+  dataId = null,
   sortBy,
   nextPageToken = null,
 }) {
-  if (!placeId) {
+  if (!placeId && !dataId) {
     throw new Error(
-      "Missing placeId"
+      "Missing placeId or dataId"
     );
   }
 
-  const params =
-    new URLSearchParams({
-      engine: "google_maps_reviews",
-      place_id: placeId,
-      api_key: SERPAPI_API_KEY,
-    });
+const params =
+  new URLSearchParams({
+    engine:
+      "google_maps_reviews",
+
+    api_key:
+      SERPAPI_API_KEY,
+  });
+
+if (placeId) {
+  params.set(
+    "place_id",
+    placeId
+  );
+}
+
+if (dataId) {
+  params.set(
+    "data_id",
+    dataId
+  );
+}
 
   if (sortBy) {
     params.set(
@@ -291,4 +308,202 @@ export function getOneStarReviews(
         review.rating
       ) === 1
   );
+}
+
+// =========================================================
+// DIRECT REVIEW URL
+// =========================================================
+
+export function parseGoogleReviewUrl(
+  reviewUrl
+) {
+  const rawUrl =
+    String(reviewUrl || "").trim();
+
+  if (!rawUrl) {
+    return {
+      dataId: null,
+      reviewId: null,
+    };
+  }
+
+  let decodedUrl =
+    rawUrl;
+
+  try {
+    decodedUrl =
+      decodeURIComponent(
+        rawUrl
+      );
+  } catch {
+    // ใช้ rawUrl ต่อ
+  }
+
+  // ------------------------------------------
+  // Google Maps data_id
+  // ตัวอย่าง:
+  // 0x311d7ddd69a06ea3:0x75f8ea284b2c0c81
+  // ------------------------------------------
+
+  const dataIdMatch =
+    decodedUrl.match(
+      /(0x[0-9a-f]+:0x[0-9a-f]+)/i
+    );
+
+  const dataId =
+    dataIdMatch?.[1] ||
+    null;
+
+
+  // ------------------------------------------
+  // Review ID
+  // ลิงก์ Google Review มักมี:
+  // !1s<review_id>
+  //
+  // ต้องกันไม่ให้จับ data_id
+  // ------------------------------------------
+
+  const oneSMatches =
+    [
+      ...decodedUrl.matchAll(
+        /!1s([^!/?&]+)/g
+      ),
+    ];
+
+  let reviewId =
+    null;
+
+  for (
+    const match of oneSMatches
+  ) {
+    const value =
+      match?.[1] || "";
+
+    if (
+      value &&
+      !value.startsWith("0x")
+    ) {
+      reviewId =
+        value;
+
+      break;
+    }
+  }
+
+  return {
+    dataId,
+    reviewId,
+  };
+}
+
+
+// =========================================================
+// GET REVIEW FROM DIRECT URL
+// =========================================================
+
+export async function getReviewFromDirectUrl(
+  reviewUrl
+) {
+  const {
+    dataId,
+    reviewId,
+  } =
+    parseGoogleReviewUrl(
+      reviewUrl
+    );
+
+  if (!dataId) {
+    return {
+      found: false,
+      reason:
+        "DATA_ID_NOT_FOUND",
+      dataId: null,
+      reviewId,
+      placeInfo: null,
+      review: null,
+    };
+  }
+
+
+  let nextPageToken =
+    null;
+
+  let pageCount =
+    0;
+
+  const maxPages =
+    5;
+
+
+  do {
+    const result =
+      await fetchGoogleMapsReviews({
+        dataId,
+
+        sortBy:
+          "newestFirst",
+
+        nextPageToken,
+      });
+
+
+    // ถ้ามี reviewId → หา review ตรงตัว
+    if (reviewId) {
+      const matchedReview =
+        result.reviews.find(
+          (review) =>
+            String(
+              review.reviewId ||
+              ""
+            ) ===
+            String(reviewId)
+        );
+
+      if (matchedReview) {
+        return {
+          found: true,
+          reason: null,
+          dataId,
+          reviewId,
+          review:
+            matchedReview,
+        };
+      }
+    }
+
+
+    // ถ้า extract reviewId ไม่ได้
+    // ยังไม่เดา review ตัวแรก
+    if (!reviewId) {
+      return {
+        found: false,
+        reason:
+          "REVIEW_ID_NOT_FOUND",
+        dataId,
+        reviewId: null,
+        review: null,
+      };
+    }
+
+
+    nextPageToken =
+      result.nextPageToken;
+
+    pageCount += 1;
+
+  } while (
+    nextPageToken &&
+    pageCount <
+      maxPages
+  );
+
+
+  return {
+    found: false,
+    reason:
+      "REVIEW_NOT_FOUND",
+    dataId,
+    reviewId,
+    review: null,
+  };
 }
