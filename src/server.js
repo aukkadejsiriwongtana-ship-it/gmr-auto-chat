@@ -308,6 +308,41 @@ function getGlobalFaqReply(message) {
   return null;
 }
 
+async function sendGlobalFaqIfMatched({
+  customer,
+  conversation,
+  platform,
+  message,
+}) {
+  const faqReply =
+    getGlobalFaqReply(message);
+
+  if (!faqReply) {
+    return {
+      matched: false,
+      botReply: null,
+    };
+  }
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: faqReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    faqReply
+  );
+
+  return {
+    matched: true,
+    botReply: faqReply,
+  };
+}
+
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -1582,23 +1617,45 @@ try {
   // ลูกค้าพิมพ์อย่างอื่น
   // -----------------------------------------------------
 
+const faqResult =
+  await sendGlobalFaqIfMatched({
+    customer,
+    conversation,
+    platform,
+    message,
+  });
+
+if (faqResult.matched) {
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    faqMatched: true,
+    botReply:
+      faqResult.botReply,
+    note:
+      "Global FAQ answered. State preserved.",
+  };
+}
+
 await triggerHumanAttention({
   customer,
   conversation,
   message,
-
   reason:
     "UNHANDLED_MESSAGE_IN_MAP_CONFIRMATION",
 });
-  
+
 return {
   ok: true,
   customerId: customer.id,
   stateBefore: conversation.state,
   stateAfter: conversation.state,
   botReply: null,
+  softHandoff: true,
   note:
-    "Waiting for map confirmation without repeating prompt",
+    "Human attention requested. State preserved.",
 };
 }
   
