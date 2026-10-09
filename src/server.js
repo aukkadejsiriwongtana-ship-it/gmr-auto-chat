@@ -884,16 +884,53 @@ if (
     });
 
 
-    await updateJob(
-      latestJob.id,
-      {
-        review_case:
-          "old_review",
+    const updatedJob =
+  await updateJob(
+    latestJob.id,
+    {
+      review_case:
+        "old_review",
 
-        status:
-          "waiting_price",
+      status:
+        "waiting_price",
+    }
+  );
+
+  try {
+  const lineGroupResult =
+    await sendJobToLineGroup({
+      jobId:
+        updatedJob.id,
+
+      jobType:
+        "old_review",
+
+      customerName:
+        customer.display_name || "",
+
+      businessName:
+        updatedJob.business_name || "",
+
+      mapUrl:
+        updatedJob.map_url || "",
+    });
+
+  if (lineGroupResult?.messageId) {
+    await updateJob(
+      updatedJob.id,
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
       }
     );
+  }
+
+} catch (error) {
+  console.error(
+    "OLD REVIEW PRICE REQUEST FAILED:",
+    error
+  );
+}
 
 
     await saveMessage({
@@ -992,6 +1029,7 @@ if (
   });
 
 
+ const updatedJob =
   await updateJob(
     latestJob.id,
     {
@@ -1009,7 +1047,6 @@ if (
     }
   );
 
-
   await saveMessage({
     customerId:
       customer.id,
@@ -1026,7 +1063,43 @@ if (
       botReply,
   });
 
+try {
+  const lineGroupResult =
+    await sendJobToLineGroup({
+      jobId:
+        updatedJob.id,
 
+      jobType:
+        "hidden_one_star",
+
+      customerName:
+        customer.display_name || "",
+
+      businessName:
+        updatedJob.business_name || "",
+
+      mapUrl:
+        updatedJob.map_url || "",
+    });
+
+  if (lineGroupResult?.messageId) {
+    await updateJob(
+      updatedJob.id,
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
+      }
+    );
+  }
+
+} catch (error) {
+  console.error(
+    "HIDDEN REVIEW PRICE REQUEST FAILED:",
+    error
+  );
+}
+
+    
   await updateLastBotMessage(
     customer.id,
     botReply
@@ -1254,23 +1327,33 @@ if (
   });
 
   try {
+    
   const lineGroupResult =
-    await sendJobToLineGroup({
-      jobId:
-        updatedJob.id,
+  await sendJobToLineGroup({
+    jobId:
+      updatedJob.id,
 
-      customerName:
-        customer.display_name || "",
+    jobType:
+      "recent_review",
 
-      businessName:
-        updatedJob.business_name || "",
+    customerName:
+      customer.display_name || "",
 
-      reviewerName:
-        selected.reviewer_name || "",
+    businessName:
+      updatedJob.business_name || "",
 
-      reviewUrl:
-        selected.review_url || "",
-    });
+    reviewerName:
+      selected.reviewer_name || "",
+
+    reviewAgeDays:
+      null,
+
+    reviewUrl:
+      selected.review_url || "",
+
+    mapUrl:
+      updatedJob.map_url || "",
+  });
 
   if (lineGroupResult?.messageId) {
     await updateJob(
