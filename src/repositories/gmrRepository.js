@@ -385,6 +385,41 @@ export async function updateJob(
   return data;
 }
 
+export async function getJobByLineGroupMessageId(
+  lineGroupMessageId
+) {
+  const { data, error } = await supabase
+    .from("gmr_jobs")
+    .select("*")
+    .eq(
+      "line_group_message_id",
+      String(lineGroupMessageId)
+    )
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function getCustomerById(
+  customerId
+) {
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .select("*")
+    .eq("id", customerId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 
 // =========================================================
 // AUDIT LOG
