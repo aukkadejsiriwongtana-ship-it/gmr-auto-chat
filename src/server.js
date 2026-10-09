@@ -1717,6 +1717,29 @@ return {
 
  // ยังเลือกไม่สำเร็จ
 if (!selectedReview) {
+  const faqResult =
+    await sendGlobalFaqIfMatched({
+      customer,
+      conversation,
+      platform,
+      message,
+    });
+
+  if (faqResult.matched) {
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      selected: false,
+      faqMatched: true,
+      botReply:
+        faqResult.botReply,
+      note:
+        "Global FAQ answered while waiting for review selection. State preserved.",
+    };
+  }
+
   await triggerHumanAttention({
     customer,
     conversation,
@@ -1887,7 +1910,30 @@ if (
   const isConfirmed =
     confirmWords.includes(normalized);
 
-  if (!isConfirmed) {
+ if (!isConfirmed) {
+  const faqResult =
+    await sendGlobalFaqIfMatched({
+      customer,
+      conversation,
+      platform,
+      message,
+    });
+
+  if (faqResult.matched) {
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      confirmed: false,
+      faqMatched: true,
+      botReply:
+        faqResult.botReply,
+      note:
+        "Global FAQ answered while waiting for confirmation. State preserved.",
+    };
+  }
+
   await triggerHumanAttention({
     customer,
     conversation,
