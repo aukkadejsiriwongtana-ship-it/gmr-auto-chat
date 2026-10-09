@@ -55,6 +55,7 @@ function normalizeAmount(value) {
 export function verifyPaymentSlip({
   classification,
   expectedAmount,
+  minimumTransactionDate = null,
 }) {
   const reasons = [];
 
@@ -192,13 +193,59 @@ const recipientNameMatch =
     );
   }
 
+// -----------------------------------------
+// TRANSACTION DATE CHECK
+// -----------------------------------------
 
-  const verified =
-    amountMatch &&
-    recipientNameMatch &&
-    billerIdMatch &&
-    cardLast4Match &&
-    confidenceOk;
+let transactionDateOk = true;
+
+if (minimumTransactionDate) {
+  const slipDateText =
+    classification.transactionDate;
+
+  if (!slipDateText) {
+    transactionDateOk = false;
+
+    reasons.push(
+      "PAYMENT_DATE_MISSING"
+    );
+  } else {
+    const slipDate =
+      new Date(
+        `${slipDateText}T00:00:00+07:00`
+      );
+
+    const minimumDate =
+      new Date(minimumTransactionDate);
+
+    // ยอมย้อนหลัง 1 วัน
+    minimumDate.setDate(
+      minimumDate.getDate() - 1
+    );
+
+    if (
+      Number.isNaN(
+        slipDate.getTime()
+      ) ||
+      slipDate < minimumDate
+    ) {
+      transactionDateOk = false;
+
+      reasons.push(
+        "PAYMENT_DATE_TOO_OLD"
+      );
+    }
+  }
+}
+
+  
+const verified =
+  amountMatch &&
+  recipientNameMatch &&
+  billerIdMatch &&
+  cardLast4Match &&
+  confidenceOk &&
+  transactionDateOk;
 
 
   return {
@@ -217,6 +264,7 @@ const recipientNameMatch =
       billerIdMatch,
       cardLast4Match,
       confidenceOk,
+      transactionDateOk,
     },
 
     extracted: {
