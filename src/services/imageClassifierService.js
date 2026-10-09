@@ -40,6 +40,21 @@ PAYMENT_SLIP
 - Must show evidence that a transaction was completed.
 - A QR code, invoice, bill, payment request, or pre-payment screen is NOT a PAYMENT_SLIP.
 
+When the image is a PAYMENT_SLIP, extract these fields if visible:
+
+- amount: numeric payment amount only
+- bankName: sender bank or payment app/bank
+- transactionDate: transaction date
+- transactionTime: transaction time
+- reference: transaction/reference number
+- recipientName: recipient or biller name
+- recipientBankOrBiller: recipient bank or biller/service name
+- recipientBillerId: biller ID if shown
+- recipientCardMasked: masked destination card number if shown
+- recipientCardLast4: last 4 digits of the destination card number if clearly shown
+
+Do not guess missing values. Return null if not clearly visible.
+
 REVIEW_SCREENSHOT
 - A screenshot/photo clearly showing a Google Maps review.
 
@@ -65,7 +80,9 @@ Return ONLY JSON in this exact structure:
   "reference": null,
   "recipientName": null,
   "recipientBankOrBiller": null,
-  "recipientAccountMasked": null
+  "recipientBillerId": null,
+  "recipientCardMasked": null,
+  "recipientCardLast4": null
 }
 
 Allowed type values:
