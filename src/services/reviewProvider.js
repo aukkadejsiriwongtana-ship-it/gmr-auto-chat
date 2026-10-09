@@ -494,17 +494,23 @@ if (
 
     // ถ้า extract reviewId ไม่ได้
     // ยังไม่เดา review ตัวแรก
-    if (!reviewId) {
-      return {
-        found: false,
-        reason:
-          "REVIEW_ID_NOT_FOUND",
-        dataId,
-        reviewId: null,
-        review: null,
-      };
-    }
+   if (!reviewId) {
+  return {
+    found: false,
+    reason:
+      "REVIEW_ID_NOT_FOUND",
+    dataId,
+    reviewId: null,
 
+    placeInfo,
+
+    businessName:
+      placeInfo?.title ||
+      null,
+
+    review: null,
+  };
+}
 
     nextPageToken =
       result.nextPageToken;
