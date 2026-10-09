@@ -86,10 +86,11 @@ import {
 import {
   getNewestReviews,
   getLowestReviews,
-getRecentReviews,
+  getRecentReviews,
   getOneStarReviews,
+  getReviewFromDirectUrl,
+  getReviewAgeDays,
 } from "./services/reviewProvider.js";
-
 
 
 const app = express();
@@ -735,12 +736,145 @@ if (
   const reviewUrl =
     String(message || "").trim();
 
+  let directResult;
+
+  try {
+    directResult =
+      await getReviewFromDirectUrl(
+        reviewUrl
+      );
+  } catch (error) {
+    console.error(
+      "DIRECT REVIEW LOOKUP FAILED:",
+      error
+    );
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason:
+        "DIRECT_REVIEW_LOOKUP_FAILED",
+    });
+
+    return {
+      ok: true,
+      customerId:
+        customer.id,
+      stateBefore:
+        conversation.state,
+      stateAfter:
+        conversation.state,
+      botReply: null,
+      softHandoff: true,
+    };
+  }
+
+
+  // ========================================
+  // หารีวิวไม่เจอ
+  // → Bot ไม่เดา
+  // → แจ้ง Sales
+  // → คง State เดิม
+  // ========================================
+
+  if (
+    !directResult?.found ||
+    !directResult?.review
+  ) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason:
+        `DIRECT_REVIEW_NOT_FOUND_${directResult?.reason || "UNKNOWN"}`,
+    });
+
+    return {
+      ok: true,
+      customerId:
+        customer.id,
+      stateBefore:
+        conversation.state,
+      stateAfter:
+        conversation.state,
+      botReply: null,
+      softHandoff: true,
+    };
+  }
+
+
+  const directReview =
+    directResult.review;
+
+
+  // ========================================
+  // รับเฉพาะรีวิว 1 ดาว
+  // ========================================
+
+  if (
+    Number(
+      directReview.rating
+    ) !== 1
+  ) {
+    const botReply =
+      "ตอนนี้ทางเรารับดำเนินการเฉพาะรีวิว 1 ดาวครับ";
+
+    await saveMessage({
+      customerId:
+        customer.id,
+      platform,
+      direction:
+        "outbound",
+      messageType:
+        "text",
+      messageText:
+        botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId:
+        customer.id,
+      stateBefore:
+        conversation.state,
+      stateAfter:
+        conversation.state,
+      directReview: true,
+      accepted: false,
+      rating:
+        directReview.rating,
+      botReply,
+    };
+  }
+
+
+  // ========================================
+  // รีวิวถูกต้อง → สร้าง Job
+  // ========================================
+
+  const businessName =
+    directResult.businessName ||
+    null;
+
+  const canonicalReviewUrl =
+    directReview.reviewUrl ||
+    reviewUrl;
+
   const job =
     await createJob({
       customerId:
         customer.id,
 
-      reviewUrl,
+      businessName,
+
+      reviewUrl:
+        canonicalReviewUrl,
 
       reviewCase:
         "direct_review",
@@ -748,9 +882,68 @@ if (
       reviewVisible:
         true,
 
+      reviewHasText:
+        Boolean(
+          directReview.text &&
+          directReview.text.trim()
+        ),
+
       status:
         "waiting_price",
     });
+
+
+  // ========================================
+  // เก็บ Review จริงลง gmr_reviews
+  // ========================================
+
+  await saveReviewCandidate({
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    businessName,
+
+    reviewerName:
+      directReview.reviewerName,
+
+    rating:
+      directReview.rating,
+
+    reviewText:
+      directReview.text,
+
+    reviewDate:
+      directReview.isoDate,
+
+    reviewUrl:
+      canonicalReviewUrl,
+
+    providerReviewId:
+      directReview.reviewId,
+
+    isRecent:
+      (
+        getReviewAgeDays(
+          directReview
+        ) !== null &&
+        getReviewAgeDays(
+          directReview
+        ) <= 14
+      ),
+
+    isVisible:
+      true,
+
+    hasText:
+      Boolean(
+        directReview.text &&
+        directReview.text.trim()
+      ),
+  });
+
 
   const nextState =
     transitionState(
@@ -772,8 +965,10 @@ if (
       null,
   });
 
+
   const botReply =
     "เช็คแล้วดำเนินการได้ครับ";
+
 
   await saveMessage({
     customerId:
@@ -791,10 +986,16 @@ if (
       botReply,
   });
 
+
   await updateLastBotMessage(
     customer.id,
     botReply
   );
+
+
+  // ========================================
+  // ส่งให้ Sales ตั้งราคา
+  // ========================================
 
   try {
     const lineGroupResult =
@@ -810,22 +1011,33 @@ if (
           "",
 
         businessName:
+          businessName ||
           "",
 
         reviewerName:
+          directReview.reviewerName ||
           "",
 
         reviewAgeDays:
-          null,
+          getReviewAgeDays(
+            directReview
+          ),
+
+        reviewText:
+          directReview.text ||
+          "",
 
         reviewUrl:
-          reviewUrl,
+          canonicalReviewUrl,
 
         mapUrl:
           "",
       });
 
-    if (lineGroupResult?.messageId) {
+
+    if (
+      lineGroupResult?.messageId
+    ) {
       await updateJob(
         job.id,
         {
@@ -842,6 +1054,7 @@ if (
     );
   }
 
+
   return {
     ok: true,
 
@@ -857,13 +1070,19 @@ if (
     stateAfter:
       nextState,
 
-    inputType:
-      classification.type,
-
     directReview:
       true,
 
-    reviewUrl,
+    accepted:
+      true,
+
+    businessName,
+
+    reviewerName:
+      directReview.reviewerName,
+
+    rating:
+      directReview.rating,
 
     botReply,
   };
