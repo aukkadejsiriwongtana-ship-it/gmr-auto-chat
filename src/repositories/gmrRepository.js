@@ -366,6 +366,70 @@ export async function getLatestJobByCustomerId(
   return data;
 }
 
+// =========================================================
+// CUSTOMER HISTORY CHECK
+// =========================================================
+
+export async function hasPaymentByCustomerId(
+  customerId
+) {
+  // หา Job ทั้งหมดของลูกค้าคนนี้ก่อน
+  const { data: jobs, error: jobsError } =
+    await supabase
+      .from("gmr_jobs")
+      .select("id")
+      .eq("customer_id", customerId);
+
+  if (jobsError) {
+    throw jobsError;
+  }
+
+  if (!jobs || jobs.length === 0) {
+    return false;
+  }
+
+  const jobIds =
+    jobs.map((job) => job.id);
+
+  // ดูว่ามี payment ผูกกับ Job ใดหรือไม่
+  const { data: payment, error: paymentError } =
+    await supabase
+      .from("gmr_payments")
+      .select("id")
+      .in("job_id", jobIds)
+      .limit(1)
+      .maybeSingle();
+
+  if (paymentError) {
+    throw paymentError;
+  }
+
+  return Boolean(payment);
+}
+
+
+export async function getLatestJobWithMapByCustomerId(
+  customerId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq("customer_id", customerId)
+      .not("map_url", "is", null)
+      .order("created_at", {
+        ascending: false,
+      })
+      .limit(1)
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 
 export async function updateJob(
   jobId,
