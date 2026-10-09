@@ -932,17 +932,50 @@ if (
     // OTHER TEXT
     // -----------------------------------------------------
 
-    return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      inputType: classification.type,
-      confidence: classification.confidence,
-      botReply: null,
-      nextAction:
-        "FAQ_OR_GENERAL_TEXT",
-    };
+    const faqResult =
+  await sendGlobalFaqIfMatched({
+    customer,
+    conversation,
+    platform,
+    message,
+  });
+
+if (faqResult.matched) {
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    inputType: classification.type,
+    confidence: classification.confidence,
+    faqMatched: true,
+    botReply:
+      faqResult.botReply,
+    note:
+      "Global FAQ answered while waiting for map. State preserved.",
+  };
+}
+
+await triggerHumanAttention({
+  customer,
+  conversation,
+  message,
+  reason:
+    "UNHANDLED_MESSAGE_IN_WAITING_MAP",
+});
+
+return {
+  ok: true,
+  customerId: customer.id,
+  stateBefore: conversation.state,
+  stateAfter: conversation.state,
+  inputType: classification.type,
+  confidence: classification.confidence,
+  botReply: null,
+  softHandoff: true,
+  note:
+    "Human attention requested while waiting for map",
+};
   }
 
 // -------------------------------------------------------
@@ -2228,6 +2261,28 @@ try {
  // -------------------------------------------------------
 // OTHER STATES → SOFT HANDOFF
 // -------------------------------------------------------
+
+const faqResult =
+  await sendGlobalFaqIfMatched({
+    customer,
+    conversation,
+    platform,
+    message,
+  });
+
+if (faqResult.matched) {
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    faqMatched: true,
+    botReply:
+      faqResult.botReply,
+    note:
+      "Global FAQ answered in unhandled state. State preserved.",
+  };
+}
 
 await triggerHumanAttention({
   customer,
