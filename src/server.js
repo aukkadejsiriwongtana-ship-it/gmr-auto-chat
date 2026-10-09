@@ -1724,17 +1724,26 @@ if (
     confirmWords.includes(normalized);
 
   if (!isConfirmed) {
-    return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      confirmed: false,
-      botReply: null,
-      note: "Waiting for customer confirmation",
-    };
-  }
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason:
+      "UNHANDLED_MESSAGE_IN_WAITING_CONFIRM",
+  });
 
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    confirmed: false,
+    botReply: null,
+    softHandoff: true,
+    note:
+      "Human attention requested while waiting for confirmation",
+  };
+}
   const template =
     await getTemplate(
       "script_4_request_phone",
