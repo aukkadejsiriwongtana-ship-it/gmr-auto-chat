@@ -55,6 +55,7 @@ getLatestJobWithMapByCustomerId,
   updateCustomerPhone,
   createPendingPayment,
 getPaymentByLineGroupMessageId,
+  getJobById,
 updatePayment,
 } from "./repositories/gmrRepository.js";
 
@@ -2507,6 +2508,8 @@ async function processLineGroupPrice({
       quotedMessageId
     );
 
+  
+
   if (!job) {
     return {
       ok: false,
@@ -2808,6 +2811,171 @@ app.post("/line/webhook", async (req, res) => {
 
 
   try {
+
+    const normalizedGroupText =
+  String(groupText || "")
+    .trim()
+    .toLowerCase();
+
+
+// ========================================
+// MANUAL PAYMENT APPROVAL
+// Reply ข้อความตรวจสลิป แล้วพิมพ์ ok
+// ========================================
+
+if (
+  quotedMessageId &&
+  [
+    "ok",
+    "okay",
+    "ยืนยัน",
+  ].includes(
+    normalizedGroupText
+  )
+) {
+  const pendingPayment =
+    await getPaymentByLineGroupMessageId(
+      quotedMessageId
+    );
+
+  if (pendingPayment) {
+
+    if (
+      pendingPayment.payment_verified === true
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "✅ สลิปนี้ถูกยืนยันไปแล้วครับ"
+      );
+
+      continue;
+    }
+
+
+    const paymentJob =
+      await getJobById(
+        pendingPayment.job_id
+      );
+
+    if (!paymentJob) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ไม่พบงานของ Payment นี้"
+      );
+
+      continue;
+    }
+
+
+    const paymentCustomer =
+      await getCustomerById(
+        paymentJob.customer_id
+      );
+
+    if (!paymentCustomer) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ไม่พบข้อมูลลูกค้าของ Payment นี้"
+      );
+
+      continue;
+    }
+
+
+    const verifiedAt =
+      new Date().toISOString();
+
+
+    await updatePayment(
+      pendingPayment.id,
+      {
+        payment_verified:
+          true,
+
+        verified_at:
+          verifiedAt,
+
+        review_status:
+          "approved",
+      }
+    );
+
+
+    await updateJob(
+      paymentJob.id,
+      {
+        status:
+          "paid",
+
+        paid_at:
+          verifiedAt,
+      }
+    );
+
+
+    try {
+      await updateJobInGoogleSheet({
+        jobId:
+          paymentJob.id,
+
+        status:
+          "paid",
+
+        paidAt:
+          verifiedAt,
+      });
+    } catch (error) {
+      console.error(
+        "PAYMENT SHEET UPDATE FAILED:",
+        error
+      );
+    }
+
+
+    const customerReply =
+      "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
+
+
+    try {
+      await sendMessageToCustomer({
+        platform:
+          paymentCustomer.platform,
+
+        platformUserId:
+          paymentCustomer.platform_user_id,
+
+        text:
+          customerReply,
+      });
+    } catch (error) {
+      console.error(
+        "PAYMENT CUSTOMER REPLY FAILED:",
+        error
+      );
+    }
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "✅ ยืนยันสลิปเรียบร้อยแล้ว และแจ้งลูกค้าแล้วครับ"
+    );
+
+
+    console.log(
+      "PAYMENT MANUALLY APPROVED:",
+      {
+        paymentId:
+          pendingPayment.id,
+
+        jobId:
+          paymentJob.id,
+      }
+    );
+
+
+    continue;
+  }
+}
     const priceResult =
       await processLineGroupPrice({
         quotedMessageId,
