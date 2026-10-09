@@ -407,6 +407,31 @@ export async function hasPaymentByCustomerId(
   return Boolean(payment);
 }
 
+export async function isPaymentReferenceUsed(
+  transactionReference
+) {
+  if (!transactionReference) {
+    return false;
+  }
+
+  const { data, error } =
+    await supabase
+      .from("gmr_payments")
+      .select("id, job_id, transaction_reference")
+      .eq(
+        "transaction_reference",
+        String(transactionReference).trim()
+      )
+      .limit(1)
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return Boolean(data);
+}
+
 
 export async function getLatestJobWithMapByCustomerId(
   customerId
