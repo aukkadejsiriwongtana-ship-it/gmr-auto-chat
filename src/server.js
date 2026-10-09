@@ -3025,13 +3025,16 @@ if (
   }
 
   const paymentVerification =
-    verifyPaymentSlip({
-      classification:
-        imageClassification,
+  verifyPaymentSlip({
+    classification:
+      imageClassification,
 
-      expectedAmount:
-        latestJob.price,
-    });
+    expectedAmount:
+      latestJob.price,
+
+    minimumTransactionDate:
+      latestJob.removed_at || null,
+  });
 
   const transactionReference =
   imageClassification.reference
