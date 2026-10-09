@@ -2960,6 +2960,19 @@ if (
   if (pendingPayment) {
 
 if (
+  pendingPayment.payment_verified === true ||
+  pendingPayment.review_status ===
+    "approved"
+) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "✅ สลิปนี้ถูกยืนยันไปแล้วครับ"
+  );
+
+  continue;
+}
+    
+if (
   pendingPayment.review_status ===
   "rejected"
 ) {
