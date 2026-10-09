@@ -52,6 +52,9 @@ getLatestJobWithMapByCustomerId,
   createQuote,
   updateQuote,
   updateCustomerPhone,
+  createPendingPayment,
+getPaymentByLineGroupMessageId,
+updatePayment,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -3189,6 +3192,66 @@ if (paymentVerification.verified) {
   );
 }
 
+if (
+  !paymentVerification.verified &&
+  paymentVerification.status ===
+    "NEEDS_REVIEW"
+) {
+  const pendingPayment =
+    await createPendingPayment({
+      jobId:
+        latestJob.id,
+
+      amount:
+        imageClassification.amount ||
+        latestJob.price ||
+        0,
+
+      paymentMethod:
+        process.env.PAYMENT_RECIPIENT_TYPE ||
+        "KTC_BILLER",
+
+      transactionReference:
+        transactionReference,
+
+      transactionDate:
+        imageClassification.transactionDate ||
+        null,
+
+      transactionTime:
+        imageClassification.transactionTime ||
+        null,
+
+      recipientName:
+        imageClassification.recipientName ||
+        imageClassification.recipientBankOrBiller ||
+        null,
+
+      recipientBillerId:
+        imageClassification.recipientBillerId ||
+        null,
+
+      recipientCardLast4:
+        imageClassification.recipientCardLast4 ||
+        null,
+
+      verificationReasons:
+        paymentVerification.reasons ||
+        [],
+    });
+
+  console.log(
+    "PAYMENT NEEDS REVIEW:",
+    {
+      paymentId:
+        pendingPayment.id,
+
+      jobId:
+        latestJob.id,
+    }
+  );
+}
+  
   console.log(
     "PAYMENT VERIFICATION:",
     {
