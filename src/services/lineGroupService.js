@@ -23,6 +23,7 @@ export async function sendJobToLineGroup({
   businessName,
   reviewerName = null,
   reviewAgeDays = null,
+  reviewText = null,
   reviewUrl = null,
   mapUrl = null,
 }) {
@@ -49,9 +50,26 @@ export async function sendJobToLineGroup({
       reviewUrl || "-",
     ];
   }
+// ==========================================
+// 2. DIRECT REVIEW LINK
+// ==========================================
+else if (jobType === "direct_review") {
+  typeLabel =
+    "🔵 ลิงก์รีวิวโดยตรง";
 
+  extraLines = [
+    `Reviewer: ${reviewerName || "-"}`,
+    "",
+    "ข้อความรีวิว:",
+    reviewText || "-",
+    "",
+    "Review:",
+    reviewUrl || "-",
+  ];
+}
+    
   // ==========================================
-  // 2. REVIEW เก่า
+  // 3. REVIEW เก่า
   // ==========================================
   else if (jobType === "old_review") {
     typeLabel =
