@@ -57,9 +57,22 @@ Do not guess missing values. Return null if not clearly visible.
 
 REVIEW_SCREENSHOT
 - A screenshot/photo clearly showing a Google Maps review.
+- The review can have any star rating from 1 to 5.
+- When the image is a REVIEW_SCREENSHOT, extract these fields if clearly visible:
+
+- businessName: Google Maps business/profile name
+- reviewerName: name of the person who wrote the review
+- rating: numeric star rating from 1 to 5
+- reviewText: review content exactly as visible, without rewriting
+- reviewDateText: visible review date or relative date such as "2 weeks ago"
+- reviewLanguage: primary language of the review text if identifiable
+
+Do not guess missing values.
+Return null if a value is not clearly visible.
 
 MAP_SCREENSHOT
 - A screenshot/photo mainly showing a Google Maps business profile or map.
+- When the image is a MAP_SCREENSHOT, extract businessName if clearly visible.
 
 OTHER_IMAGE
 - Any other image.
@@ -73,6 +86,7 @@ Return ONLY JSON in this exact structure:
   "type": "PAYMENT_SLIP",
   "confidence": 0.95,
   "reason": "short explanation",
+
   "amount": null,
   "bankName": null,
   "transactionDate": null,
@@ -82,7 +96,14 @@ Return ONLY JSON in this exact structure:
   "recipientBankOrBiller": null,
   "recipientBillerId": null,
   "recipientCardMasked": null,
-  "recipientCardLast4": null
+  "recipientCardLast4": null,
+
+  "businessName": null,
+  "reviewerName": null,
+  "rating": null,
+  "reviewText": null,
+  "reviewDateText": null,
+  "reviewLanguage": null
 }
 
 Allowed type values:
