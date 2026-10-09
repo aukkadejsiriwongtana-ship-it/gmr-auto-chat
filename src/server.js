@@ -1537,15 +1537,32 @@ try {
 }
 
 try {
-  await sendJobToLineGroup({
-    jobId: updatedJob.id,
-    customerName: customer.display_name || "",
-    platform,
-    phone: phoneForDb,
-    businessName: updatedJob.business_name || "",
-    reviewUrl: updatedJob.review_url || "",
-    price: updatedJob.price || "",
-  });
+  const lineGroupResult =
+    await sendJobToLineGroup({
+      jobId: updatedJob.id,
+      customerName:
+        customer.display_name || "",
+      platform,
+      phone:
+        phoneForDb,
+      businessName:
+        updatedJob.business_name || "",
+      reviewUrl:
+        updatedJob.review_url || "",
+      price:
+        updatedJob.price || "",
+    });
+
+  if (lineGroupResult?.messageId) {
+    await updateJob(
+      updatedJob.id,
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
+      }
+    );
+  }
+
 } catch (error) {
   console.error(
     "LINE GROUP NOTIFY FAILED:",
