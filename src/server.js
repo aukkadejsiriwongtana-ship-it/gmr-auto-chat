@@ -4379,10 +4379,24 @@ if (
   // ----------------------------------------
   // อ่านชื่อธุรกิจไม่ได้
   // → ไม่เดา
-  // → แจ้ง Sales
+// → ขอชื่อ Map จากลูกค้า
+// → State = WAITING_MAP
   // ----------------------------------------
 
  if (!businessName) {
+   await updateConversationState({
+  customerId:
+    customer.id,
+
+  state:
+    GMR_STATES.WAITING_MAP,
+
+  handoff:
+    false,
+
+  handoffReason:
+    null,
+});
   const botReply =
     
     "รบกวนแจ้งชื่อแมพ หรือ ส่งชื่อลิงก์ Google Map เพื่อให้เช็ค code หลังบ้านให้ได้เลยครับ";
