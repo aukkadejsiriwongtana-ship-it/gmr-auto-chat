@@ -1986,19 +1986,28 @@ try {
   };
 }
   
-  // -------------------------------------------------------
-  // OTHER STATES
-  // -------------------------------------------------------
+ // -------------------------------------------------------
+// OTHER STATES → SOFT HANDOFF
+// -------------------------------------------------------
 
-  return {
-    ok: true,
-    customerId: customer.id,
-    stateBefore: conversation.state,
-    stateAfter: conversation.state,
-    botReply: null,
-    note:
-      "This state is not implemented yet.",
-  };
+await triggerHumanAttention({
+  customer,
+  conversation,
+  message,
+  reason:
+    `UNHANDLED_MESSAGE_IN_STATE_${conversation.state}`,
+});
+
+return {
+  ok: true,
+  customerId: customer.id,
+  stateBefore: conversation.state,
+  stateAfter: conversation.state,
+  botReply: null,
+  softHandoff: true,
+  note:
+    "Human attention requested for unhandled state",
+};
 }
 
 
