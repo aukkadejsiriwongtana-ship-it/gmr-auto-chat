@@ -44,8 +44,8 @@ When the image is a PAYMENT_SLIP, extract these fields if visible:
 
 - amount: numeric payment amount only
 - bankName: sender bank or payment app/bank
-- transactionDate: transaction date
-- transactionTime: transaction time
+- transactionDate: transaction date in YYYY-MM-DD format
+- transactionTime: transaction time in HH:mm:ss 24-hour format
 - reference: transaction/reference number
 - recipientName: recipient or biller name
 - recipientBankOrBiller: recipient bank or biller/service name
