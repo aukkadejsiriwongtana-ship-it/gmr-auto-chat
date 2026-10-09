@@ -31,6 +31,8 @@ import {
   updateLastBotMessage,
   createJob,
   getLatestJobByCustomerId,
+  hasPaymentByCustomerId,
+  getLatestJobWithMapByCustomerId,
   getJobByLineGroupMessageId,
   updateJob,
   saveReviewCandidate,
@@ -200,6 +202,112 @@ const existingCustomer =
     );
   }
 
+// -------------------------------------------------------
+// EXISTING CUSTOMER HISTORY CHECK
+// -------------------------------------------------------
+
+if (
+  existingCustomer &&
+  conversation.state === GMR_STATES.NEW
+) {
+  const hasPayment =
+    await hasPaymentByCustomerId(
+      customer.id
+    );
+
+  // เคยมี payment แล้ว
+  // → ถือเป็นลูกค้าเก่า
+  // → ตอนนี้ AI ยังไม่ตอบ
+  if (hasPayment) {
+    console.log(
+      "OLD CUSTOMER - PAYMENT HISTORY:",
+      {
+        customerId: customer.id,
+        platformUserId,
+      }
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      oldCustomer: true,
+      hasPayment: true,
+      botReply: null,
+      note:
+        "Existing customer with payment history. Old-customer flow not implemented yet.",
+    };
+  }
+
+  // ยังไม่เคยจ่าย
+  // → เช็กว่าเคยมี Map เดิมหรือไม่
+  const previousMapJob =
+    await getLatestJobWithMapByCustomerId(
+      customer.id
+    );
+
+  if (previousMapJob) {
+    console.log(
+      "EXISTING CUSTOMER - MAP HISTORY:",
+      {
+        customerId: customer.id,
+        jobId: previousMapJob.id,
+        mapUrl: previousMapJob.map_url,
+      }
+    );
+
+    await updateConversationState({
+      customerId: customer.id,
+      state:
+        GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION,
+      handoff: false,
+      handoffReason: null,
+    });
+
+    const template =
+      await getTemplate(
+        "confirm_map",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "confirm_map template not found"
+      );
+    }
+
+    const botReply =
+      template.content.replace(
+        "{{map_url}}",
+        previousMapJob.map_url
+      );
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      jobId: previousMapJob.id,
+      stateBefore: conversation.state,
+      stateAfter:
+        GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION,
+      resumedFromHistory: true,
+      botReply,
+    };
+  }
+}
   
   // -------------------------------------------------------
   // 4. HANDOFF CHECK
