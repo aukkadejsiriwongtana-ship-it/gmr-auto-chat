@@ -110,9 +110,10 @@ export function verifyPaymentSlip({
     );
 
   const slipRecipientName =
-    normalizeText(
-      classification.recipientName
-    );
+  normalizeText(
+    classification.recipientName ||
+    classification.recipientBankOrBiller
+  );
 
 const recipientNameMatch =
   Boolean(expectedName) &&
