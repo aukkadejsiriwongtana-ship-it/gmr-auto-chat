@@ -6,6 +6,7 @@ import express from "express";
 import {
   sendMessageToCustomer,
   replyLineTextMessage,
+  downloadLineMessageContent,
 } from "./services/customerMessagingService.js";
 
 
@@ -2884,18 +2885,55 @@ app.post("/line/webhook", async (req, res) => {
 
 
       let messageType =
-        event.message?.type || "unknown";
+  event.message?.type || "unknown";
 
-      let message = "";
+let message = "";
+
+if (
+  messageType === "text"
+) {
+  message =
+    event.message.text || "";
+}
 
 
-      if (
-        messageType === "text"
-      ) {
-        message =
-          event.message.text || "";
+// ========================================
+// IMAGE MESSAGE
+// ดาวน์โหลดรูปจาก LINE ก่อน
+// ========================================
+
+if (
+  messageType === "image"
+) {
+  const messageId =
+    event.message?.id;
+
+  try {
+    const imageContent =
+      await downloadLineMessageContent(
+        messageId
+      );
+
+    console.log(
+      "LINE IMAGE DOWNLOADED:",
+      {
+        messageId,
+        contentType:
+          imageContent.contentType,
+        bufferLength:
+          imageContent.buffer.length,
       }
+    );
 
+  } catch (error) {
+    console.error(
+      "LINE IMAGE DOWNLOAD FAILED:",
+      error
+    );
+
+    continue;
+  }
+}
 
       // ========================================
       // ส่งเข้า State Machine เดิม
