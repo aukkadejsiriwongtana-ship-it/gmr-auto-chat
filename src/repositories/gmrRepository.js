@@ -432,6 +432,55 @@ export async function isPaymentReferenceUsed(
   return Boolean(data);
 }
 
+export async function createPayment({
+  jobId,
+  amount,
+  paymentMethod = "KTC_BILLER",
+  slipReceived = true,
+  slipUrl = null,
+  paymentVerified = false,
+  verifiedAt = null,
+  transactionReference = null,
+  transactionDate = null,
+  transactionTime = null,
+  recipientName = null,
+  recipientBillerId = null,
+  recipientCardLast4 = null,
+}) {
+  const { data, error } =
+    await supabase
+      .from("gmr_payments")
+      .insert({
+        job_id: jobId,
+        amount,
+        payment_method: paymentMethod,
+        slip_received: slipReceived,
+        slip_url: slipUrl,
+        payment_verified: paymentVerified,
+        verified_at: verifiedAt,
+        transaction_reference:
+          transactionReference,
+        transaction_date:
+          transactionDate,
+        transaction_time:
+          transactionTime,
+        recipient_name:
+          recipientName,
+        recipient_biller_id:
+          recipientBillerId,
+        recipient_card_last4:
+          recipientCardLast4,
+      })
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 
 export async function getLatestJobWithMapByCustomerId(
   customerId
