@@ -1368,7 +1368,211 @@ const isYes =
     );
   }
 
+// =====================================================
+// IMAGE REVIEW CONFIRMED
+// ใช้รีวิวจากรูปโดยตรง ไม่ค้นเฉพาะ 1 ดาวใหม่
+// =====================================================
 
+if (
+  latestJob.review_case ===
+  "image_review_pending"
+) {
+  const imageReviews =
+    await getReviewCandidatesByJobId(
+      latestJob.id
+    );
+
+  const imageReview =
+    imageReviews[0] ||
+    null;
+
+
+  if (!imageReview) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        "ลูกค้ายืนยัน Map จากรูปรีวิว",
+
+      reason:
+        "IMAGE_REVIEW_CANDIDATE_NOT_FOUND",
+    });
+
+    return {
+      ok: true,
+      customerId:
+        customer.id,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        conversation.state,
+
+      botReply:
+        null,
+
+      softHandoff:
+        true,
+    };
+  }
+
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_PRICE
+    );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  const updatedJob =
+    await updateJob(
+      latestJob.id,
+      {
+        review_case:
+          "image_review",
+
+        status:
+          "waiting_price",
+      }
+    );
+
+
+  const botReply =
+    "เช็คแล้วดำเนินการได้ครับ";
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  try {
+    const lineGroupResult =
+      await sendJobToLineGroup({
+        jobId:
+          updatedJob.id,
+
+        jobType:
+          "direct_review",
+
+        customerName:
+          customer.display_name ||
+          "",
+
+        businessName:
+          updatedJob.business_name ||
+          "",
+
+        reviewerName:
+          imageReview.reviewer_name ||
+          "",
+
+        reviewAgeDays:
+          null,
+
+        reviewText:
+          imageReview.review_text ||
+          "",
+
+        reviewUrl:
+          imageReview.review_url ||
+          "",
+
+        mapUrl:
+          updatedJob.map_url ||
+          "",
+      });
+
+
+    if (
+      lineGroupResult?.messageId
+    ) {
+      await updateJob(
+        updatedJob.id,
+        {
+          line_group_message_id:
+            lineGroupResult.messageId,
+        }
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      "IMAGE REVIEW PRICE REQUEST FAILED:",
+      error
+    );
+  }
+
+
+  return {
+    ok:
+      true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      updatedJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    mapConfirmed:
+      true,
+
+    reviewCase:
+      "image_review",
+
+    reviewerName:
+      imageReview.reviewer_name ||
+      null,
+
+    rating:
+      imageReview.rating ||
+      null,
+
+    botReply,
+  };
+}
+    
   // -----------------------------------------------------
   // 2. ตรวจรีวิวล่าสุด
   // -----------------------------------------------------
