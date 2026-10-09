@@ -2984,6 +2984,155 @@ if (
     continue;
   }
 }
+
+    // ========================================
+// MANUAL PAYMENT REJECTION
+// Reply ข้อความตรวจสลิป แล้วพิมพ์ no
+// ========================================
+
+if (
+  quotedMessageId &&
+  [
+    "no",
+    "ไม่ผ่าน",
+    "reject",
+    "rejected",
+  ].includes(
+    normalizedGroupText
+  )
+) {
+  const pendingPayment =
+    await getPaymentByLineGroupMessageId(
+      quotedMessageId
+    );
+
+  if (pendingPayment) {
+
+    if (
+      pendingPayment.review_status ===
+      "rejected"
+    ) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ สลิปนี้ถูกปฏิเสธไปแล้วครับ"
+      );
+
+      continue;
+    }
+
+
+    const paymentJob =
+      await getJobById(
+        pendingPayment.job_id
+      );
+
+    if (!paymentJob) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ไม่พบงานของ Payment นี้"
+      );
+
+      continue;
+    }
+
+
+    const paymentCustomer =
+      await getCustomerById(
+        paymentJob.customer_id
+      );
+
+    if (!paymentCustomer) {
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ไม่พบข้อมูลลูกค้าของ Payment นี้"
+      );
+
+      continue;
+    }
+
+
+    await updatePayment(
+      pendingPayment.id,
+      {
+        payment_verified:
+          false,
+
+        verified_at:
+          null,
+
+        review_status:
+          "rejected",
+      }
+    );
+
+
+    const customerReply =
+      "ตรวจสอบแล้วสลิปนี้ยังไม่สามารถยืนยันการชำระได้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+
+
+    try {
+      await sendMessageToCustomer({
+        platform:
+          paymentCustomer.platform,
+
+        platformUserId:
+          paymentCustomer.platform_user_id,
+
+        text:
+          customerReply,
+      });
+
+      await saveMessage({
+        customerId:
+          paymentCustomer.id,
+
+        platform:
+          paymentCustomer.platform,
+
+        direction:
+          "outbound",
+
+        messageType:
+          "text",
+
+        messageText:
+          customerReply,
+      });
+
+      await updateLastBotMessage(
+        paymentCustomer.id,
+        customerReply
+      );
+
+    } catch (error) {
+      console.error(
+        "PAYMENT REJECTION CUSTOMER REPLY FAILED:",
+        error
+      );
+    }
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "❌ สลิปไม่ผ่านการตรวจสอบ และแจ้งลูกค้าแล้วครับ"
+    );
+
+
+    console.log(
+      "PAYMENT MANUALLY REJECTED:",
+      {
+        paymentId:
+          pendingPayment.id,
+
+        jobId:
+          paymentJob.id,
+      }
+    );
+
+
+    continue;
+  }
+}
     const priceResult =
       await processLineGroupPrice({
         quotedMessageId,
