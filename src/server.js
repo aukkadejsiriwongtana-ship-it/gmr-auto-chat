@@ -3771,6 +3771,8 @@ if (paymentVerification.verified) {
         null,
     });
 
+
+  
 await updateJob(
   latestJob.id,
   {
