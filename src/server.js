@@ -1621,6 +1621,14 @@ if (recentOneStarReviews.length > 0) {
         )
       );
 
+  if (
+  recentOneStarReviews.length === 1
+) {
+  botReply =
+    "จากที่เช็คจะมีรีวิวที่เพิ่งลงและดำเนินการได้เลย 1 รีวิวครับ\n\n" +
+    "เอาเป็นรีวิวนี้เลยไหมครับ";
+}
+
 
     // ต่อท้ายลิงก์รีวิวทุกอัน
     const reviewLines =
@@ -2235,6 +2243,41 @@ return {
 
   let selectedReview = null;
 
+// -----------------------------------------------------
+// ถ้ามีรีวิวเดียว
+// ลูกค้าตอบ "ใช่" = เลือกรีวิวนั้นทันที
+// -----------------------------------------------------
+
+const normalizedLower =
+  normalized.toLowerCase();
+
+const singleReviewYesWords = [
+  "ใช่",
+  "ใช่ครับ",
+  "ได้",
+   "ได้ครับ",
+  "ใช่ค่ะ",
+  "เอาครับ",
+  "เอาค่ะ",
+  "เอา",
+  "รีวิวนี้",
+  "อันนี้",
+  "yes",
+  "y",
+  "ok",
+  "okay",
+];
+
+if (
+  candidates.length === 1 &&
+  singleReviewYesWords.includes(
+    normalizedLower
+  )
+) {
+  selectedReview =
+    candidates[0];
+}
+    
   // ลูกค้าพิมพ์ 1 / 2 / 3
   const numericChoice =
     Number(normalized);
