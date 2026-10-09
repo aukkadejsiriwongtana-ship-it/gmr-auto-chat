@@ -25,6 +25,7 @@ import {
 
 import {
   sendJobToLineGroup,
+  sendPaymentReviewToLineGroup,
 } from "./services/lineGroupService.js";
 
 import {
@@ -3240,6 +3241,62 @@ if (
         [],
     });
 
+const lineGroupResult =
+  await sendPaymentReviewToLineGroup({
+    paymentId:
+      pendingPayment.id,
+
+    jobId:
+      latestJob.id,
+
+    customerName:
+      customer.display_name ||
+      "",
+
+    businessName:
+      latestJob.business_name ||
+      "",
+
+    amount:
+      imageClassification.amount ||
+      latestJob.price ||
+      0,
+
+    transactionDate:
+      imageClassification.transactionDate ||
+      null,
+
+    transactionTime:
+      imageClassification.transactionTime ||
+      null,
+
+    recipientName:
+      imageClassification.recipientName ||
+      imageClassification.recipientBankOrBiller ||
+      null,
+
+    recipientCardLast4:
+      imageClassification.recipientCardLast4 ||
+      null,
+
+    reasons:
+      paymentVerification.reasons ||
+      [],
+  });
+
+
+if (
+  lineGroupResult?.messageId
+) {
+  await updatePayment(
+    pendingPayment.id,
+    {
+      line_group_message_id:
+        lineGroupResult.messageId,
+    }
+  );
+}
+  
   console.log(
     "PAYMENT NEEDS REVIEW:",
     {
