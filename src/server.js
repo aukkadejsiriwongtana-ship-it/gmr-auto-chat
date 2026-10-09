@@ -307,6 +307,27 @@ function getGlobalFaqReply(message) {
     );
   }
 
+// ========================================
+// ขอส่วนลด
+// ========================================
+if (
+  text.includes("ลดได้ไหม") ||
+  text.includes("ลดได้มั้ย") ||
+  text.includes("ลดหน่อย") ||
+  text.includes("มีส่วนลดไหม") ||
+  text.includes("มีส่วนลดมั้ย") ||
+  text.includes("ขอส่วนลด") ||
+  text.includes("แพงไป") ||
+  text.includes("ลดราคา") ||
+  text.includes("discount")
+) {
+  return (
+    "ราคาที่แจ้งเป็นการนำออกจากระบบ ไม่ใช่การซ่อนนะครับ \n\n" +
+    "ชำระหลังดำเนินการเสร็จได้ \n\n" +
+    "หากโอเค พิมพ์ “ยืนยัน” เริ่มงานได้เลย ✅"
+  );
+}
+  
   return null;
 }
 
