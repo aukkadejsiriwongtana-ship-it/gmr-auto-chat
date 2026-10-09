@@ -2772,8 +2772,16 @@ if (
     );
   }
 
-  const botReply =
-    template.content;
+ const formattedPrice =
+  Number(
+    latestJob.price || 0
+  ).toLocaleString("th-TH");
+
+const botReply =
+  template.content.replace(
+    "{{price}}",
+    formattedPrice
+  );
 
 
   const nextState =
