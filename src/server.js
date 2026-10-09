@@ -4,6 +4,10 @@ import {
   classifyCustomerImage,
 } from "./services/imageClassifierService.js";
 
+import {
+  verifyPaymentSlip,
+} from "./services/paymentVerificationService.js";
+
 import "dotenv/config";
 import express from "express";
 
@@ -2984,8 +2988,67 @@ console.log(
 );
 
 
-// ตอนนี้ยังไม่ route เข้า flow
-// แค่ทดสอบการจำแนกรูปก่อน
+if (
+  imageClassification.type ===
+  "PAYMENT_SLIP"
+) {
+  const customer =
+    await getCustomerByPlatformUserId(
+      "line",
+      platformUserId
+    );
+
+  if (!customer) {
+    console.log(
+      "PAYMENT SLIP - CUSTOMER NOT FOUND"
+    );
+
+    continue;
+  }
+
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (!latestJob) {
+    console.log(
+      "PAYMENT SLIP - NO JOB FOUND",
+      {
+        customerId:
+          customer.id,
+      }
+    );
+
+    continue;
+  }
+
+  const paymentVerification =
+    verifyPaymentSlip({
+      classification:
+        imageClassification,
+
+      expectedAmount:
+        latestJob.price,
+    });
+
+  console.log(
+    "PAYMENT VERIFICATION:",
+    {
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      result:
+        paymentVerification,
+    }
+  );
+}
+
+
+// ตอนนี้ยังไม่เปลี่ยน state / ไม่บันทึก payment
 continue;
   } catch (error) {
     console.error(
