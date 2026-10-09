@@ -54,6 +54,68 @@ export async function sendLineTextMessage(
   return true;
 }
 
+export async function getLineUserProfile(
+  userId
+) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN) {
+    throw new Error(
+      "Missing LINE_CHANNEL_ACCESS_TOKEN"
+    );
+  }
+
+  if (!userId) {
+    throw new Error(
+      "Missing LINE userId"
+    );
+  }
+
+  const response = await fetch(
+    `https://api.line.me/v2/bot/profile/${userId}`,
+    {
+      method: "GET",
+
+      headers: {
+        Authorization:
+          `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `LINE profile fetch failed: ${response.status} ${responseText}`
+    );
+  }
+
+  let data = {};
+
+  if (responseText) {
+    try {
+      data =
+        JSON.parse(responseText);
+    } catch {
+      data = {};
+    }
+  }
+
+  return {
+    userId:
+      data.userId || userId,
+
+    displayName:
+      data.displayName || null,
+
+    pictureUrl:
+      data.pictureUrl || null,
+
+    statusMessage:
+      data.statusMessage || null,
+  };
+}
+
 
 export async function sendMessageToCustomer({
   platform,
