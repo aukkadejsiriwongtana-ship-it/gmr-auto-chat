@@ -1377,7 +1377,8 @@ return {
   note:
     "Waiting for map confirmation without repeating prompt",
 };
-
+}
+  
   if (
   conversation.state ===
   GMR_STATES.WAITING_REVIEW_SELECTION
