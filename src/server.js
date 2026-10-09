@@ -19,6 +19,7 @@ import {
   sendMessageToCustomer,
   replyLineTextMessage,
   downloadLineMessageContent,
+  getLineUserProfile,
 } from "./services/customerMessagingService.js";
 
 
@@ -1073,8 +1074,9 @@ if (recentOneStarReviews.length > 0) {
       jobType:
         "old_review",
 
-      customerName:
-        customer.display_name || "",
+  customerName:
+  customer.display_name ||
+  "",
 
       businessName:
         updatedJob.business_name || "",
@@ -1240,8 +1242,9 @@ try {
       jobType:
         "hidden_one_star",
 
-      customerName:
-        customer.display_name || "",
+     customerName:
+  customer.display_name ||
+  "",
 
       businessName:
         updatedJob.business_name || "",
@@ -1504,8 +1507,9 @@ try {
     jobType:
       "recent_review",
 
-    customerName:
-      customer.display_name || "",
+  customerName:
+  customer.display_name ||
+  "",
 
     businessName:
       updatedJob.business_name || "",
@@ -3102,6 +3106,28 @@ if (
       const platformUserId =
         event.source.userId;
 
+      let lineDisplayName =
+  "LINE User";
+
+try {
+  const lineProfile =
+    await getLineUserProfile(
+      platformUserId
+    );
+
+  if (
+    lineProfile?.displayName
+  ) {
+    lineDisplayName =
+      lineProfile.displayName;
+  }
+} catch (error) {
+  console.error(
+    "LINE PROFILE FETCH FAILED:",
+    error
+  );
+}
+
       const replyToken =
         event.replyToken;
 
@@ -3468,9 +3494,10 @@ const lineGroupResult =
   paymentSlipUpload?.signedUrl ||
   null,
 
-    customerName:
-      customer.display_name ||
-      "",
+customerName:
+  lineDisplayName ||
+  customer.display_name ||
+  "",
 
     businessName:
       latestJob.business_name ||
@@ -3560,20 +3587,19 @@ continue;
       // ส่งเข้า State Machine เดิม
       // ========================================
 
-      const result =
-        await processTestMessage({
-          platform: "line",
+     const result =
+  await processTestMessage({
+    platform: "line",
 
-          platformUserId,
+    platformUserId,
 
-          displayName:
-            "LINE User",
+    displayName:
+      lineDisplayName,
 
-          message,
+    message,
 
-          messageType,
-        });
-
+    messageType,
+  });
 
       console.log(
         "LINE FLOW RESULT:",
