@@ -181,6 +181,7 @@ export async function sendJobToLineGroup({
 export async function sendPaymentReviewToLineGroup({
   paymentId,
   jobId,
+  slipImageUrl = null,
   customerName,
   businessName,
   amount,
@@ -200,6 +201,7 @@ export async function sendPaymentReviewToLineGroup({
       : [
           "- ไม่ระบุ",
         ];
+
 
   const text = [
     "⚠️ ตรวจสอบสลิปด้วยคน",
@@ -227,6 +229,34 @@ export async function sendPaymentReviewToLineGroup({
   ].join("\n");
 
 
+  // ==========================================
+  // MESSAGE LIST
+  // ถ้ามีรูป → ส่งรูปก่อน แล้วตามด้วยข้อความ
+  // ถ้าไม่มีรูป → ส่งเฉพาะข้อความ
+  // ==========================================
+
+  const messages = [];
+
+
+  if (slipImageUrl) {
+    messages.push({
+      type: "image",
+
+      originalContentUrl:
+        slipImageUrl,
+
+      previewImageUrl:
+        slipImageUrl,
+    });
+  }
+
+
+  messages.push({
+    type: "text",
+    text,
+  });
+
+
   const response = await fetch(
     "https://api.line.me/v2/bot/message/push",
     {
@@ -241,14 +271,10 @@ export async function sendPaymentReviewToLineGroup({
       },
 
       body: JSON.stringify({
-        to: LINE_GROUP_ID,
+        to:
+          LINE_GROUP_ID,
 
-        messages: [
-          {
-            type: "text",
-            text,
-          },
-        ],
+        messages,
       }),
     }
   );
@@ -256,6 +282,7 @@ export async function sendPaymentReviewToLineGroup({
 
   const responseText =
     await response.text();
+
 
   let data = {};
 
@@ -276,20 +303,42 @@ export async function sendPaymentReviewToLineGroup({
   }
 
 
+  // ==========================================
+  // IMPORTANT:
+  // เราต้องเก็บ messageId ของ "ข้อความ"
+  // ไม่ใช่ messageId ของรูป
+  //
+  // ถ้ามีรูป:
+  // sentMessages[0] = รูป
+  // sentMessages[1] = ข้อความ
+  //
+  // ถ้าไม่มีรูป:
+  // sentMessages[0] = ข้อความ
+  // ==========================================
+
+  const textMessageIndex =
+    slipImageUrl
+      ? 1
+      : 0;
+
+
   const messageId =
-    data?.sentMessages?.[0]?.id ||
+    data?.sentMessages?.[
+      textMessageIndex
+    ]?.id ||
     null;
 
 
   if (!messageId) {
     throw new Error(
-      "LINE push succeeded but no sent message ID was returned"
+      "LINE push succeeded but no text message ID was returned"
     );
   }
 
 
   return {
     ok: true,
+
     messageId:
       String(messageId),
   };
