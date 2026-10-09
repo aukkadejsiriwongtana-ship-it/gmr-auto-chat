@@ -201,39 +201,103 @@ let transactionDateOk = true;
 
 if (minimumTransactionDate) {
   const slipDateText =
-    classification.transactionDate;
+    String(
+      classification.transactionDate || ""
+    ).trim();
 
-  if (!slipDateText) {
+  const validSlipDate =
+    /^\d{4}-\d{2}-\d{2}$/.test(
+      slipDateText
+    );
+
+  if (!validSlipDate) {
     transactionDateOk = false;
 
     reasons.push(
-      "PAYMENT_DATE_MISSING"
+      "PAYMENT_DATE_MISSING_OR_INVALID"
     );
   } else {
-    const slipDate =
-      new Date(
-        `${slipDateText}T00:00:00+07:00`
-      );
-
-    const minimumDate =
+    const removedDate =
       new Date(minimumTransactionDate);
-
-    // ยอมย้อนหลัง 1 วัน
-    minimumDate.setDate(
-      minimumDate.getDate() - 1
-    );
 
     if (
       Number.isNaN(
-        slipDate.getTime()
-      ) ||
-      slipDate < minimumDate
+        removedDate.getTime()
+      )
     ) {
       transactionDateOk = false;
 
       reasons.push(
-        "PAYMENT_DATE_TOO_OLD"
+        "PAYMENT_MINIMUM_DATE_INVALID"
       );
+    } else {
+      // แปลง removed_at เป็นวันที่ประเทศไทย
+      const parts =
+        new Intl.DateTimeFormat(
+          "en-US",
+          {
+            timeZone:
+              "Asia/Bangkok",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }
+        ).formatToParts(
+          removedDate
+        );
+
+      const getPart = (type) =>
+        parts.find(
+          (part) =>
+            part.type === type
+        )?.value;
+
+      const year =
+        Number(
+          getPart("year")
+        );
+
+      const month =
+        Number(
+          getPart("month")
+        );
+
+      const day =
+        Number(
+          getPart("day")
+        );
+
+      // ใช้ UTC ตรงนี้เพื่อทำ calendar math
+      // โดยไม่ให้ timezone ของ server มารบกวน
+      const minimumDate =
+        new Date(
+          Date.UTC(
+            year,
+            month - 1,
+            day
+          )
+        );
+
+      // ยอมให้จ่ายก่อน removed_at ได้ 1 วัน
+      minimumDate.setUTCDate(
+        minimumDate.getUTCDate() - 1
+      );
+
+      const minimumDateText =
+        minimumDate
+          .toISOString()
+          .slice(0, 10);
+
+      if (
+        slipDateText <
+        minimumDateText
+      ) {
+        transactionDateOk = false;
+
+        reasons.push(
+          "PAYMENT_DATE_TOO_OLD"
+        );
+      }
     }
   }
 }
