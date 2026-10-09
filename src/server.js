@@ -3899,6 +3899,10 @@ if (
       verificationReasons:
         paymentVerification.reasons ||
         [],
+
+      slipFilePath:
+  paymentSlipUpload?.filePath ||
+  null,
     });
 
 const lineGroupResult =
