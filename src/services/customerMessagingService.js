@@ -71,3 +71,57 @@ export async function sendMessageToCustomer({
     `Unsupported customer platform: ${platform}`
   );
 }
+
+export async function replyLineTextMessage(
+  replyToken,
+  text
+) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN) {
+    throw new Error(
+      "Missing LINE_CHANNEL_ACCESS_TOKEN"
+    );
+  }
+
+  if (!replyToken) {
+    throw new Error(
+      "Missing LINE replyToken"
+    );
+  }
+
+  const response = await fetch(
+    "https://api.line.me/v2/bot/message/reply",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json",
+
+        Authorization:
+          `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+
+      body: JSON.stringify({
+        replyToken,
+
+        messages: [
+          {
+            type: "text",
+            text,
+          },
+        ],
+      }),
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `LINE reply failed: ${response.status} ${responseText}`
+    );
+  }
+
+  return true;
+}
