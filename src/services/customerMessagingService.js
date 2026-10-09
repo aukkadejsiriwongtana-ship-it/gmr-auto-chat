@@ -125,3 +125,56 @@ export async function replyLineTextMessage(
 
   return true;
 }
+
+export async function downloadLineMessageContent(
+  messageId
+) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN) {
+    throw new Error(
+      "Missing LINE_CHANNEL_ACCESS_TOKEN"
+    );
+  }
+
+  if (!messageId) {
+    throw new Error(
+      "Missing LINE messageId"
+    );
+  }
+
+  const response = await fetch(
+    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+    {
+      method: "GET",
+
+      headers: {
+        Authorization:
+          `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const responseText =
+      await response.text();
+
+    throw new Error(
+      `LINE content download failed: ${response.status} ${responseText}`
+    );
+  }
+
+  const arrayBuffer =
+    await response.arrayBuffer();
+
+  const buffer =
+    Buffer.from(arrayBuffer);
+
+  const contentType =
+    response.headers.get(
+      "content-type"
+    ) || "application/octet-stream";
+
+  return {
+    buffer,
+    contentType,
+  };
+}
