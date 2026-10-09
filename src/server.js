@@ -312,7 +312,37 @@ if (
       botReply,
     };
   }
+
+    // -------------------------------------------------------
+  // EXISTING CUSTOMER WITHOUT IMPORTED HISTORY
+  // -------------------------------------------------------
+  // ลูกค้ามี record อยู่ก่อนแล้ว แต่ไม่มี payment/map
+  // อาจเป็นลูกค้าเก่าก่อนเริ่มระบบใหม่
+  // เพื่อกัน bot ส่ง Welcome ทับแชทเก่า → ให้เงียบไว้ก่อน
+
+  console.log(
+    "EXISTING CUSTOMER - NO IMPORTED HISTORY:",
+    {
+      customerId: customer.id,
+      platformUserId,
+    }
+  );
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    oldCustomer: true,
+    hasPayment: false,
+    resumedFromHistory: false,
+    botReply: null,
+    note:
+      "Existing customer without imported history. Bot suppressed to avoid restarting old conversation.",
+  };
+  
 }
+
   
   // -------------------------------------------------------
   // 4. HANDOFF CHECK
