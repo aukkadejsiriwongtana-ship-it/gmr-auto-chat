@@ -2909,7 +2909,19 @@ if (
       }
     );
 
-
+if (pendingPayment.slip_file_path) {
+  try {
+    await deletePaymentSlip(
+      pendingPayment.slip_file_path
+    );
+  } catch (error) {
+    console.error(
+      "MANUAL APPROVED SLIP DELETE FAILED:",
+      error
+    );
+  }
+}
+    
     await updateJob(
       paymentJob.id,
       {
@@ -3078,6 +3090,19 @@ if (
           "rejected",
       }
     );
+
+    if (pendingPayment.slip_file_path) {
+  try {
+    await deletePaymentSlip(
+      pendingPayment.slip_file_path
+    );
+  } catch (error) {
+    console.error(
+      "MANUAL REJECTED SLIP DELETE FAILED:",
+      error
+    );
+  }
+}
 
 
     const customerReply =
@@ -3838,6 +3863,19 @@ await updateConversationState({
   handoffReason:
     null,
 });
+
+if (paymentSlipUpload?.filePath) {
+  try {
+    await deletePaymentSlip(
+      paymentSlipUpload.filePath
+    );
+  } catch (error) {
+    console.error(
+      "AUTO PAYMENT SLIP DELETE FAILED:",
+      error
+    );
+  }
+}
   
   console.log(
     "PAYMENT SAVED:",
