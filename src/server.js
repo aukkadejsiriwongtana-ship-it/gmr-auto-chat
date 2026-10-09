@@ -5,6 +5,7 @@ import express from "express";
 
 import {
   sendMessageToCustomer,
+  replyLineTextMessage,
 } from "./services/customerMessagingService.js";
 
 
@@ -2179,21 +2180,177 @@ app.get("/test-google-sheet", async (req, res) => {
 
 app.post("/line/webhook", async (req, res) => {
   try {
+    const LINE_CHANNEL_SECRET =
+      process.env.LINE_CHANNEL_SECRET;
+
+    if (!LINE_CHANNEL_SECRET) {
+      console.error(
+        "Missing LINE_CHANNEL_SECRET"
+      );
+
+      return res.sendStatus(500);
+    }
+
+    // ==========================================
+    // VERIFY LINE SIGNATURE
+    // ==========================================
+
+    const signature =
+      req.get("x-line-signature");
+
+    if (
+      !signature ||
+      !req.rawBody
+    ) {
+      return res.sendStatus(401);
+    }
+
+    const expectedSignature =
+      crypto
+        .createHmac(
+          "sha256",
+          LINE_CHANNEL_SECRET
+        )
+        .update(req.rawBody)
+        .digest("base64");
+
+    const receivedBuffer =
+      Buffer.from(signature);
+
+    const expectedBuffer =
+      Buffer.from(expectedSignature);
+
+    const validSignature =
+      receivedBuffer.length ===
+        expectedBuffer.length &&
+      crypto.timingSafeEqual(
+        receivedBuffer,
+        expectedBuffer
+      );
+
+    if (!validSignature) {
+      console.error(
+        "INVALID LINE SIGNATURE"
+      );
+
+      return res.sendStatus(401);
+    }
+
+
+    // LINE ต้องได้รับ 200 เร็ว
+    res.sendStatus(200);
+
+
     const events =
       req.body?.events || [];
 
-    for (const event of events) {
-      console.log(
-        "LINE EVENT SOURCE:",
-        JSON.stringify(
-          event.source,
-          null,
-          2
-        )
-      );
-    }
 
-    res.sendStatus(200);
+    for (const event of events) {
+
+      // ========================================
+      // GROUP MESSAGE
+      // ไม่ส่งเข้าระบบลูกค้า
+      // ========================================
+
+      if (
+        event.source?.type === "group"
+      ) {
+        console.log(
+          "LINE GROUP EVENT:",
+          JSON.stringify(
+            event.source
+          )
+        );
+
+        continue;
+      }
+
+
+      // ========================================
+      // รับเฉพาะ USER chat
+      // ========================================
+
+      if (
+        event.source?.type !== "user"
+      ) {
+        continue;
+      }
+
+
+      if (
+        event.type !== "message"
+      ) {
+        continue;
+      }
+
+
+      const platformUserId =
+        event.source.userId;
+
+      const replyToken =
+        event.replyToken;
+
+
+      let messageType =
+        event.message?.type || "unknown";
+
+      let message = "";
+
+
+      if (
+        messageType === "text"
+      ) {
+        message =
+          event.message.text || "";
+      }
+
+
+      // ========================================
+      // ส่งเข้า State Machine เดิม
+      // ========================================
+
+      const result =
+        await processTestMessage({
+          platform: "line",
+
+          platformUserId,
+
+          displayName:
+            "LINE User",
+
+          message,
+
+          messageType,
+        });
+
+
+      console.log(
+        "LINE FLOW RESULT:",
+        result
+      );
+
+
+      // ========================================
+      // ตอบลูกค้าถ้ามี botReply
+      // ========================================
+
+      if (
+        result?.botReply &&
+        replyToken
+      ) {
+        try {
+          await replyLineTextMessage(
+            replyToken,
+            result.botReply
+          );
+        } catch (error) {
+          console.error(
+            "LINE REPLY FAILED:",
+            error
+          );
+        }
+      }
+    }
 
   } catch (error) {
     console.error(
@@ -2201,7 +2358,10 @@ app.post("/line/webhook", async (req, res) => {
       error
     );
 
-    res.sendStatus(500);
+    // ถ้ายังไม่ได้ส่ง response
+    if (!res.headersSent) {
+      return res.sendStatus(500);
+    }
   }
 });
 
