@@ -1,5 +1,9 @@
 import crypto from "crypto";
 
+import {
+  classifyCustomerImage,
+} from "./services/imageClassifierService.js";
+
 import "dotenv/config";
 import express from "express";
 
@@ -2914,20 +2918,45 @@ if (
         messageId
       );
 
-    console.log(
-      "LINE IMAGE DOWNLOADED:",
-      {
-        messageId,
-        contentType:
-          imageContent.contentType,
-        bufferLength:
-          imageContent.buffer.length,
-      }
-    );
+   console.log(
+  "LINE IMAGE DOWNLOADED:",
+  {
+    messageId,
+    contentType:
+      imageContent.contentType,
+    bufferLength:
+      imageContent.buffer.length,
+  }
+);
 
-    // กันไม่ให้รูปไหลเข้า flow ข้อความเดิม
-    continue;
 
+// ========================================
+// CLASSIFY IMAGE WITH AI
+// ========================================
+
+const imageClassification =
+  await classifyCustomerImage({
+    buffer:
+      imageContent.buffer,
+
+    contentType:
+      imageContent.contentType,
+  });
+
+
+console.log(
+  "LINE IMAGE CLASSIFICATION:",
+  {
+    messageId,
+    classification:
+      imageClassification,
+  }
+);
+
+
+// ตอนนี้ยังไม่ route เข้า flow
+// แค่ทดสอบการจำแนกรูปก่อน
+continue;
   } catch (error) {
     console.error(
       "LINE IMAGE DOWNLOAD FAILED:",
