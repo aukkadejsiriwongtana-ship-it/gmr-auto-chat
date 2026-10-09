@@ -1,6 +1,10 @@
 import crypto from "crypto";
 
 import {
+  uploadPaymentSlip,
+} from "./services/paymentSlipStorageService.js";
+
+import {
   classifyCustomerImage,
 } from "./services/imageClassifierService.js";
 
@@ -3203,6 +3207,49 @@ if (
     continue;
   }
 
+let paymentSlipUpload =
+  null;
+
+if (
+  imageClassification.type ===
+  "PAYMENT_SLIP"
+) {
+  try {
+    paymentSlipUpload =
+      await uploadPaymentSlip({
+        buffer:
+          imageContent.buffer,
+
+        contentType:
+          imageContent.contentType,
+
+        customerId:
+          customer.id,
+
+        jobId:
+          latestJob.id,
+
+        messageId,
+      });
+
+    console.log(
+      "PAYMENT SLIP UPLOADED:",
+      {
+        jobId:
+          latestJob.id,
+
+        filePath:
+          paymentSlipUpload.filePath,
+      }
+    );
+  } catch (error) {
+    console.error(
+      "PAYMENT SLIP UPLOAD FAILED:",
+      error
+    );
+  }
+}
+  
   const paymentVerification =
   verifyPaymentSlip({
     classification:
@@ -3416,6 +3463,10 @@ const lineGroupResult =
 
     jobId:
       latestJob.id,
+
+    slipImageUrl:
+  paymentSlipUpload?.signedUrl ||
+  null,
 
     customerName:
       customer.display_name ||
