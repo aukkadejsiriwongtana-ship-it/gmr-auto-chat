@@ -177,3 +177,120 @@ export async function sendJobToLineGroup({
       String(messageId),
   };
 }
+
+export async function sendPaymentReviewToLineGroup({
+  paymentId,
+  jobId,
+  customerName,
+  businessName,
+  amount,
+  transactionDate = null,
+  transactionTime = null,
+  recipientName = null,
+  recipientCardLast4 = null,
+  reasons = [],
+}) {
+  const reasonLines =
+    Array.isArray(reasons) &&
+    reasons.length > 0
+      ? reasons.map(
+          (reason) =>
+            `- ${reason}`
+        )
+      : [
+          "- ไม่ระบุ",
+        ];
+
+  const text = [
+    "⚠️ ตรวจสอบสลิปด้วยคน",
+    "",
+    `Customer: ${customerName || "-"}`,
+    `Business: ${businessName || "-"}`,
+    `ยอด: ${
+      Number(amount || 0)
+        .toLocaleString("th-TH")
+    } บาท`,
+    "",
+    `วันที่: ${transactionDate || "-"}`,
+    `เวลา: ${transactionTime || "-"}`,
+    `ผู้รับ: ${recipientName || "-"}`,
+    `เลขท้าย: ${recipientCardLast4 || "-"}`,
+    "",
+    "เหตุผลที่ระบบไม่มั่นใจ:",
+    ...reasonLines,
+    "",
+    `Job ID: ${jobId}`,
+    `Payment ID: ${paymentId}`,
+    "",
+    "👇 ถ้าตรวจแล้วถูกต้อง",
+    'กด Reply ข้อความนี้ แล้วพิมพ์ "ok"',
+  ].join("\n");
+
+
+  const response = await fetch(
+    "https://api.line.me/v2/bot/message/push",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json",
+
+        Authorization:
+          `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+
+      body: JSON.stringify({
+        to: LINE_GROUP_ID,
+
+        messages: [
+          {
+            type: "text",
+            text,
+          },
+        ],
+      }),
+    }
+  );
+
+
+  const responseText =
+    await response.text();
+
+  let data = {};
+
+  if (responseText) {
+    try {
+      data =
+        JSON.parse(responseText);
+    } catch {
+      data = {};
+    }
+  }
+
+
+  if (!response.ok) {
+    throw new Error(
+      `LINE push failed: ${response.status} ${responseText}`
+    );
+  }
+
+
+  const messageId =
+    data?.sentMessages?.[0]?.id ||
+    null;
+
+
+  if (!messageId) {
+    throw new Error(
+      "LINE push succeeded but no sent message ID was returned"
+    );
+  }
+
+
+  return {
+    ok: true,
+    messageId:
+      String(messageId),
+  };
+}
