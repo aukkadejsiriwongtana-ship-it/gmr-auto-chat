@@ -19,24 +19,23 @@ if (!LINE_GROUP_ID) {
 export async function sendJobToLineGroup({
   jobId,
   customerName,
-  platform,
-  phone,
   businessName,
+  reviewerName,
   reviewUrl,
-  price,
 }) {
   const text = [
-    "📥 NEW REVIEW JOB",
+    "💰 รอเสนอราคา",
     "",
-    `Job ID: ${jobId}`,
     `Customer: ${customerName || "-"}`,
-    `Platform: ${platform || "-"}`,
-    `Phone: ${phone || "-"}`,
     `Business: ${businessName || "-"}`,
-    `Price: ${price || "-"} THB`,
+    `Reviewer: ${reviewerName || "-"}`,
     "",
-    `Review:`,
+    "Review:",
     reviewUrl || "-",
+    "",
+    "👇 วิธีแจ้งราคา",
+    "กด Reply ข้อความนี้ แล้วพิมพ์เฉพาะราคา",
+    "เช่น 5900",
   ].join("\n");
 
   const response = await fetch(
@@ -44,8 +43,7 @@ export async function sendJobToLineGroup({
     {
       method: "POST",
       headers: {
-        "Content-Type":
-          "application/json",
+        "Content-Type": "application/json",
         Authorization:
           `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
       },
@@ -62,35 +60,37 @@ export async function sendJobToLineGroup({
   );
 
   const responseText =
-  await response.text();
+    await response.text();
 
-let data = {};
+  let data = {};
 
-if (responseText) {
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    data = {};
+  if (responseText) {
+    try {
+      data =
+        JSON.parse(responseText);
+    } catch {
+      data = {};
+    }
   }
-}
 
-if (!response.ok) {
-  throw new Error(
-    `LINE push failed: ${response.status} ${responseText}`
-  );
-}
+  if (!response.ok) {
+    throw new Error(
+      `LINE push failed: ${response.status} ${responseText}`
+    );
+  }
 
-const messageId =
-  data?.sentMessages?.[0]?.id || null;
+  const messageId =
+    data?.sentMessages?.[0]?.id || null;
 
-if (!messageId) {
-  throw new Error(
-    "LINE push succeeded but no sent message ID was returned"
-  );
-}
+  if (!messageId) {
+    throw new Error(
+      "LINE push succeeded but no sent message ID was returned"
+    );
+  }
 
-return {
-  ok: true,
-  messageId: String(messageId),
-};
+  return {
+    ok: true,
+    messageId:
+      String(messageId),
+  };
 }
