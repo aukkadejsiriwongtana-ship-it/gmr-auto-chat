@@ -4135,7 +4135,297 @@ console.log(
   }
 );
 
+// ========================================
+// REVIEW SCREENSHOT
+// IMAGE REVIEW FLOW 3.3
+// ========================================
 
+if (
+  imageClassification.type ===
+  "REVIEW_SCREENSHOT"
+) {
+  const customer =
+    await getOrCreateCustomer({
+      platform:
+        "line",
+
+      platformUserId,
+
+      displayName:
+        lineDisplayName,
+
+      language:
+        "th",
+    });
+
+
+  const conversation =
+    await getOrCreateConversation(
+      customer.id
+    );
+
+
+  const businessName =
+    String(
+      imageClassification.businessName ||
+      ""
+    ).trim();
+
+
+  // ----------------------------------------
+  // อ่านชื่อธุรกิจไม่ได้
+  // → ไม่เดา
+  // → แจ้ง Sales
+  // ----------------------------------------
+
+  if (!businessName) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        "[ลูกค้าส่งรูปรีวิว]",
+
+      reason:
+        "REVIEW_SCREENSHOT_BUSINESS_NAME_NOT_FOUND",
+    });
+
+    continue;
+  }
+
+
+  // ----------------------------------------
+  // ค้น Google Map จากชื่อธุรกิจ
+  // ----------------------------------------
+
+  const places =
+    await searchPlaceByText(
+      businessName
+    );
+
+
+  if (!places.length) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        `รูปรีวิว: ${businessName}`,
+
+      reason:
+        "REVIEW_SCREENSHOT_MAP_NOT_FOUND",
+    });
+
+    continue;
+  }
+
+
+  const place =
+    places[0];
+
+
+  // ----------------------------------------
+  // สร้าง Job ชั่วคราว
+  // จำไว้ว่าเริ่มจากรูปรีวิว
+  // ----------------------------------------
+
+  const job =
+    await createJob({
+      customerId:
+        customer.id,
+
+      businessName:
+        place.businessName ||
+        businessName,
+
+      placeId:
+        place.placeId,
+
+      mapUrl:
+        place.mapUrl,
+
+      reviewCase:
+        "image_review_pending",
+
+      reviewVisible:
+        true,
+
+      reviewHasText:
+        Boolean(
+          imageClassification.reviewText
+        ),
+
+      status:
+        "draft",
+    });
+
+
+  // ----------------------------------------
+  // เก็บข้อมูลรีวิวจากรูป
+  // รับได้ทุก Rating 1–5 ดาว
+  // ----------------------------------------
+
+  await saveReviewCandidate({
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    businessName:
+      place.businessName ||
+      businessName,
+
+    placeId:
+      place.placeId,
+
+    mapUrl:
+      place.mapUrl,
+
+    reviewerName:
+      imageClassification.reviewerName ||
+      null,
+
+    rating:
+      Number(
+        imageClassification.rating
+      ) || null,
+
+    reviewText:
+      imageClassification.reviewText ||
+      null,
+
+    reviewDate:
+      null,
+
+    reviewUrl:
+      null,
+
+    providerReviewId:
+      null,
+
+    isRecent:
+      null,
+
+    isVisible:
+      true,
+
+    hasText:
+      Boolean(
+        imageClassification.reviewText
+      ),
+  });
+
+
+  // ----------------------------------------
+  // เปลี่ยน State → รอยืนยัน Map
+  // ----------------------------------------
+
+  const nextState =
+    GMR_STATES
+      .MAP_FOUND_WAITING_CONFIRMATION;
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  // ----------------------------------------
+  // ถามลูกค้าว่า Map นี้ใช่ไหม
+  // ----------------------------------------
+
+  const template =
+    await getTemplate(
+      "confirm_map",
+      customer.language || "th"
+    );
+
+
+  if (!template) {
+    throw new Error(
+      "confirm_map template not found"
+    );
+  }
+
+
+  const botReply =
+    template.content.replace(
+      "{{map_url}}",
+      place.mapUrl
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      "line",
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  await replyLineTextMessage(
+    replyToken,
+    botReply
+  );
+
+
+  console.log(
+    "IMAGE REVIEW MAP CONFIRMATION SENT:",
+    {
+      customerId:
+        customer.id,
+
+      jobId:
+        job.id,
+
+      businessName:
+        place.businessName ||
+        businessName,
+
+      reviewerName:
+        imageClassification.reviewerName ||
+        null,
+
+      rating:
+        imageClassification.rating ||
+        null,
+
+      mapUrl:
+        place.mapUrl,
+    }
+  );
+
+
+  continue;
+}
+    
 if (
   imageClassification.type ===
   "PAYMENT_SLIP"
