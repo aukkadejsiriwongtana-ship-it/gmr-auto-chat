@@ -3304,6 +3304,71 @@ if (transactionReference) {
     );
 }
 
+  // -----------------------------------------
+// DUPLICATE PAYMENT SLIP
+// แจ้งลูกค้าทันที และหยุด flow
+// -----------------------------------------
+
+if (referenceAlreadyUsed) {
+  const duplicateSlipReply =
+    "ตรวจพบว่าสลิปนี้เคยถูกใช้ยืนยันการชำระแล้วครับ รบกวนส่งสลิปรายการใหม่อีกครั้งครับ";
+
+  try {
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
+
+      platformUserId:
+        customer.platform_user_id,
+
+      text:
+        duplicateSlipReply,
+    });
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        customer.platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        duplicateSlipReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      duplicateSlipReply
+    );
+
+  } catch (error) {
+    console.error(
+      "DUPLICATE SLIP CUSTOMER REPLY FAILED:",
+      error
+    );
+  }
+
+  console.log(
+    "DUPLICATE PAYMENT SLIP REJECTED:",
+    {
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      transactionReference,
+    }
+  );
+
+  continue;
+}
 
 // -----------------------------------------
 // REFERENCE CHECK
@@ -3316,17 +3381,6 @@ if (!transactionReference) {
 
   paymentVerification.reasons.push(
     "PAYMENT_REFERENCE_MISSING"
-  );
-
-  paymentVerification.checks.referenceUnique =
-    false;
-} else if (referenceAlreadyUsed) {
-  paymentVerification.verified = false;
-  paymentVerification.status =
-    "NEEDS_REVIEW";
-
-  paymentVerification.reasons.push(
-    "PAYMENT_REFERENCE_ALREADY_USED"
   );
 
   paymentVerification.checks.referenceUnique =
