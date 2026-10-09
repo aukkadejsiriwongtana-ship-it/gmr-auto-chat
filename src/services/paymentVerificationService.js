@@ -114,24 +114,10 @@ export function verifyPaymentSlip({
       classification.recipientName
     );
 
-  const recipientNameMatch =
-    Boolean(expectedName) &&
-    Boolean(slipRecipientName) &&
-    (
-      slipRecipientName.includes(
-        expectedName
-      ) ||
-      expectedName.includes(
-        slipRecipientName
-      )
-    );
-
-  if (!recipientNameMatch) {
-    reasons.push(
-      "RECIPIENT_NAME_MISMATCH"
-    );
-  }
-
+const recipientNameMatch =
+  Boolean(expectedName) &&
+  Boolean(slipRecipientName) &&
+  slipRecipientName === expectedName;
 
   // -----------------------------------------
   // BILLER ID CHECK
