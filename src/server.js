@@ -3370,6 +3370,112 @@ if (referenceAlreadyUsed) {
   continue;
 }
 
+  // -----------------------------------------
+// CUSTOMER-CORRECTABLE PAYMENT ERRORS
+// วันที่เก่า / ชื่อผู้รับไม่ตรง
+// แจ้งลูกค้าทันที และไม่ส่งเข้ากลุ่ม
+// -----------------------------------------
+
+const verificationReasons =
+  Array.isArray(
+    paymentVerification.reasons
+  )
+    ? paymentVerification.reasons
+    : [];
+
+const recipientNameMismatch =
+  verificationReasons.includes(
+    "RECIPIENT_NAME_MISMATCH"
+  );
+
+const paymentDateTooOld =
+  verificationReasons.includes(
+    "PAYMENT_DATE_TOO_OLD"
+  );
+
+
+if (
+  recipientNameMismatch ||
+  paymentDateTooOld
+) {
+  let invalidSlipReply = "";
+
+  if (
+    recipientNameMismatch &&
+    paymentDateTooOld
+  ) {
+    invalidSlipReply =
+      "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+  } else if (
+    recipientNameMismatch
+  ) {
+    invalidSlipReply =
+      "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+  } else {
+    invalidSlipReply =
+      "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ";
+  }
+
+
+  try {
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
+
+      platformUserId:
+        customer.platform_user_id,
+
+      text:
+        invalidSlipReply,
+    });
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        customer.platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        invalidSlipReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      invalidSlipReply
+    );
+
+  } catch (error) {
+    console.error(
+      "INVALID SLIP CUSTOMER REPLY FAILED:",
+      error
+    );
+  }
+
+
+  console.log(
+    "PAYMENT SLIP REJECTED BEFORE REVIEW:",
+    {
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      reasons:
+        verificationReasons,
+    }
+  );
+
+  continue;
+}
+
 // -----------------------------------------
 // REFERENCE CHECK
 // -----------------------------------------
