@@ -2,6 +2,7 @@ import crypto from "crypto";
 
 import {
   uploadPaymentSlip,
+  deletePaymentSlip,
 } from "./services/paymentSlipStorageService.js";
 
 import {
