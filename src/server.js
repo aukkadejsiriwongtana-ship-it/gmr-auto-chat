@@ -55,6 +55,7 @@ getLatestJobWithMapByCustomerId,
   updateJob,
   saveReviewCandidate,
   getReviewCandidatesByJobId,
+  getReviewsByJobId,
   selectReviewCandidate,
   createQuote,
   updateQuote,
@@ -1377,10 +1378,10 @@ if (
   latestJob.review_case ===
   "image_review_pending"
 ) {
-  const imageReviews =
-    await getReviewCandidatesByJobId(
-      latestJob.id
-    );
+const imageReviews =
+  await getReviewsByJobId(
+    latestJob.id
+  );
 
   const imageReview =
     imageReviews[0] ||
