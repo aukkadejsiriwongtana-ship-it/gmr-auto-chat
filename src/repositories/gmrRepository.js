@@ -497,6 +497,98 @@ export async function createPayment({
   return data;
 }
 
+export async function getPaymentByLineGroupMessageId(
+  lineGroupMessageId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_payments")
+      .select("*")
+      .eq(
+        "line_group_message_id",
+        String(lineGroupMessageId)
+      )
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function updatePayment(
+  paymentId,
+  updates
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_payments")
+      .update(updates)
+      .eq(
+        "id",
+        paymentId
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function createPendingPayment({
+  jobId,
+  amount,
+  paymentMethod = "KTC_BILLER",
+  transactionReference = null,
+  transactionDate = null,
+  transactionTime = null,
+  recipientName = null,
+  recipientBillerId = null,
+  recipientCardLast4 = null,
+  verificationReasons = [],
+}) {
+  const { data, error } =
+    await supabase
+      .from("gmr_payments")
+      .insert({
+        job_id: jobId,
+        amount,
+        payment_method: paymentMethod,
+        slip_received: true,
+        payment_verified: false,
+        verified_at: null,
+        transaction_reference:
+          transactionReference,
+        transaction_date:
+          transactionDate,
+        transaction_time:
+          transactionTime,
+        recipient_name:
+          recipientName,
+        recipient_biller_id:
+          recipientBillerId,
+        recipient_card_last4:
+          recipientCardLast4,
+        review_status:
+          "pending",
+        verification_reasons:
+          verificationReasons,
+      })
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 
 export async function getLatestJobWithMapByCustomerId(
   customerId
