@@ -94,6 +94,107 @@ getRecentReviews,
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+async function triggerHumanAttention({
+  customer,
+  conversation,
+  message,
+  reason,
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+  if (!token || !groupId) {
+    console.error(
+      "HUMAN ATTENTION FAILED: Missing LINE config"
+    );
+
+    return {
+      sent: false,
+    };
+  }
+
+  const customerName =
+    customer?.display_name ||
+    "ไม่ทราบชื่อ";
+
+  const state =
+    conversation?.state ||
+    "UNKNOWN";
+
+  const text = [
+    "⚠️ ต้องตรวจแชทลูกค้า",
+    "",
+    `ลูกค้า: ${customerName}`,
+    `State: ${state}`,
+    "",
+    "ข้อความล่าสุด:",
+    `"${String(message || "").trim()}"`,
+    "",
+    `เหตุผล: ${reason}`,
+    "",
+    "Bot ยังไม่ตอบลูกค้า",
+    "State เดิมยังคงอยู่",
+    "เมื่อลูกค้าตอบใหม่ ระบบจะลองเข้า Flow ต่อให้อัตโนมัติครับ",
+  ].join("\n");
+
+  try {
+    const response =
+      await fetch(
+        "https://api.line.me/v2/bot/message/push",
+        {
+          method: "POST",
+
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+
+            "Content-Type":
+              "application/json",
+          },
+
+          body: JSON.stringify({
+            to: groupId,
+
+            messages: [
+              {
+                type: "text",
+                text,
+              },
+            ],
+          }),
+        }
+      );
+
+    if (!response.ok) {
+      const errorText =
+        await response.text();
+
+      throw new Error(
+        `LINE push failed ${response.status}: ${errorText}`
+      );
+    }
+
+    return {
+      sent: true,
+    };
+
+  } catch (error) {
+    console.error(
+      "HUMAN ATTENTION LINE ERROR:",
+      error
+    );
+
+    return {
+      sent: false,
+      error:
+        error.message,
+    };
+  }
+}
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -1368,6 +1469,15 @@ try {
   // ลูกค้าพิมพ์อย่างอื่น
   // -----------------------------------------------------
 
+await triggerHumanAttention({
+  customer,
+  conversation,
+  message,
+
+  reason:
+    "UNHANDLED_MESSAGE_IN_MAP_CONFIRMATION",
+});
+  
 return {
   ok: true,
   customerId: customer.id,
