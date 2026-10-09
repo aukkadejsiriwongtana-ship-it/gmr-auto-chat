@@ -734,8 +734,22 @@ if (
     "nope",
   ];
 
-  const isYes = yesWords.includes(normalized);
-  const isNo = noWords.includes(normalized);
+  const cleanedNormalized =
+  normalized
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim();
+
+const isNo =
+  noWords.includes(cleanedNormalized) ||
+  cleanedNormalized.startsWith("ไม่ใช่");
+
+const isYes =
+  !isNo &&
+  (
+    yesWords.includes(cleanedNormalized) ||
+    cleanedNormalized.startsWith("ใช่") ||
+    cleanedNormalized.startsWith("ถูกต้อง")
+  );
 
   // -----------------------------------------------------
   // ลูกค้าตอบ "ใช่"
@@ -1354,30 +1368,15 @@ try {
   // ลูกค้าพิมพ์อย่างอื่น
   // -----------------------------------------------------
 
-  const botReply =
-    'รบกวนยืนยันว่าเป็น Google Map นี้หรือไม่ครับ พิมพ์ "ใช่" หรือ "ไม่ใช่" ได้เลยครับ';
-
-  await saveMessage({
-    customerId: customer.id,
-    platform,
-    direction: "outbound",
-    messageType: "text",
-    messageText: botReply,
-  });
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
-
-  return {
-    ok: true,
-    customerId: customer.id,
-    stateBefore: conversation.state,
-    stateAfter: conversation.state,
-    botReply,
-  };
-}
+return {
+  ok: true,
+  customerId: customer.id,
+  stateBefore: conversation.state,
+  stateAfter: conversation.state,
+  botReply: null,
+  note:
+    "Waiting for map confirmation without repeating prompt",
+};
 
   if (
   conversation.state ===
@@ -2849,14 +2848,30 @@ if (
 
   if (pendingPayment) {
 
-    if (
-      pendingPayment.payment_verified === true
-    ) {
-      await replyLineTextMessage(
-        event.replyToken,
-        "✅ สลิปนี้ถูกยืนยันไปแล้วครับ"
-      );
+if (
+  pendingPayment.payment_verified === true ||
+  pendingPayment.review_status ===
+    "approved"
+) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "✅ สลิปนี้ถูกยืนยันไปแล้วครับ"
+  );
 
+  continue;
+}
+
+if (
+  pendingPayment.review_status ===
+  "rejected"
+) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "❌ สลิปนี้ถูกปฏิเสธไปแล้ว ไม่สามารถยืนยันย้อนหลังได้ครับ"
+  );
+
+  continue;
+}
       continue;
     }
 
@@ -3033,6 +3048,19 @@ if (
     );
 
   if (pendingPayment) {
+
+    if (
+  pendingPayment.payment_verified === true ||
+  pendingPayment.review_status ===
+    "approved"
+) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "✅ สลิปนี้ถูกยืนยันไปแล้ว ไม่สามารถปฏิเสธย้อนหลังได้ครับ"
+  );
+
+  continue;
+}
 
     if (
       pendingPayment.review_status ===
