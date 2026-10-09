@@ -479,9 +479,41 @@ const existingCustomer =
 // EXISTING CUSTOMER HISTORY CHECK
 // -------------------------------------------------------
 
+const normalizedMessage =
+  String(message || "")
+    .trim()
+    .toLowerCase();
+
+const restartWords = [
+  "สนใจบริการ",
+  "สนใจ",
+  "สอบถามบริการ",
+  "ต้องการใช้บริการ",
+  "เริ่มใหม่",
+  "start",
+  "start over",
+];
+
+const isExplicitRestart =
+  restartWords.some(
+    (word) =>
+      normalizedMessage === word ||
+      normalizedMessage.startsWith(
+        `${word} `
+      ) ||
+      normalizedMessage.startsWith(
+        `${word}ครับ`
+      ) ||
+      normalizedMessage.startsWith(
+        `${word}ค่ะ`
+      )
+  );
+
+
 if (
   existingCustomer &&
-  conversation.state === GMR_STATES.NEW
+  conversation.state === GMR_STATES.NEW &&
+  !isExplicitRestart
 ) {
   const hasPayment =
     await hasPaymentByCustomerId(
