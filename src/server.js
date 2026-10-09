@@ -75,7 +75,7 @@ import {
 import {
   getNewestReviews,
   getLowestReviews,
-  getRecentReviews,
+getRecentReviews,
   getOneStarReviews,
 } from "./services/reviewProvider.js";
 
@@ -763,11 +763,14 @@ if (
       latestJob.place_id
     );
 
-  const recentReviews =
-    getRecentReviews(
-      newestResult.reviews,
-      14
-    );
+const recentOneStarReviews =
+  getRecentReviews(
+    newestResult.reviews.filter(
+      (review) =>
+        Number(review.rating) === 1
+    ),
+    14
+  );
 
 
   // -----------------------------------------------------
@@ -776,7 +779,7 @@ if (
   // → WAITING_REVIEW_SELECTION
   // -----------------------------------------------------
 
-  if (recentReviews.length > 0) {
+if (recentOneStarReviews.length > 0) {
 
     const template =
       await getTemplate(
@@ -795,14 +798,14 @@ if (
       template.content.replace(
         "{{review_count}}",
         String(
-          recentReviews.length
+          recentOneStarReviews.length
         )
       );
 
 
     // ต่อท้ายลิงก์รีวิวทุกอัน
     const reviewLines =
-      recentReviews
+      recentOneStarReviews
         .map(
           (review, index) => {
 
@@ -843,7 +846,7 @@ if (
 
     // บันทึก reviews ลง DB
     for (
-      const review of recentReviews
+      const review of recentOneStarReviews
     ) {
       await saveReviewCandidate({
         customerId:
@@ -971,7 +974,7 @@ if (
         "recent_review",
 
       recentCount:
-        recentReviews.length,
+       recentOneStarReviews.length,
 
       botReply,
     };
@@ -2064,11 +2067,14 @@ app.get("/test-newest-reviews", async (req, res) => {
         placeId
       );
 
-    const recentReviews =
-      getRecentReviews(
-        result.reviews,
-        14
-      );
+    const recentOneStarReviews =
+  getRecentReviews(
+    result.reviews.filter(
+      (review) =>
+        Number(review.rating) === 1
+    ),
+    14
+  );
 
     res.status(200).json({
       ok: true,
@@ -2077,9 +2083,9 @@ app.get("/test-newest-reviews", async (req, res) => {
         result.reviews.length,
 
       recentCount:
-        recentReviews.length,
+        recentOneStarReviews.length,
 
-      recentReviews,
+     recentOneStarReviews,
 
       reviews:
         result.reviews,
