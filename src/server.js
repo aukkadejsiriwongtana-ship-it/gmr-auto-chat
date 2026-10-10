@@ -852,22 +852,62 @@ if (
 ) {
 
   const initialClassification =
-    classifyInput({
-      messageType,
-      text:
-        message || "",
-    });
+  classifyInput({
+    messageType,
+    text:
+      message || "",
+  });
 
 
-  const hasActionableInput =
-    [
-      INPUT_TYPES.MAP_URL,
-      INPUT_TYPES.REVIEW_URL,
-      INPUT_TYPES.BUSINESS_NAME,
-      INPUT_TYPES.IMAGE_REVIEW,
-    ].includes(
-      initialClassification.type
-    );
+const initialText =
+  String(message || "")
+    .trim()
+    .toLowerCase();
+
+
+const serviceInquiryPatterns = [
+  "สนใจ",
+  "สอบถาม",
+  "ลบรีวิว",
+  "อยากลบรีวิว",
+  "ต้องการลบรีวิว",
+  "google map review",
+  "google maps review",
+  "remove review",
+  "remove a review",
+  "remove google review",
+  "remove a google review",
+  "delete review",
+  "delete a review",
+  "review removal",
+  "i want to remove",
+  "i need to remove",
+  "interested in",
+];
+
+
+const isServiceInquiry =
+  serviceInquiryPatterns.some(
+    (pattern) =>
+      initialText.includes(
+        pattern
+      )
+  );
+
+
+const hasActionableInput =
+  [
+    INPUT_TYPES.MAP_URL,
+    INPUT_TYPES.REVIEW_URL,
+    INPUT_TYPES.IMAGE_REVIEW,
+  ].includes(
+    initialClassification.type
+  ) ||
+  (
+    initialClassification.type ===
+      INPUT_TYPES.BUSINESS_NAME &&
+    !isServiceInquiry
+  );
 
 
   // -----------------------------------------------------
