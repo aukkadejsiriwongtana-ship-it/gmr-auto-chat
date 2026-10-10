@@ -8270,22 +8270,29 @@ continue;
       // ตอบลูกค้าถ้ามี botReply
       // ========================================
 
-      if (
-        result?.botReply &&
-        replyToken
-      ) {
-        try {
-          await replyLineTextMessage(
-            replyToken,
-            result.botReply
-          );
-        } catch (error) {
-          console.error(
-            "LINE REPLY FAILED:",
-            error
-          );
-        }
-      }
+     if (
+  result?.botReply
+) {
+  try {
+
+    await sendMessageToCustomer({
+      platform:
+        "line",
+
+      platformUserId,
+
+      text:
+        result.botReply,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "LINE PUSH RESULT FAILED:",
+      error
+    );
+  }
+}
     }
 
   } catch (error) {
