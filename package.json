@@ -13,6 +13,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "openai": "^6.8.1",
-    "sharp": "^0.34.4"
+   "sharp": "^0.34.4",
+"@fontsource/noto-sans-thai": "^5.2.8"
   }
 }
