@@ -99,6 +99,9 @@ import {
   createReviewEvidenceSignedUrl,
 } from "./services/reviewEvidenceService.js";
 
+import {
+  createReviewScreenshot,
+} from "./services/reviewScreenshotService.js";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -2034,114 +2037,115 @@ for (
 
   try {
 
-    // -----------------------------------------
-    // 1. สร้าง Review Card PNG
-    // -----------------------------------------
-
-    const evidenceBuffer =
-      await createReviewEvidenceImage({
-        businessName:
-          latestJob.business_name,
-
-        reviewerName:
-          review.reviewerName,
-
-        rating:
-          review.rating,
-
-        reviewText:
-          review.text,
-
-        reviewDateText:
-          review.dateText,
-
-        index:
-          index + 1,
-      });
+  if (!review.reviewUrl) {
+    throw new Error(
+      "Review has no reviewUrl"
+    );
+  }
 
 
-    // -----------------------------------------
-    // 2. Upload เข้า Supabase Storage
-    // -----------------------------------------
+  // -----------------------------------------
+  // 1. เปิด Google Review จริงและแคปหน้าจอ
+  // -----------------------------------------
 
-    const evidenceUpload =
-      await uploadReviewEvidence({
-        buffer:
-          evidenceBuffer,
-
-        customerId:
-          customer.id,
-
-        jobId:
-          latestJob.id,
-
-        reviewId:
-          review.reviewId ||
-          null,
-
-        index:
-          index + 1,
-      });
-
-
-    evidenceImagePath =
-      evidenceUpload.filePath;
-
-
-    // -----------------------------------------
-    // 3. สร้าง Signed URL
-    // -----------------------------------------
-
-    const evidenceImageUrl =
-      await createReviewEvidenceSignedUrl(
-        evidenceImagePath
-      );
-
-
-    // -----------------------------------------
-    // 4. ส่งรูปให้ลูกค้าทาง LINE
-    // -----------------------------------------
-
-    await sendMessageToCustomer({
-      platform,
-      platformUserId,
-
-      imageUrl:
-        evidenceImageUrl,
+  const evidenceBuffer =
+    await createReviewScreenshot({
+      reviewUrl:
+        review.reviewUrl,
     });
 
 
-    console.log(
-      "REVIEW EVIDENCE SENT:",
-      {
-        jobId:
-          latestJob.id,
+  // -----------------------------------------
+  // 2. Upload screenshot เข้า Supabase
+  // -----------------------------------------
 
-        reviewerName:
-          review.reviewerName,
+  const evidenceUpload =
+    await uploadReviewEvidence({
+      buffer:
+        evidenceBuffer,
 
-        evidenceImagePath,
-      }
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      reviewId:
+        review.reviewId ||
+        null,
+
+      index:
+        index + 1,
+    });
+
+
+  evidenceImagePath =
+    evidenceUpload.filePath;
+
+
+  // -----------------------------------------
+  // 3. สร้าง URL ชั่วคราวให้ LINE เปิดรูป
+  // -----------------------------------------
+
+  const evidenceImageUrl =
+    await createReviewEvidenceSignedUrl(
+      evidenceImagePath
     );
 
-  } catch (error) {
 
-    // ถ้ารูปมีปัญหา
-    // ห้ามทำให้ flow เลือกรีวิวพัง
-    console.error(
-      "REVIEW EVIDENCE FAILED:",
-      {
-        jobId:
-          latestJob.id,
+  // -----------------------------------------
+  // 4. ส่ง screenshot จริงให้ลูกค้า
+  // -----------------------------------------
 
-        reviewerName:
-          review.reviewerName,
+  await sendMessageToCustomer({
+    platform,
+    platformUserId,
 
-        error:
-          error.message,
-      }
-    );
-  }
+    imageUrl:
+      evidenceImageUrl,
+  });
+
+
+  console.log(
+    "REVIEW SCREENSHOT SENT:",
+    {
+      jobId:
+        latestJob.id,
+
+      reviewerName:
+        review.reviewerName,
+
+      reviewUrl:
+        review.reviewUrl,
+
+      evidenceImagePath,
+    }
+  );
+
+} catch (error) {
+
+  // Screenshot ไม่สำเร็จ
+  // ไม่สร้างการ์ดปลอม
+  // botReply ด้านล่างยังมีชื่อ + ดาว + วันที่ + review URL
+  // จึงใช้ข้อความเป็น fallback อัตโนมัติ
+
+  console.error(
+    "REVIEW SCREENSHOT FAILED:",
+    {
+      jobId:
+        latestJob.id,
+
+      reviewerName:
+        review.reviewerName,
+
+      reviewUrl:
+        review.reviewUrl,
+
+      error:
+        error.message,
+    }
+  );
+}
 
 
   // -----------------------------------------
