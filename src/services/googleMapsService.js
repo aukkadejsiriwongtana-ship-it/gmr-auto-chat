@@ -126,15 +126,28 @@ function extractPlaceNameFromGoogleMapsHtml(
 
 
   if (
-    ogTitleMatch?.[1]
-  ) {
-    return ogTitleMatch[1]
+  ogTitleMatch?.[1]
+) {
+  const ogTitle =
+    ogTitleMatch[1]
       .replace(
         /\s*[-–—]\s*Google Maps.*$/i,
         ""
       )
+      .replace(
+        /&amp;/gi,
+        "&"
+      )
       .trim();
+
+  if (
+    ogTitle &&
+    ogTitle.toLowerCase() !==
+      "google maps"
+  ) {
+    return ogTitle;
   }
+}
 
 
   // -----------------------------------------
