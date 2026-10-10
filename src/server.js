@@ -3126,39 +3126,35 @@ const botReply2 =
     null;
 
 
-  const nextState =
-    transitionState(
-      conversation.state,
-      GMR_STATES.WAITING_PRICE
-    );
+const nextState =
+  GMR_STATES.WAITING_MAP;
 
 
-  await updateConversationState({
-    customerId:
-      customer.id,
+await updateConversationState({
+  customerId:
+    customer.id,
 
-    state:
-      nextState,
+  state:
+    nextState,
 
-    handoff:
-      false,
+  handoff:
+    false,
 
-    handoffReason:
-      null,
-  });
+  handoffReason:
+    null,
+});
 
 
-  const updatedJob =
-    await updateJob(
-      latestJob.id,
-      {
-        review_case:
-          "old_review",
+await updateJob(
+  latestJob.id,
+  {
+    review_case:
+      "old_review_waiting_customer",
 
-        status:
-          "waiting_price",
-      }
-    );
+    status:
+      "waiting_review_input",
+  }
+);
 
 
   await sendMessageToCustomer({
@@ -3176,48 +3172,6 @@ const botReply2 =
       botReply2,
   });
 
-
-  try {
-    const lineGroupResult =
-      await sendJobToLineGroup({
-        jobId:
-          updatedJob.id,
-
-        jobType:
-          "old_review",
-
-        customerName:
-          customer.display_name ||
-          "",
-
-        businessName:
-          updatedJob.business_name ||
-          "",
-
-        mapUrl:
-          updatedJob.map_url ||
-          "",
-      });
-
-
-    if (
-      lineGroupResult?.messageId
-    ) {
-      await updateJob(
-        updatedJob.id,
-        {
-          line_group_message_id:
-            lineGroupResult.messageId,
-        }
-      );
-    }
-
-  } catch (error) {
-    console.error(
-      "OLD REVIEW PRICE REQUEST FAILED:",
-      error
-    );
-  }
 
 
   await saveMessage({
