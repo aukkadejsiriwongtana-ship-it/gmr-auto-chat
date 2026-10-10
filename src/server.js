@@ -60,6 +60,7 @@ getLatestJobWithMapByCustomerId,
   createQuote,
   updateQuote,
   updateCustomerPhone,
+  updateCustomerLanguage,
   createPendingPayment,
 getPaymentByLineGroupMessageId,
   getJobById,
@@ -79,6 +80,56 @@ import {
 import {
   searchPlaceByText,
 } from "./services/googleMapsService.js";
+function detectCustomerLanguage(
+  message,
+  currentLanguage = "th"
+) {
+  const text =
+    String(message || "")
+      .replace(
+        /https?:\/\/\S+/gi,
+        " "
+      )
+      .trim();
+
+  if (!text) {
+    return (
+      currentLanguage ||
+      "th"
+    );
+  }
+
+  const thaiMatches =
+    text.match(
+      /[\u0E00-\u0E7F]/g
+    ) || [];
+
+  if (
+    thaiMatches.length > 0
+  ) {
+    return "th";
+  }
+
+  const englishWords =
+    text.match(
+      /[A-Za-z]+/g
+    ) || [];
+
+  const commonEnglish =
+    /\b(hi|hello|hey|price|review|remove|removal|google|map|maps|how|much|can|you|please|interested|want|need|delete|help|thanks|thank)\b/i;
+
+  if (
+    commonEnglish.test(text) ||
+    englishWords.length >= 4
+  ) {
+    return "en";
+  }
+
+  return (
+    currentLanguage ||
+    "th"
+  );
+}
 
 import {
   getPlaceReviews,
@@ -468,13 +519,52 @@ const existingCustomer =
     platform,
     platformUserId
   );
-  
-  const customer = await getOrCreateCustomer({
+
+
+const detectedLanguage =
+  detectCustomerLanguage(
+    message,
+    existingCustomer?.language ||
+      "th"
+  );
+
+
+let customer =
+  await getOrCreateCustomer({
     platform,
     platformUserId,
     displayName,
-    language: "th",
+    language:
+      detectedLanguage,
   });
+
+
+if (
+  customer.language !==
+  detectedLanguage
+) {
+
+  customer =
+    await updateCustomerLanguage(
+      customer.id,
+      detectedLanguage
+    );
+
+}
+
+
+console.log(
+  "CUSTOMER LANGUAGE:",
+  {
+    customerId:
+      customer.id,
+
+    detectedLanguage,
+
+    savedLanguage:
+      customer.language,
+  }
+);
 
 
   // -------------------------------------------------------
