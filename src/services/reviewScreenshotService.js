@@ -1,5 +1,14 @@
 import puppeteer from "puppeteer";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
+const THAI_FONT_PATH =
+  fileURLToPath(
+    new URL(
+      "../assets/fonts/NotoSansThai-Regular.ttf",
+      import.meta.url
+    )
+  );
 
 // =========================================================
 // GOOGLE REVIEW SCREENSHOT
@@ -74,6 +83,48 @@ export async function createReviewScreenshot({
           45000,
       }
     );
+
+    // =========================================================
+// FORCE THAI FONT IN GOOGLE MAPS PAGE
+// =========================================================
+
+const thaiFontBuffer =
+  await readFile(
+    THAI_FONT_PATH
+  );
+
+
+const thaiFontBase64 =
+  thaiFontBuffer.toString(
+    "base64"
+  );
+
+
+await page.addStyleTag({
+  content: `
+    @font-face {
+      font-family: "NotoSansThaiLocal";
+      src: url("data:font/ttf;base64,${thaiFontBase64}")
+        format("truetype");
+      font-weight: 100 900;
+      font-style: normal;
+    }
+
+    html,
+    body,
+    body * {
+      font-family:
+        "NotoSansThaiLocal",
+        Arial,
+        sans-serif !important;
+    }
+  `,
+});
+
+
+console.log(
+  "THAI FONT INJECTED INTO GOOGLE MAPS"
+);
 
 
     // รอ Google render หน้ารีวิว
