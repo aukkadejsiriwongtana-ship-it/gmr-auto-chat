@@ -2986,10 +2986,19 @@ const imageReviews =
   // 2. ตรวจรีวิวล่าสุด
   // -----------------------------------------------------
 
-  const newestResult =
-    await getNewestReviews(
+  const [
+  newestResult,
+  lowestResult,
+] =
+  await Promise.all([
+    getNewestReviews(
       latestJob.place_id
-    );
+    ),
+
+    getLowestReviews(
+      latestJob.place_id
+    ),
+  ]);
 
     console.log(
   "NEWEST REVIEWS DEBUG:",
@@ -3154,141 +3163,15 @@ if (recentOneStarReviews.length > 0) {
         `\n\n${reviewLines}`;
     }
 
-
-    // =====================================================
-// สร้างหลักฐานรูป + ส่งรูปให้ลูกค้า + บันทึก Review
+// =====================================================
+// เก็บ Review ลง DB ก่อน
+// ไม่รอ Screenshot
 // =====================================================
 
 for (
-  let index = 0;
-  index <
-    recentOneStarReviews.length;
-  index += 1
+  const review of
+    recentOneStarReviews
 ) {
-
-  const review =
-    recentOneStarReviews[index];
-
-  let evidenceImagePath =
-    null;
-
-
-  try {
-
-  if (!review.reviewUrl) {
-    throw new Error(
-      "Review has no reviewUrl"
-    );
-  }
-
-
-  // -----------------------------------------
-  // 1. เปิด Google Review จริงและแคปหน้าจอ
-  // -----------------------------------------
-
-  const evidenceBuffer =
-    await createReviewScreenshot({
-      reviewUrl:
-        review.reviewUrl,
-    });
-
-
-  // -----------------------------------------
-  // 2. Upload screenshot เข้า Supabase
-  // -----------------------------------------
-
-  const evidenceUpload =
-    await uploadReviewEvidence({
-      buffer:
-        evidenceBuffer,
-
-      customerId:
-        customer.id,
-
-      jobId:
-        latestJob.id,
-
-      reviewId:
-        review.reviewId ||
-        null,
-
-      index:
-        index + 1,
-    });
-
-
-  evidenceImagePath =
-    evidenceUpload.filePath;
-
-
-  // -----------------------------------------
-  // 3. สร้าง URL ชั่วคราวให้ LINE เปิดรูป
-  // -----------------------------------------
-
-  const evidenceImageUrl =
-    await createReviewEvidenceSignedUrl(
-      evidenceImagePath
-    );
-
-
-  // -----------------------------------------
-  // 4. ส่ง screenshot จริงให้ลูกค้า
-  // -----------------------------------------
-
-  await sendMessageToCustomer({
-    platform,
-    platformUserId,
-
-    imageUrl:
-      evidenceImageUrl,
-  });
-
-
-  console.log(
-    "REVIEW SCREENSHOT SENT:",
-    {
-      jobId:
-        latestJob.id,
-
-      reviewerName:
-        review.reviewerName,
-
-      reviewUrl:
-        review.reviewUrl,
-
-      evidenceImagePath,
-    }
-  );
-
-} catch (error) {
-
-  // Screenshot ไม่สำเร็จ
-  // ไม่สร้างการ์ดปลอม
-  // botReply ด้านล่างยังมีชื่อ + ดาว + วันที่ + review URL
-  // จึงใช้ข้อความเป็น fallback อัตโนมัติ
-
-  console.error(
-    "REVIEW SCREENSHOT FAILED:",
-    {
-      jobId:
-        latestJob.id,
-
-      reviewerName:
-        review.reviewerName,
-
-      reviewUrl:
-        review.reviewUrl,
-
-      error:
-        error.message,
-    }
-  );
-}
-
-
-  // -----------------------------------------
-  // 5. เก็บ Review ลง DB
-  // -----------------------------------------
 
   await saveReviewCandidate({
     customerId:
@@ -3336,10 +3219,11 @@ for (
         review.text.trim()
       ),
 
-    evidenceImagePath,
+    evidenceImagePath:
+      null,
   });
 }
-
+ 
 
     const nextState =
       transitionState(
@@ -3391,7 +3275,6 @@ for (
         botReply,
     });
 
-
     await updateLastBotMessage(
       customer.id,
       botReply
@@ -3426,16 +3309,139 @@ for (
     };
   }
 
+// ========================================
+// ส่งข้อความให้ลูกค้าทันที
+// ก่อนเริ่มสร้าง Screenshot
+// ========================================
+
+try {
+
+  await sendMessageToCustomer({
+    platform,
+    platformUserId,
+    text:
+      botReply,
+  });
+
+} catch (error) {
+
+  console.error(
+    "RECENT REVIEW TEXT SEND FAILED:",
+    error
+  );
+}
+
+    // ========================================
+// SCREENSHOT BACKGROUND TASK
+// ไม่ block การตอบลูกค้า
+// ========================================
+
+void (
+  async () => {
+
+    for (
+      let index = 0;
+      index <
+        recentOneStarReviews.length;
+      index += 1
+    ) {
+
+      const review =
+        recentOneStarReviews[index];
+
+
+      try {
+
+        if (!review.reviewUrl) {
+          continue;
+        }
+
+
+        const evidenceBuffer =
+          await createReviewScreenshot({
+            reviewUrl:
+              review.reviewUrl,
+          });
+
+
+        const evidenceUpload =
+          await uploadReviewEvidence({
+            buffer:
+              evidenceBuffer,
+
+            customerId:
+              customer.id,
+
+            jobId:
+              latestJob.id,
+
+            reviewId:
+              review.reviewId ||
+              null,
+
+            index:
+              index + 1,
+          });
+
+
+        const evidenceImageUrl =
+          await createReviewEvidenceSignedUrl(
+            evidenceUpload.filePath
+          );
+
+
+        await sendMessageToCustomer({
+          platform,
+          platformUserId,
+
+          imageUrl:
+            evidenceImageUrl,
+        });
+
+
+        console.log(
+          "REVIEW SCREENSHOT SENT ASYNC:",
+          {
+            jobId:
+              latestJob.id,
+
+            reviewerName:
+              review.reviewerName,
+
+            reviewUrl:
+              review.reviewUrl,
+
+            evidenceImagePath:
+              evidenceUpload.filePath,
+          }
+        );
+
+      } catch (error) {
+
+        console.error(
+          "ASYNC REVIEW SCREENSHOT FAILED:",
+          {
+            jobId:
+              latestJob.id,
+
+            reviewerName:
+              review.reviewerName,
+
+            error:
+              error.message,
+          }
+        );
+      }
+    }
+
+  }
+)();
+    
 
   // -----------------------------------------------------
   // 4. ไม่มีรีวิวใหม่
   // ตรวจ Lowest ต่อ
   // -----------------------------------------------------
-
-  const lowestResult =
-    await getLowestReviews(
-      latestJob.place_id
-    );
 
   const oneStarReviews =
     getOneStarReviews(
