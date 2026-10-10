@@ -6528,29 +6528,39 @@ const rankedReviews =
             ) ||
             targetText.includes(
               reviewText
-            )
-          ) {
-            score += 60;
+    if (
+  reviewText ===
+  targetText
+) {
+  score += 120;
 
-          } else {
+} else if (
+  reviewText.includes(
+    targetText
+  ) ||
+  targetText.includes(
+    reviewText
+  )
+) {
+  score += 90;
 
-            // เทียบช่วงต้นข้อความ
-            const targetPrefix =
-              targetText.slice(
-                0,
-                60
-              );
+} else {
 
+  const targetPrefix =
+    targetText.slice(
+      0,
+      80
+    );
 
-            if (
-              targetPrefix.length >= 20 &&
-              reviewText.includes(
-                targetPrefix
-              )
-            ) {
-              score += 40;
-            }
-          }
+  if (
+    targetPrefix.length >= 20 &&
+    reviewText.includes(
+      targetPrefix
+    )
+  ) {
+    score += 70;
+  }
+}
         }
 
 
