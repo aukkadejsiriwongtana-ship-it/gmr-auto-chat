@@ -1,6 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import sharp from "sharp";
 import crypto from "crypto";
+import { readFile } from "node:fs/promises";
+
 
 
 const SUPABASE_URL =
@@ -11,6 +13,38 @@ const SUPABASE_SERVICE_ROLE_KEY =
 
 const REVIEW_BUCKET =
   "gmr-review-evidence";
+
+const THAI_FONT_PATH =
+  new URL(
+    "../../node_modules/@fontsource/noto-sans-thai/files/noto-sans-thai-thai-400-normal.woff2",
+    import.meta.url
+  );
+
+let thaiFontBase64 =
+  null;
+
+
+async function getThaiFontBase64() {
+
+  if (thaiFontBase64) {
+    return thaiFontBase64;
+  }
+
+
+  const fontBuffer =
+    await readFile(
+      THAI_FONT_PATH
+    );
+
+
+  thaiFontBase64 =
+    fontBuffer.toString(
+      "base64"
+    );
+
+
+  return thaiFontBase64;
+}
 
 
 if (
@@ -229,7 +263,7 @@ export async function createReviewEvidenceImage({
             y="${350 + lineIndex * 58}"
             font-size="34"
             fill="#202124"
-            font-family="Noto Sans Thai, Noto Sans, sans-serif"
+            class="review-text"
           >
             ${escapeXml(line)}
           </text>
@@ -239,12 +273,25 @@ export async function createReviewEvidenceImage({
 
 
   const svg =
-    `
-    <svg
-      width="1080"
-      height="1080"
-      xmlns="http://www.w3.org/2000/svg"
-    >
+  `
+  <svg
+    width="1080"
+    height="1080"
+    xmlns="http://www.w3.org/2000/svg"
+  >
+
+    <style>
+      @font-face {
+        font-family: "NotoSansThaiEmbedded";
+        src: url("data:font/woff2;base64,${thaiFont}") format("woff2");
+        font-weight: 400;
+        font-style: normal;
+      }
+
+      .review-text {
+        font-family: "NotoSansThaiEmbedded", "Noto Sans Thai", Arial, sans-serif;
+      }
+    </style>
 
       <rect
         width="1080"
@@ -268,7 +315,7 @@ export async function createReviewEvidenceImage({
         y="115"
         font-size="30"
         fill="#5f6368"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         REVIEW #${index}
       </text>
@@ -280,7 +327,7 @@ export async function createReviewEvidenceImage({
         font-size="40"
         font-weight="700"
         fill="#202124"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         ${safeBusinessName}
       </text>
@@ -310,7 +357,7 @@ export async function createReviewEvidenceImage({
         font-size="34"
         font-weight="700"
         fill="#202124"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         ${safeReviewerName}
       </text>
@@ -321,7 +368,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="31"
         fill="#f9ab00"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         ${stars}
       </text>
@@ -332,7 +379,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="25"
         fill="#5f6368"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         ${safeDate}
       </text>
@@ -356,7 +403,7 @@ export async function createReviewEvidenceImage({
         y="965"
         font-size="26"
         fill="#5f6368"
-        font-family="Noto Sans Thai, Noto Sans, sans-serif"
+        class="review-text"
       >
         เก็บไว้เป็นหลักฐานก่อนดำเนินการ
       </text>
