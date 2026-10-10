@@ -117,15 +117,98 @@ export async function getLineUserProfile(
 }
 
 
+export async function sendLineImageMessage(
+  userId,
+  imageUrl
+) {
+  if (!LINE_CHANNEL_ACCESS_TOKEN) {
+    throw new Error(
+      "Missing LINE_CHANNEL_ACCESS_TOKEN"
+    );
+  }
+
+  if (!userId) {
+    throw new Error(
+      "Missing LINE userId"
+    );
+  }
+
+  if (!imageUrl) {
+    throw new Error(
+      "Missing LINE imageUrl"
+    );
+  }
+
+  const response = await fetch(
+    "https://api.line.me/v2/bot/message/push",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json",
+
+        Authorization:
+          `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+
+      body: JSON.stringify({
+        to:
+          userId,
+
+        messages: [
+          {
+            type:
+              "image",
+
+            originalContentUrl:
+              imageUrl,
+
+            previewImageUrl:
+              imageUrl,
+          },
+        ],
+      }),
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `LINE customer image push failed: ${response.status} ${responseText}`
+    );
+  }
+
+  return true;
+}
+
+
 export async function sendMessageToCustomer({
   platform,
   platformUserId,
-  text,
+  text = null,
+  imageUrl = null,
 }) {
   if (platform === "line") {
-    return sendLineTextMessage(
-      platformUserId,
-      text
+
+    if (imageUrl) {
+      return sendLineImageMessage(
+        platformUserId,
+        imageUrl
+      );
+    }
+
+    if (text) {
+      return sendLineTextMessage(
+        platformUserId,
+        text
+      );
+    }
+
+    throw new Error(
+      "Missing customer message content"
     );
   }
 
