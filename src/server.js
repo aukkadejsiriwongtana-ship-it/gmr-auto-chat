@@ -6036,95 +6036,127 @@ const customer =
       customer.id
     );
 
-
-  const businessName =
-    String(
-      imageClassification.businessName ||
-      ""
-    ).trim();
-
-
-  // ----------------------------------------
-  // อ่านชื่อธุรกิจไม่ได้
-  // → ไม่เดา
-// → ขอชื่อ Map จากลูกค้า
-// → State = WAITING_MAP
-  // ----------------------------------------
-
- if (!businessName) {
-   await updateConversationState({
-  customerId:
-    customer.id,
-
-  state:
-    GMR_STATES.WAITING_MAP,
-
-  handoff:
-    false,
-
-  handoffReason:
-    null,
-});
- const botReply =
-  getCustomerText(
-    customer,
-    "รบกวนแจ้งชื่อแมพ หรือส่งลิงก์ Google Map มาได้เลยครับ เพื่อให้ตรวจสอบต่อได้",
-    "Please send the Google Maps business name or the Google Maps link so I can continue checking it."
-  );
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform:
-      "line",
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
-  });
+const businessName =
+  String(
+    imageClassification.businessName ||
+    ""
+  ).trim();
 
 
-  await updateLastBotMessage(
-    customer.id,
-    botReply
+const screenshotReviewerName =
+  String(
+    imageClassification.reviewerName ||
+    ""
+  ).trim();
+
+
+const screenshotRating =
+  Number(
+    imageClassification.rating
+  ) ||
+  null;
+
+
+const screenshotReviewText =
+  String(
+    imageClassification.reviewText ||
+    ""
+  ).trim();
+
+
+// ========================================
+// STEP 1
+// หา Map ที่ลูกค้ากำลังคุยอยู่ก่อน
+// ห้ามเดา Map ใหม่จากข้อความใน Screenshot
+// ถ้ามี Map เดิมใน Job ให้ใช้ Map นั้นทันที
+// ========================================
+
+let mapJob =
+  await getLatestJobWithMapByCustomerId(
+    customer.id
   );
 
 
-  await replyLineTextMessage(
-    replyToken,
-    botReply
-  );
+let placeId =
+  mapJob?.place_id ||
+  null;
 
 
-  console.log(
-    "REVIEW SCREENSHOT BUSINESS NAME MISSING:",
-    {
+let mapUrl =
+  mapJob?.map_url ||
+  null;
+
+
+let resolvedBusinessName =
+  mapJob?.business_name ||
+  null;
+
+
+// ========================================
+// ไม่มี Map เดิม
+// → ค่อยใช้ businessName ที่อ่านจาก Screenshot
+// ========================================
+
+if (!placeId) {
+
+  if (!businessName) {
+
+    await updateConversationState({
       customerId:
         customer.id,
 
-      reviewerName:
-        imageClassification.reviewerName ||
+      state:
+        GMR_STATES.WAITING_MAP,
+
+      handoff:
+        false,
+
+      handoffReason:
         null,
-
-      rating:
-        imageClassification.rating ||
-        null,
-    }
-  );
+    });
 
 
-  continue;
-}
+    const botReply =
+      getCustomerText(
+        customer,
+        "รบกวนส่งลิงก์ Google Map ของธุรกิจมาก่อนครับ แล้วผมจะค้นหารีวิวในแมพให้",
+        "Please send the Google Maps link for the business first, and I'll locate this review on the map."
+      );
 
 
-  // ----------------------------------------
-  // ค้น Google Map จากชื่อธุรกิจ
-  // ----------------------------------------
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        "line",
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    await replyLineTextMessage(
+      replyToken,
+      botReply
+    );
+
+
+    continue;
+  }
+
 
   const places =
     await searchPlaceByText(
@@ -6133,6 +6165,7 @@ const customer =
 
 
   if (!places.length) {
+
     await triggerHumanAttention({
       customer,
       conversation,
@@ -6144,6 +6177,7 @@ const customer =
         "REVIEW_SCREENSHOT_MAP_NOT_FOUND",
     });
 
+
     continue;
   }
 
@@ -6152,145 +6186,32 @@ const customer =
     places[0];
 
 
-  // ----------------------------------------
-  // สร้าง Job ชั่วคราว
-  // จำไว้ว่าเริ่มจากรูปรีวิว
-  // ----------------------------------------
-
-  const job =
-    await createJob({
-      customerId:
-        customer.id,
-
-      businessName:
-        place.businessName ||
-        businessName,
-
-      placeId:
-        place.placeId,
-
-      mapUrl:
-        place.mapUrl,
-
-      reviewCase:
-        "image_review_pending",
-
-      reviewVisible:
-        true,
-
-      reviewHasText:
-        Boolean(
-          imageClassification.reviewText
-        ),
-
-      status:
-        "draft",
-    });
+  placeId =
+    place.placeId;
 
 
-  // ----------------------------------------
-  // เก็บข้อมูลรีวิวจากรูป
-  // รับได้ทุก Rating 1–5 ดาว
-  // ----------------------------------------
-
-  await saveReviewCandidate({
-    customerId:
-      customer.id,
-
-    jobId:
-      job.id,
-
-    businessName:
-      place.businessName ||
-      businessName,
-
-    placeId:
-      place.placeId,
-
-    mapUrl:
-      place.mapUrl,
-
-    reviewerName:
-      imageClassification.reviewerName ||
-      null,
-
-    rating:
-      Number(
-        imageClassification.rating
-      ) || null,
-
-    reviewText:
-      imageClassification.reviewText ||
-      null,
-
-    reviewDate:
-      null,
-
-    reviewUrl:
-      null,
-
-    providerReviewId:
-      null,
-
-    isRecent:
-      null,
-
-    isVisible:
-      true,
-
-    hasText:
-      Boolean(
-        imageClassification.reviewText
-      ),
-  });
+  mapUrl =
+    place.mapUrl;
 
 
-  // ----------------------------------------
-  // เปลี่ยน State → รอยืนยัน Map
-  // ----------------------------------------
-
-  const nextState =
-    GMR_STATES
-      .MAP_FOUND_WAITING_CONFIRMATION;
+  resolvedBusinessName =
+    place.businessName ||
+    businessName;
+}
 
 
-  await updateConversationState({
-    customerId:
-      customer.id,
+// ========================================
+// STEP 2
+// ต้องมีชื่อ Reviewer เพื่อใช้ค้น Review จริง
+// ========================================
 
-    state:
-      nextState,
-
-    handoff:
-      false,
-
-    handoffReason:
-      null,
-  });
-
-
-  // ----------------------------------------
-  // ถามลูกค้าว่า Map นี้ใช่ไหม
-  // ----------------------------------------
-
-  const template =
-    await getTemplate(
-      "confirm_map",
-      customer.language || "th"
-    );
-
-
-  if (!template) {
-    throw new Error(
-      "confirm_map template not found"
-    );
-  }
-
+if (!screenshotReviewerName) {
 
   const botReply =
-    template.content.replace(
-      "{{map_url}}",
-      place.mapUrl
+    getCustomerText(
+      customer,
+      "ตอนนี้ยังอ่านชื่อผู้รีวิวจากรูปไม่ชัดครับ รบกวนส่งรูปรีวิวที่เห็นชื่อผู้รีวิวชัดขึ้น หรือส่งลิงก์รีวิวมาได้เลยครับ",
+      "I couldn't clearly read the reviewer's name from the screenshot. Please send a clearer screenshot showing the reviewer name, or send the review link."
     );
 
 
@@ -6324,35 +6245,611 @@ const customer =
   );
 
 
+  continue;
+}
+
+
+// ========================================
+// STEP 3
+// ดึง Review จาก Map จริง
+//
+// newest = ช่วยหารีวิวใหม่
+// lowest = ช่วยหารีวิวดาวต่ำ/เก่า
+//
+// รวมสองชุดแล้ว Match
+// ========================================
+
+let newestReviews = [];
+
+let lowestReviews = [];
+
+
+try {
+
+  const newestResult =
+    await getNewestReviews(
+      placeId
+    );
+
+
+  newestReviews =
+    Array.isArray(
+      newestResult?.reviews
+    )
+      ? newestResult.reviews
+      : [];
+
+} catch (error) {
+
+  console.error(
+    "IMAGE REVIEW NEWEST LOOKUP FAILED:",
+    error
+  );
+}
+
+
+try {
+
+  const lowestResult =
+    await getLowestReviews(
+      placeId
+    );
+
+
+  lowestReviews =
+    Array.isArray(
+      lowestResult?.reviews
+    )
+      ? lowestResult.reviews
+      : [];
+
+} catch (error) {
+
+  console.error(
+    "IMAGE REVIEW LOWEST LOOKUP FAILED:",
+    error
+  );
+}
+
+
+// ========================================
+// รวม + ตัด Review ซ้ำ
+// ========================================
+
+const reviewMap =
+  new Map();
+
+
+for (
+  const review of [
+    ...newestReviews,
+    ...lowestReviews,
+  ]
+) {
+
+  const key =
+    review.reviewId ||
+    review.reviewUrl ||
+    [
+      review.reviewerName,
+      review.rating,
+      review.text,
+    ].join("|");
+
+
+  if (!reviewMap.has(key)) {
+    reviewMap.set(
+      key,
+      review
+    );
+  }
+}
+
+
+const availableReviews =
+  Array.from(
+    reviewMap.values()
+  );
+
+
+// ========================================
+// Normalize สำหรับ Match
+// ========================================
+
+const normalizeMatchText =
+  (value) =>
+    String(value || "")
+      .toLowerCase()
+      .replace(
+        /\s+/g,
+        " "
+      )
+      .trim();
+
+
+const targetReviewer =
+  normalizeMatchText(
+    screenshotReviewerName
+  );
+
+
+const targetText =
+  normalizeMatchText(
+    screenshotReviewText
+  );
+
+
+// ========================================
+// ให้คะแนนแต่ละ Review
+//
+// Reviewer ตรง = เงื่อนไขสำคัญที่สุด
+// Rating ตรง = เพิ่มคะแนน
+// Text ตรง/ใกล้เคียง = เพิ่มความมั่นใจ
+// ========================================
+
+const rankedReviews =
+  availableReviews
+    .map(
+      (review) => {
+
+        const reviewer =
+          normalizeMatchText(
+            review.reviewerName
+          );
+
+
+        const reviewText =
+          normalizeMatchText(
+            review.text
+          );
+
+
+        let score = 0;
+
+
+        // --------------------------------
+        // Reviewer
+        // --------------------------------
+
+        if (
+          reviewer &&
+          reviewer === targetReviewer
+        ) {
+          score += 100;
+        } else if (
+          reviewer &&
+          targetReviewer &&
+          (
+            reviewer.includes(
+              targetReviewer
+            ) ||
+            targetReviewer.includes(
+              reviewer
+            )
+          )
+        ) {
+          score += 70;
+        }
+
+
+        // --------------------------------
+        // Rating
+        // --------------------------------
+
+        if (
+          screenshotRating &&
+          Number(
+            review.rating
+          ) === screenshotRating
+        ) {
+          score += 25;
+        }
+
+
+        // --------------------------------
+        // Review text
+        // --------------------------------
+
+        if (
+          targetText &&
+          reviewText
+        ) {
+
+          if (
+            reviewText ===
+            targetText
+          ) {
+            score += 100;
+
+          } else if (
+            reviewText.includes(
+              targetText
+            ) ||
+            targetText.includes(
+              reviewText
+            )
+          ) {
+            score += 60;
+
+          } else {
+
+            // เทียบช่วงต้นข้อความ
+            const targetPrefix =
+              targetText.slice(
+                0,
+                60
+              );
+
+
+            if (
+              targetPrefix.length >= 20 &&
+              reviewText.includes(
+                targetPrefix
+              )
+            ) {
+              score += 40;
+            }
+          }
+        }
+
+
+        return {
+          review,
+          score,
+        };
+      }
+    )
+    .sort(
+      (a, b) =>
+        b.score -
+        a.score
+    );
+
+
+// ========================================
+// ต้อง Match reviewer อย่างน้อย
+//
+// score >= 70
+// ป้องกันหยิบ Review คนอื่นมั่ว
+// ========================================
+
+const bestMatch =
+  rankedReviews.find(
+    (item) =>
+      item.score >= 70 &&
+      item.review?.reviewUrl
+  ) ||
+  null;
+
+
+// ========================================
+// หา Review จริงไม่เจอ
+// → ไม่เดา
+// → แจ้งลูกค้าให้ส่งลิงก์หรือรูปชัดขึ้น
+// ========================================
+
+if (!bestMatch) {
+
   console.log(
-    "IMAGE REVIEW MAP CONFIRMATION SENT:",
+    "IMAGE REVIEW REAL REVIEW NOT FOUND:",
     {
       customerId:
         customer.id,
 
-      jobId:
-        job.id,
-
-      businessName:
-        place.businessName ||
-        businessName,
+      placeId,
 
       reviewerName:
-        imageClassification.reviewerName ||
-        null,
+        screenshotReviewerName,
 
       rating:
-        imageClassification.rating ||
-        null,
+        screenshotRating,
 
-      mapUrl:
-        place.mapUrl,
+      newestCount:
+        newestReviews.length,
+
+      lowestCount:
+        lowestReviews.length,
     }
+  );
+
+
+  const botReply =
+    getCustomerText(
+      customer,
+      `ยังหารีวิวของ ${screenshotReviewerName} บน Google Map นี้ไม่เจอครับ\n\nรบกวนส่งลิงก์รีวิวโดยตรง หรือส่งรูปที่เห็นชื่อและข้อความรีวิวชัดขึ้นได้เลยครับ`,
+      `I couldn't locate the review from ${screenshotReviewerName} on this Google Maps listing.\n\nPlease send the direct review link or a clearer screenshot showing the reviewer name and review text.`
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      "line",
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  await replyLineTextMessage(
+    replyToken,
+    botReply
   );
 
 
   continue;
 }
+
+
+const matchedReview =
+  bestMatch.review;
+
+
+// ========================================
+// STEP 4
+// ใช้ Job เดิมถ้ามี Map อยู่แล้ว
+// ไม่สร้าง Job ซ้ำโดยไม่จำเป็น
+// ========================================
+
+let job;
+
+
+if (mapJob) {
+
+  job =
+    await updateJob(
+      mapJob.id,
+      {
+        review_url:
+          matchedReview.reviewUrl,
+
+        review_case:
+          "image_review_pending",
+
+        review_visible:
+          true,
+
+        review_has_text:
+          Boolean(
+            matchedReview.text
+          ),
+
+        status:
+          "draft",
+      }
+    );
+
+} else {
+
+  job =
+    await createJob({
+      customerId:
+        customer.id,
+
+      businessName:
+        resolvedBusinessName ||
+        businessName,
+
+      placeId,
+
+      mapUrl,
+
+      reviewUrl:
+        matchedReview.reviewUrl,
+
+      reviewCase:
+        "image_review_pending",
+
+      reviewVisible:
+        true,
+
+      reviewHasText:
+        Boolean(
+          matchedReview.text
+        ),
+
+      status:
+        "draft",
+    });
+}
+
+
+// ========================================
+// STEP 5
+// บันทึก Review จริง
+// ไม่ใช้ reviewUrl = null แล้ว
+// ========================================
+
+await saveReviewCandidate({
+  customerId:
+    customer.id,
+
+  jobId:
+    job.id,
+
+  businessName:
+    resolvedBusinessName ||
+    businessName,
+
+  placeId,
+
+  mapUrl,
+
+  reviewerName:
+    matchedReview.reviewerName ||
+    screenshotReviewerName,
+
+  rating:
+    Number(
+      matchedReview.rating
+    ) ||
+    screenshotRating,
+
+  reviewText:
+    matchedReview.text ||
+    screenshotReviewText ||
+    null,
+
+  reviewDate:
+    matchedReview.isoDate ||
+    null,
+
+  reviewUrl:
+    matchedReview.reviewUrl,
+
+  providerReviewId:
+    matchedReview.reviewId ||
+    null,
+
+  isRecent:
+    (
+      getReviewAgeDays(
+        matchedReview
+      ) !== null &&
+      getReviewAgeDays(
+        matchedReview
+      ) <= 14
+    ),
+
+  isVisible:
+    true,
+
+  hasText:
+    Boolean(
+      matchedReview.text ||
+      screenshotReviewText
+    ),
+});
+
+
+// ========================================
+// STEP 6
+// ใช้ State เดิมได้
+// แต่คราวนี้หมายถึง "รอยืนยัน Review"
+// ========================================
+
+const nextState =
+  GMR_STATES
+    .MAP_FOUND_WAITING_CONFIRMATION;
+
+
+await updateConversationState({
+  customerId:
+    customer.id,
+
+  state:
+    nextState,
+
+  handoff:
+    false,
+
+  handoffReason:
+    null,
+});
+
+
+// ========================================
+// STEP 7
+// ส่ง Review จริงให้ลูกค้ายืนยัน
+// ========================================
+
+const matchedReviewer =
+  matchedReview.reviewerName ||
+  screenshotReviewerName;
+
+
+const matchedRating =
+  matchedReview.rating ||
+  screenshotRating ||
+  "-";
+
+
+const botReply =
+  getCustomerText(
+    customer,
+    `เจอรีวิวแล้วครับ ใช่รีวิวนี้ไหมครับ\n\n${matchedReviewer}\n⭐ ${matchedRating}\n\n${matchedReview.reviewUrl}`,
+    `I found the review. Is this the correct one?\n\n${matchedReviewer}\n⭐ ${matchedRating}\n\n${matchedReview.reviewUrl}`
+  );
+
+
+await saveMessage({
+  customerId:
+    customer.id,
+
+  platform:
+    "line",
+
+  direction:
+    "outbound",
+
+  messageType:
+    "text",
+
+  messageText:
+    botReply,
+});
+
+
+await updateLastBotMessage(
+  customer.id,
+  botReply
+);
+
+
+await replyLineTextMessage(
+  replyToken,
+  botReply
+);
+
+
+console.log(
+  "IMAGE REVIEW REAL REVIEW MATCHED:",
+  {
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    placeId,
+
+    businessName:
+      resolvedBusinessName ||
+      businessName,
+
+    screenshotReviewerName,
+
+    matchedReviewerName:
+      matchedReview.reviewerName,
+
+    rating:
+      matchedReview.rating,
+
+    score:
+      bestMatch.score,
+
+    reviewUrl:
+      matchedReview.reviewUrl,
+  }
+);
+
+
+continue;
+ 
     
 if (
   imageClassification.type ===
