@@ -742,7 +742,7 @@ isVisible = null,
 hasText = null,
 evidenceImagePath = null,
 }) {
-}) {
+
   const { data, error } = await supabase
     .from("gmr_reviews")
     .insert({
