@@ -52,7 +52,8 @@ isPaymentReferenceUsed,
 createPayment,
 getLatestJobWithMapByCustomerId,
   getJobByLineGroupMessageId,
-  updateJob,
+getPendingCreditApprovalJobs,
+updateJob,
   saveReviewCandidate,
   getReviewCandidatesByJobId,
   getReviewsByJobId,
@@ -5844,7 +5845,100 @@ console.log(
 
     await replyLineTextMessage(
       event.replyToken,
-      "⚠️ ข้อความนี้ไม่ใช่งานที่กำลังรออนุมัติเครดิตครับ"
+  let creditJob =
+  await getJobByLineGroupMessageId(
+    quotedMessageId
+  );
+
+
+console.log(
+  "CREDIT APPROVAL LOOKUP:",
+  {
+    quotedMessageId,
+
+    directJobId:
+      creditJob?.id ||
+      null,
+
+    directStatus:
+      creditJob?.status ||
+      null,
+  }
+);
+
+
+// ========================================
+// FALLBACK
+// ถ้า quotedMessageId จับคู่ไม่ได้
+// แต่มีงานรออนุมัติเครดิตเพียง 1 งาน
+// → ใช้งานนั้นได้เลย
+// ========================================
+
+if (
+  !creditJob ||
+  creditJob.status !==
+    "waiting_credit_approval"
+) {
+
+  const pendingCreditJobs =
+    await getPendingCreditApprovalJobs();
+
+
+  console.log(
+    "CREDIT APPROVAL FALLBACK:",
+    {
+      pendingCount:
+        pendingCreditJobs.length,
+
+      pendingJobIds:
+        pendingCreditJobs.map(
+          (job) =>
+            job.id
+        ),
+    }
+  );
+
+
+  if (
+    pendingCreditJobs.length === 1
+  ) {
+
+    creditJob =
+      pendingCreditJobs[0];
+
+
+    console.log(
+      "CREDIT APPROVAL FALLBACK MATCHED:",
+      {
+        jobId:
+          creditJob.id,
+
+        customerId:
+          creditJob.customer_id,
+      }
+    );
+
+  } else if (
+    pendingCreditJobs.length === 0
+  ) {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "⚠️ ไม่พบงานที่กำลังรออนุมัติเครดิตครับ"
+    );
+
+    continue;
+
+  } else {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "⚠️ ขณะนี้มีหลายงานรออนุมัติเครดิต ระบบไม่สามารถเลือกงานให้อัตโนมัติได้ กรุณาตรวจสอบก่อนครับ"
+    );
+
+    continue;
+  }
+}
     );
 
     continue;
