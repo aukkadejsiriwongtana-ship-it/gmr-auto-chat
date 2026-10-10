@@ -66,6 +66,7 @@ updateJob,
 getPaymentByLineGroupMessageId,
   getJobById,
 updatePayment,
+  getPendingPriceJobs,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -5555,20 +5556,99 @@ async function processLineGroupPrice({
 
 
   // หา Job จากข้อความที่เซลล์กด Reply
-  const job =
-    await getJobByLineGroupMessageId(
-      quotedMessageId
+  let job =
+  await getJobByLineGroupMessageId(
+    quotedMessageId
+  );
+
+
+console.log(
+  "PRICE JOB LOOKUP:",
+  {
+    quotedMessageId,
+
+    directJobId:
+      job?.id ||
+      null,
+
+    directStatus:
+      job?.status ||
+      null,
+  }
+);
+
+
+// ========================================
+// FALLBACK
+// LINE quotedMessageId จับคู่ไม่ได้
+// ถ้ามี waiting_price แค่งานเดียว
+// ให้ใช้งานนั้น
+// ========================================
+
+if (
+  !job ||
+  job.status !== "waiting_price"
+) {
+
+  const pendingPriceJobs =
+    await getPendingPriceJobs();
+
+
+  console.log(
+    "PRICE JOB FALLBACK:",
+    {
+      pendingCount:
+        pendingPriceJobs.length,
+
+      pendingJobIds:
+        pendingPriceJobs.map(
+          (item) =>
+            item.id
+        ),
+    }
+  );
+
+
+  if (
+    pendingPriceJobs.length === 1
+  ) {
+
+    job =
+      pendingPriceJobs[0];
+
+
+    console.log(
+      "PRICE JOB FALLBACK MATCHED:",
+      {
+        jobId:
+          job.id,
+
+        customerId:
+          job.customer_id,
+      }
     );
 
-  
+  } else if (
+    pendingPriceJobs.length === 0
+  ) {
 
-  if (!job) {
     return {
       ok: false,
       handled: true,
-      reason: "JOB_NOT_FOUND",
+      reason:
+        "JOB_NOT_FOUND",
+    };
+
+  } else {
+
+    return {
+      ok: false,
+      handled: true,
+      reason:
+        "MULTIPLE_WAITING_PRICE_JOBS",
     };
   }
+}
 
 
   if (
@@ -6534,6 +6614,17 @@ if (
       continue;
     }
 
+    if (
+  priceResult.reason ===
+  "MULTIPLE_WAITING_PRICE_JOBS"
+) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "⚠️ ตอนนี้มีหลายงานรอเสนอราคา ระบบไม่สามารถเลือกงานแทนให้อัตโนมัติได้ครับ"
+  );
+
+  continue;
+}
 
     // งานนี้ถูกเสนอราคาไปแล้ว
     if (
