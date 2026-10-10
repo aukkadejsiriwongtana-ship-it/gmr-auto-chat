@@ -5802,12 +5802,40 @@ if (
   )
 ) {
 
+console.log(
+  "CREDIT APPROVAL DEBUG:",
+  {
+    quotedMessageId,
+    text:
+      normalizedGroupText,
+  }
+);
+  
   const creditJob =
     await getJobByLineGroupMessageId(
       quotedMessageId
     );
 
+console.log(
+  "CREDIT JOB LOOKUP:",
+  {
+    found:
+      Boolean(creditJob),
 
+    jobId:
+      creditJob?.id ||
+      null,
+
+    status:
+      creditJob?.status ||
+      null,
+
+    savedLineGroupMessageId:
+      creditJob?.line_group_message_id ||
+      null,
+  }
+);
+  
   if (
     !creditJob ||
     creditJob.status !==
