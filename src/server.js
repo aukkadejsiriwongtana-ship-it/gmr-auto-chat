@@ -5793,6 +5793,7 @@ app.post("/line/webhook", async (req, res) => {
 // ต้อง Reply ข้อความ Credit Check เท่านั้น
 // ========================================
 
+
 if (
   quotedMessageId &&
   [
@@ -5803,147 +5804,105 @@ if (
   )
 ) {
 
-console.log(
-  "CREDIT APPROVAL DEBUG:",
-  {
-    quotedMessageId,
-    text:
-      normalizedGroupText,
-  }
-);
-  
-  const creditJob =
+  let creditJob =
     await getJobByLineGroupMessageId(
       quotedMessageId
     );
 
-console.log(
-  "CREDIT JOB LOOKUP:",
-  {
-    found:
-      Boolean(creditJob),
 
-    jobId:
-      creditJob?.id ||
-      null,
+  console.log(
+    "CREDIT APPROVAL LOOKUP:",
+    {
+      quotedMessageId,
 
-    status:
-      creditJob?.status ||
-      null,
+      directJobId:
+        creditJob?.id ||
+        null,
 
-    savedLineGroupMessageId:
-      creditJob?.line_group_message_id ||
-      null,
-  }
-);
-  
+      directStatus:
+        creditJob?.status ||
+        null,
+    }
+  );
+
+
+  // ========================================
+  // FALLBACK
+  // ถ้า Reply ID จับคู่ไม่ได้
+  // แต่มีงานรออนุมัติเพียง 1 งาน
+  // ========================================
+
   if (
     !creditJob ||
     creditJob.status !==
       "waiting_credit_approval"
   ) {
 
-    await replyLineTextMessage(
-      event.replyToken,
-  let creditJob =
-  await getJobByLineGroupMessageId(
-    quotedMessageId
-  );
-
-
-console.log(
-  "CREDIT APPROVAL LOOKUP:",
-  {
-    quotedMessageId,
-
-    directJobId:
-      creditJob?.id ||
-      null,
-
-    directStatus:
-      creditJob?.status ||
-      null,
-  }
-);
-
-
-// ========================================
-// FALLBACK
-// ถ้า quotedMessageId จับคู่ไม่ได้
-// แต่มีงานรออนุมัติเครดิตเพียง 1 งาน
-// → ใช้งานนั้นได้เลย
-// ========================================
-
-if (
-  !creditJob ||
-  creditJob.status !==
-    "waiting_credit_approval"
-) {
-
-  const pendingCreditJobs =
-    await getPendingCreditApprovalJobs();
-
-
-  console.log(
-    "CREDIT APPROVAL FALLBACK:",
-    {
-      pendingCount:
-        pendingCreditJobs.length,
-
-      pendingJobIds:
-        pendingCreditJobs.map(
-          (job) =>
-            job.id
-        ),
-    }
-  );
-
-
-  if (
-    pendingCreditJobs.length === 1
-  ) {
-
-    creditJob =
-      pendingCreditJobs[0];
+    const pendingCreditJobs =
+      await getPendingCreditApprovalJobs();
 
 
     console.log(
-      "CREDIT APPROVAL FALLBACK MATCHED:",
+      "CREDIT APPROVAL FALLBACK:",
       {
-        jobId:
-          creditJob.id,
+        pendingCount:
+          pendingCreditJobs.length,
 
-        customerId:
-          creditJob.customer_id,
+        pendingJobIds:
+          pendingCreditJobs.map(
+            (job) =>
+              job.id
+          ),
       }
     );
 
-  } else if (
-    pendingCreditJobs.length === 0
-  ) {
 
-    await replyLineTextMessage(
-      event.replyToken,
-      "⚠️ ไม่พบงานที่กำลังรออนุมัติเครดิตครับ"
-    );
+    if (
+      pendingCreditJobs.length === 1
+    ) {
 
-    continue;
+      creditJob =
+        pendingCreditJobs[0];
 
-  } else {
 
-    await replyLineTextMessage(
-      event.replyToken,
-      "⚠️ ขณะนี้มีหลายงานรออนุมัติเครดิต ระบบไม่สามารถเลือกงานให้อัตโนมัติได้ กรุณาตรวจสอบก่อนครับ"
-    );
+      console.log(
+        "CREDIT APPROVAL FALLBACK MATCHED:",
+        {
+          jobId:
+            creditJob.id,
 
-    continue;
+          customerId:
+            creditJob.customer_id,
+        }
+      );
+
+    } else if (
+      pendingCreditJobs.length === 0
+    ) {
+
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ ไม่พบงานที่กำลังรออนุมัติเครดิตครับ"
+      );
+
+      continue;
+
+    } else {
+
+      await replyLineTextMessage(
+        event.replyToken,
+        "⚠️ ขณะนี้มีหลายงานรออนุมัติเครดิต ระบบไม่สามารถเลือกงานให้อัตโนมัติได้ กรุณาตรวจสอบก่อนครับ"
+      );
+
+      continue;
+    }
   }
-}
+
+
+  const creditCustomer =
+    await getCustomerById(
+      creditJob.customer_id
     );
-
-    continue;
-  }
-
 
   const creditCustomer =
     await getCustomerById(
