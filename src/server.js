@@ -160,6 +160,24 @@ function getCustomerText(
   );
 }
 
+function extractGoogleMapsUrl(
+  message
+) {
+  const text =
+    String(message || "");
+
+  const match =
+    text.match(
+      /https?:\/\/(?:www\.)?(?:maps\.google\.com|google\.[^\s/]+\/maps|maps\.app\.goo\.gl)\/?[^\s]*/i
+    );
+
+  return match
+    ? match[0]
+    : null;
+}
+
+
+
 import {
   getPlaceReviews,
 } from "./services/googleReviewService.js";
@@ -1344,13 +1362,25 @@ if (
   GMR_STATES.NEW
 ) {
 
-  const initialClassification =
-  classifyInput({
-    messageType,
-    text:
-      message || "",
-  });
+ const initialMapUrl =
+  extractGoogleMapsUrl(
+    message
+  );
 
+const initialClassification =
+  initialMapUrl
+    ? {
+        type:
+          INPUT_TYPES.MAP_URL,
+
+        confidence:
+          1,
+      }
+    : classifyInput({
+        messageType,
+        text:
+          message || "",
+      });
 
 const initialText =
   String(message || "")
@@ -1541,10 +1571,30 @@ const hasActionableInput =
     GMR_STATES.WAITING_MAP
   ) {
 
-    const classification = classifyInput({
-      messageType,
-      text: message || "",
-    });
+    const detectedMapUrl =
+  extractGoogleMapsUrl(
+    message
+  );
+
+const detectedMapUrl =
+  extractGoogleMapsUrl(
+    message
+  );
+
+const classification =
+  detectedMapUrl
+    ? {
+        type:
+          INPUT_TYPES.MAP_URL,
+
+        confidence:
+          1,
+      }
+    : classifyInput({
+        messageType,
+        text:
+          message || "",
+      });
 
 
     // -----------------------------------------------------
@@ -1557,9 +1607,12 @@ const hasActionableInput =
 ) {
 
   const mapUrl =
-    String(message || "")
-      .trim();
-
+  detectedMapUrl ||
+  extractGoogleMapsUrl(
+    message
+  ) ||
+  String(message || "")
+    .trim();
 
   const places =
     await searchPlaceByText(
