@@ -287,6 +287,288 @@ async function triggerHumanAttention({
   }
 }
 
+async function sendCreditApprovalRequestToLineGroup({
+  customer,
+  job,
+  phone,
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+  if (!token || !groupId) {
+    throw new Error(
+      "Missing LINE config for credit approval"
+    );
+  }
+
+
+  const formattedPrice =
+    Number(
+      job.price || 0
+    ).toLocaleString("th-TH");
+
+
+  const text = [
+    "⚠️ ขออนุมัติเครดิตลูกค้าใหม่",
+    "",
+    `ลูกค้า: ${
+      customer.display_name ||
+      "ไม่ทราบชื่อ"
+    }`,
+    `Platform: ${
+      String(
+        customer.platform ||
+        "line"
+      ).toUpperCase()
+    }`,
+    `เบอร์: ${
+      phone || "-"
+    }`,
+    "",
+    `ธุรกิจ: ${
+      job.business_name ||
+      "-"
+    }`,
+    `มูลค่างาน: ${formattedPrice} บาท`,
+    "",
+    "ลูกค้ารายนี้ยังไม่มีประวัติชำระเงินในระบบ",
+    "กรุณาเข้าไปตรวจสอบ Account / Profile และประเมินความเสี่ยงก่อนเริ่มงาน",
+    "",
+    "Reply ข้อความนี้:",
+    "✅ อนุมัติ",
+    "❌ ไม่อนุมัติ",
+  ].join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method: "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to: groupId,
+
+            messages: [
+              {
+                type: "text",
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw new Error(
+      `CREDIT APPROVAL LINE PUSH FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+
+  let responseData = {};
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(
+          responseText
+        );
+    } catch {
+      responseData = {};
+    }
+  }
+
+
+  const messageId =
+    responseData
+      ?.sentMessages
+      ?.[0]
+      ?.id ||
+    null;
+
+
+  if (!messageId) {
+    throw new Error(
+      "Credit approval LINE messageId missing"
+    );
+  }
+
+
+  return {
+    messageId,
+    text,
+  };
+}
+
+
+async function startApprovedJob({
+  customer,
+  conversation,
+  job,
+  platform,
+  phone,
+}) {
+  const template =
+    await getTemplate(
+      "script_5_started",
+      customer.language || "th"
+    );
+
+
+  if (!template) {
+    throw new Error(
+      "script_5_started template not found"
+    );
+  }
+
+
+  const formattedPrice =
+    Number(
+      job.price || 0
+    ).toLocaleString(
+      customer.language === "en"
+        ? "en-US"
+        : "th-TH"
+    );
+
+
+  const botReply =
+    template.content.replace(
+      "{{price}}",
+      formattedPrice
+    );
+
+
+  const startedAt =
+    new Date().toISOString();
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.IN_PROGRESS,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  const updatedJob =
+    await updateJob(
+      job.id,
+      {
+        status:
+          "processing",
+
+        started_at:
+          startedAt,
+      }
+    );
+
+
+  try {
+    await appendJobToGoogleSheet({
+      jobId:
+        updatedJob.id,
+
+      customerId:
+        customer.id,
+
+      customerName:
+        customer.display_name ||
+        "",
+
+      platform,
+
+      phone:
+        phone || "",
+
+      businessName:
+        updatedJob.business_name ||
+        "",
+
+      reviewUrl:
+        updatedJob.review_url ||
+        "",
+
+      price:
+        updatedJob.price ||
+        "",
+
+      status:
+        updatedJob.status ||
+        "processing",
+
+      startedAt,
+
+      removedAt:
+        "",
+
+      paidAt:
+        "",
+    });
+
+  } catch (error) {
+    console.error(
+      "GOOGLE SHEET NOTIFY FAILED:",
+      error
+    );
+  }
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    updatedJob,
+    botReply,
+    startedAt,
+  };
+}
+
 function getGlobalFaqReply(
   message,
   language = "th"
@@ -3560,130 +3842,7 @@ if (!isValidPhone) {
       customer.id
     );
 
-  if (!latestJob) {
-    throw new Error(
-      "No active job found while receiving phone"
-    );
-  }
 
-
-  const template =
-    await getTemplate(
-      "script_5_started",
-      customer.language || "th"
-    );
-
-  if (!template) {
-    throw new Error(
-      "script_5_started template not found"
-    );
-  }
-
- const formattedPrice =
-  Number(
-    latestJob.price || 0
-  ).toLocaleString(
-    customer.language === "en"
-      ? "en-US"
-      : "th-TH"
-  );
-
-const botReply =
-  template.content.replace(
-    "{{price}}",
-    formattedPrice
-  );
-
-
-  const nextState =
-    transitionState(
-      conversation.state,
-      GMR_STATES.IN_PROGRESS
-    );
-
-
-  await updateConversationState({
-    customerId: customer.id,
-    state: nextState,
-    handoff: false,
-    handoffReason: null,
-  });
-
-const startedAt =
-  new Date().toISOString();
-
-const updatedJob =
-  await updateJob(
-    latestJob.id,
-    {
-      status: "processing",
-      started_at: startedAt,
-    }
-  );
-
-try {
-  await appendJobToGoogleSheet({
-    jobId: updatedJob.id,
-    customerId: customer.id,
-    customerName: customer.display_name || "",
-    platform,
-    phone: phoneForDb,
-    businessName: updatedJob.business_name || "",
-    reviewUrl: updatedJob.review_url || "",
-    price: updatedJob.price || "",
-    status: updatedJob.status || "processing",
-    startedAt,
-    removedAt: "",
-    paidAt: "",
-  });
-} catch (error) {
-  console.error(
-    "GOOGLE SHEET NOTIFY FAILED:",
-    error
-  );
-}
-
-
-  
-  await saveMessage({
-    customerId: customer.id,
-    platform,
-    direction: "outbound",
-    messageType: "text",
-    messageText: botReply,
-  });
-
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
-
-
-  return {
-    ok: true,
-
-    customerId:
-      customer.id,
-
-    jobId:
-      latestJob.id,
-
-    stateBefore:
-      conversation.state,
-
-    stateAfter:
-      nextState,
-
-    phoneAccepted:
-      true,
-
-    phone:
-      phoneForDb,
-
-    botReply,
-  };
-}
   
  // -------------------------------------------------------
 // OTHER STATES → SOFT HANDOFF
@@ -4692,7 +4851,171 @@ app.post("/line/webhook", async (req, res) => {
     .trim()
     .toLowerCase();
 
+// ========================================
+// CREDIT APPROVAL
+// ลูกค้าใหม่ + งาน > 3,000 บาท
+// ต้อง Reply ข้อความ Credit Check เท่านั้น
+// ========================================
 
+if (
+  quotedMessageId &&
+  [
+    "อนุมัติ",
+    "ไม่อนุมัติ",
+  ].includes(
+    normalizedGroupText
+  )
+) {
+
+  const creditJob =
+    await getJobByLineGroupMessageId(
+      quotedMessageId
+    );
+
+
+  if (
+    !creditJob ||
+    creditJob.status !==
+      "waiting_credit_approval"
+  ) {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "⚠️ ข้อความนี้ไม่ใช่งานที่กำลังรออนุมัติเครดิตครับ"
+    );
+
+    continue;
+  }
+
+
+  const creditCustomer =
+    await getCustomerById(
+      creditJob.customer_id
+    );
+
+
+  if (!creditCustomer) {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "❌ ไม่พบข้อมูลลูกค้าครับ"
+    );
+
+    continue;
+  }
+
+
+  const creditConversation =
+    await getConversationByCustomerId(
+      creditCustomer.id
+    );
+
+
+  if (!creditConversation) {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "❌ ไม่พบ Conversation ของลูกค้าครับ"
+    );
+
+    continue;
+  }
+
+
+  // ========================================
+  // ไม่อนุมัติ
+  // ========================================
+
+  if (
+    normalizedGroupText ===
+      "ไม่อนุมัติ"
+  ) {
+
+    await updateJob(
+      creditJob.id,
+      {
+        status:
+          "credit_rejected",
+      }
+    );
+
+
+    await updateConversationState({
+      customerId:
+        creditCustomer.id,
+
+      state:
+        GMR_STATES.HANDOFF,
+
+      handoff:
+        true,
+
+      handoffReason:
+        "CREDIT_REJECTED",
+    });
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "❌ ไม่อนุมัติเครดิต งานยังไม่ถูกเริ่ม และยังไม่ส่งเข้า Google Sheet ครับ"
+    );
+
+
+    continue;
+  }
+
+
+  // ========================================
+  // อนุมัติ
+  // → เริ่มงาน
+  // → ลง Google Sheet
+  // → แจ้งลูกค้า
+  // ========================================
+
+  const startResult =
+    await startApprovedJob({
+      customer:
+        creditCustomer,
+
+      conversation:
+        creditConversation,
+
+      job:
+        creditJob,
+
+      platform:
+        creditCustomer.platform ||
+        "line",
+
+      phone:
+        creditCustomer.phone ||
+        "",
+    });
+
+
+  await sendMessageToCustomer({
+    platform:
+      creditCustomer.platform ||
+      "line",
+
+    platformUserId:
+      creditCustomer.platform_user_id,
+
+    text:
+      startResult.botReply,
+  });
+
+
+  await replyLineTextMessage(
+    event.replyToken,
+    "✅ อนุมัติเครดิตแล้ว เริ่มงานและส่งเข้า Google Sheet เรียบร้อยครับ"
+  );
+
+
+  continue;
+}
+
+    
 // ========================================
 // MANUAL PAYMENT APPROVAL
 // Reply ข้อความตรวจสลิป แล้วพิมพ์ ok
