@@ -224,43 +224,6 @@ function getPlatformLabel(
   );
 }
 
-function getPlatformLabel(
-  customer
-) {
-  const platform =
-    String(
-      customer?.platform || ""
-    )
-      .trim()
-      .toLowerCase();
-
-  if (platform === "line") {
-    return "LINE";
-  }
-
-  if (
-    platform === "facebook_th" ||
-    platform === "fb_th"
-  ) {
-    return "Facebook เพจไทย";
-  }
-
-  if (
-    platform === "facebook_en" ||
-    platform === "fb_en"
-  ) {
-    return "Facebook เพจต่างประเทศ";
-  }
-
-  if (platform === "facebook") {
-    return "Facebook";
-  }
-
-  return (
-    customer?.platform ||
-    "ไม่ทราบช่องทาง"
-  );
-}
 
 
 async function getCustomerStage({
@@ -372,11 +335,6 @@ async function triggerHumanAttention({
   const state =
   conversation?.state ||
   "UNKNOWN";
-
-const platformLabel =
-  getPlatformLabel(
-    customer
-  );
 
 const state =
   conversation?.state ||
