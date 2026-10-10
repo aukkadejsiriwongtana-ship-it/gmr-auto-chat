@@ -131,6 +131,23 @@ function detectCustomerLanguage(
   );
 }
 
+function isThailandPlace(place) {
+  const address =
+    String(
+      place?.formattedAddress ||
+      ""
+    ).toLowerCase();
+
+  if (!address) {
+    return null;
+  }
+
+  return (
+    address.includes("thailand") ||
+    address.includes("ประเทศไทย")
+  );
+}
+
 function getCustomerText(
   customer,
   thaiText,
