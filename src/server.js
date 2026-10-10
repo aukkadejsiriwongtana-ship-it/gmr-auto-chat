@@ -1558,6 +1558,81 @@ const hasActionableInput =
     // → ส่ง Welcome ตามปกติ
     // -----------------------------------------------------
 
+    // ========================================
+// SUPPRESS STALE WELCOME
+// ถ้าลูกค้าส่งข้อความใหม่เข้ามาแล้ว
+// ไม่ต้องส่ง Welcome ของข้อความเก่า
+// ========================================
+
+await new Promise(
+  (resolve) =>
+    setTimeout(
+      resolve,
+      800
+    )
+);
+
+
+const freshConversation =
+  await getConversationByCustomerId(
+    customer.id
+  );
+
+
+const latestUserMessage =
+  String(
+    freshConversation?.last_user_message ||
+    ""
+  ).trim();
+
+
+const currentRequestMessage =
+  String(
+    message ||
+    ""
+  ).trim();
+
+
+if (
+  latestUserMessage &&
+  latestUserMessage !==
+    currentRequestMessage
+) {
+  console.log(
+    "STALE WELCOME SUPPRESSED:",
+    {
+      customerId:
+        customer.id,
+
+      originalMessage:
+        currentRequestMessage,
+
+      latestUserMessage,
+    }
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      freshConversation?.state ||
+      conversation.state,
+
+    botReply:
+      null,
+
+    superseded:
+      true,
+  };
+}
+    
     const template =
       await getTemplate(
         "welcome",
@@ -3358,14 +3433,32 @@ for (
   );
 
 
-const botReply2 =
-  getCustomerText(
-    customer,
-    "แต่ถ้ายังต้องการดำเนินการกับรีวิว 1 ดาวตัวปัจจุบัน\n\n" +
-      "ส่งลิงก์รีวิว หรือรูปรีวิวที่ต้องการลบมาได้เลยครับ เดี๋ยวเช็คราคาให้ก่อน",
-    "If you would still like to proceed with the current 1-star review,\n\n" +
-      "please send the review link or a screenshot of the review and I'll check the price first."
+const specificReviewProvided =
+  [
+    "image_review_pending",
+    "image_review",
+    "direct_review",
+  ].includes(
+    latestJob.review_case
+  ) ||
+  Boolean(
+    latestJob.review_url
   );
+
+
+const botReply2 =
+  specificReviewProvided
+    ? getCustomerText(
+        customer,
+        'หากยังต้องการลบตัวที่ส่งมาจริงๆ พิมพ์ "ยืนยัน" ทางเราจะเช็คราคาให้ครับ',
+        'If you would still like to remove the review you sent, reply "Confirm" and we will check the price for you.'
+      )
+    : getCustomerText(
+        customer,
+          "ส่งลิงก์รีวิว หรือรูปรีวิวที่ต้องการลบมาได้เลยครับ เดี๋ยวเช็คราคาให้ก่อน",
+        "If you would still like to proceed with the current 1-star review,\n\n" +
+          "please send the review link or a screenshot of the review and I'll check the price first."
+      );
 
 
   const botReply =
@@ -6253,7 +6346,7 @@ if (!mapJob) {
 
   for (
     let retry = 0;
-    retry < 15;
+    retry < 35;
     retry += 1
   ) {
 
@@ -6962,16 +7055,15 @@ await saveReviewCandidate({
     ),
 });
 
-
 // ========================================
 // STEP 6
-// ใช้ State เดิมได้
-// แต่คราวนี้หมายถึง "รอยืนยัน Review"
+// พบ Review จริงจาก Screenshot แล้ว
+// → ไม่ต้องถามลูกค้ายืนยันซ้ำ
+// → ส่งเข้ากลุ่มเพื่อให้ Sales ตั้งราคาเลย
 // ========================================
 
 const nextState =
-  GMR_STATES
-    .MAP_FOUND_WAITING_CONFIRMATION;
+  GMR_STATES.WAITING_PRICE;
 
 
 await updateConversationState({
@@ -6989,27 +7081,112 @@ await updateConversationState({
 });
 
 
+const updatedJob =
+  await updateJob(
+    job.id,
+    {
+      review_url:
+        matchedReview.reviewUrl,
+
+      review_case:
+        "image_review",
+
+      review_visible:
+        true,
+
+      review_has_text:
+        Boolean(
+          matchedReview.text ||
+          screenshotReviewText
+        ),
+
+      status:
+        "waiting_price",
+    }
+  );
+
+
 // ========================================
-// STEP 7
-// ส่ง Review จริงให้ลูกค้ายืนยัน
+// ส่งงานเข้ากลุ่มเพื่อเช็คราคา
 // ========================================
 
-const matchedReviewer =
-  matchedReview.reviewerName ||
-  screenshotReviewerName;
+try {
+
+  const lineGroupResult =
+    await sendJobToLineGroup({
+      jobId:
+        updatedJob.id,
+
+      jobType:
+        "image_review",
+
+      customerName:
+        customer.display_name ||
+        "",
+
+      businessName:
+        updatedJob.business_name ||
+        resolvedBusinessName ||
+        businessName ||
+        "",
+
+      reviewerName:
+        matchedReview.reviewerName ||
+        screenshotReviewerName ||
+        "",
+
+      reviewAgeDays:
+        getReviewAgeDays(
+          matchedReview
+        ),
+
+      reviewText:
+        matchedReview.text ||
+        screenshotReviewText ||
+        "",
+
+      reviewUrl:
+        matchedReview.reviewUrl ||
+        "",
+
+      mapUrl:
+        updatedJob.map_url ||
+        mapUrl ||
+        "",
+    });
 
 
-const matchedRating =
-  matchedReview.rating ||
-  screenshotRating ||
-  "-";
+  if (
+    lineGroupResult?.messageId
+  ) {
 
+    await updateJob(
+      updatedJob.id,
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
+      }
+    );
+  }
+
+} catch (error) {
+
+  console.error(
+    "IMAGE REVIEW PRICE REQUEST FAILED:",
+    error
+  );
+}
+
+
+// ========================================
+// แจ้งลูกค้าว่ากำลังเช็คราคา
+// ========================================
 
 const botReply =
   getCustomerText(
     customer,
-    `เจอรีวิวแล้วครับ ใช่รีวิวนี้ไหมครับ\n\n${matchedReviewer}\n⭐ ${matchedRating}\n\n${matchedReview.reviewUrl}`,
-    `I found the review. Is this the correct one?\n\n${matchedReviewer}\n⭐ ${matchedRating}\n\n${matchedReview.reviewUrl}`
+    "รับข้อมูลรีวิวเรียบร้อยครับ เดี๋ยวทางเราตรวจสอบและแจ้งราคาให้ครับ",
+    "We've received the review. We'll check it and send you the price shortly."
   );
 
 
