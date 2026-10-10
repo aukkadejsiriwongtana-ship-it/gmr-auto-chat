@@ -332,10 +332,6 @@ async function triggerHumanAttention({
     customer?.display_name ||
     "ไม่ทราบชื่อ";
 
-  const state =
-  conversation?.state ||
-  "UNKNOWN";
-
 const state =
   conversation?.state ||
   "UNKNOWN";
