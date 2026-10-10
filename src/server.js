@@ -869,21 +869,219 @@ if (
     // -----------------------------------------------------
 
     if (
-      classification.type ===
-      INPUT_TYPES.MAP_URL
-    ) {
-      return {
-        ok: true,
-        customerId: customer.id,
-        stateBefore: conversation.state,
-        stateAfter: conversation.state,
-        inputType: classification.type,
-        confidence: classification.confidence,
-        botReply: null,
-        nextAction:
-          "MAP_LOOKUP_FLOW_3_1",
-      };
-    }
+  classification.type ===
+  INPUT_TYPES.MAP_URL
+) {
+
+  const mapUrl =
+    String(message || "")
+      .trim();
+
+
+  // -----------------------------------------
+  // ค้น Google Map จาก URL
+  // -----------------------------------------
+
+  const places =
+    await searchPlaceByText(
+      mapUrl
+    );
+
+
+  if (!places.length) {
+
+    const botReply =
+      "ยังอ่านข้อมูลจากลิงก์ Google Map นี้ไม่ได้ครับ รบกวนส่งชื่อธุรกิจมาได้เลยครับ";
+
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    return {
+      ok:
+        true,
+
+      customerId:
+        customer.id,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        conversation.state,
+
+      inputType:
+        classification.type,
+
+      confidence:
+        classification.confidence,
+
+      placeFound:
+        false,
+
+      botReply,
+    };
+  }
+
+
+  const place =
+    places[0];
+
+
+  const template =
+    await getTemplate(
+      "confirm_map",
+      customer.language || "th"
+    );
+
+
+  if (!template) {
+    throw new Error(
+      "confirm_map template not found"
+    );
+  }
+
+
+  const botReply =
+    template.content.replace(
+      "{{map_url}}",
+      place.mapUrl
+    );
+
+
+  const job =
+    await createJob({
+      customerId:
+        customer.id,
+
+      businessName:
+        place.businessName,
+
+      placeId:
+        place.placeId,
+
+      mapUrl:
+        place.mapUrl,
+
+      status:
+        "draft",
+    });
+
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES
+        .MAP_FOUND_WAITING_CONFIRMATION
+    );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok:
+      true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    inputType:
+      classification.type,
+
+    confidence:
+      classification.confidence,
+
+    placeFound:
+      true,
+
+    place: {
+      placeId:
+        place.placeId,
+
+      businessName:
+        place.businessName,
+
+      formattedAddress:
+        place.formattedAddress,
+
+      mapUrl:
+        place.mapUrl,
+
+      rating:
+        place.rating,
+
+      userRatingCount:
+        place.userRatingCount,
+    },
+
+    botReply,
+  };
+}
 
 
   // -----------------------------------------------------
