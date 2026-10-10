@@ -6507,63 +6507,53 @@ const rankedReviews =
         }
 
 
-        // --------------------------------
-        // Review text
-        // --------------------------------
 
-        if (
-          targetText &&
-          reviewText
-        ) {
+// --------------------------------
+// Review text
+// --------------------------------
 
-          if (
-            reviewText ===
-            targetText
-          ) {
-            score += 100;
-
-          } else if (
-            reviewText.includes(
-              targetText
-            ) ||
-            targetText.includes(
-              reviewText
-    if (
-  reviewText ===
-  targetText
+if (
+  targetText &&
+  reviewText
 ) {
-  score += 120;
-
-} else if (
-  reviewText.includes(
-    targetText
-  ) ||
-  targetText.includes(
-    reviewText
-  )
-) {
-  score += 90;
-
-} else {
-
-  const targetPrefix =
-    targetText.slice(
-      0,
-      80
-    );
 
   if (
-    targetPrefix.length >= 20 &&
+    reviewText ===
+    targetText
+  ) {
+    score += 120;
+
+  } else if (
     reviewText.includes(
-      targetPrefix
+      targetText
+    ) ||
+    targetText.includes(
+      reviewText
     )
   ) {
-    score += 70;
+    score += 90;
+
+  } else {
+
+    const targetPrefix =
+      targetText.slice(
+        0,
+        80
+      );
+
+
+    if (
+      targetPrefix.length >= 20 &&
+      reviewText.includes(
+        targetPrefix
+      )
+    ) {
+      score += 70;
+    }
   }
 }
-        }
 
-
+        
         return {
           review,
           score,
