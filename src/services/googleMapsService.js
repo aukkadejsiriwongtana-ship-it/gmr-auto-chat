@@ -769,15 +769,16 @@ export async function searchPlaceByText(
           "X-Goog-Api-Key":
             GOOGLE_MAPS_API_KEY,
 
-          "X-Goog-FieldMask":
-            [
-              "places.id",
-              "places.displayName",
-              "places.formattedAddress",
-              "places.googleMapsUri",
-              "places.rating",
-              "places.userRatingCount",
-            ].join(","),
+         "X-Goog-FieldMask":
+  [
+    "places.id",
+    "places.displayName",
+    "places.formattedAddress",
+    "places.addressComponents",
+    "places.googleMapsUri",
+    "places.rating",
+    "places.userRatingCount",
+  ].join(","),
         },
 
         body:
@@ -822,6 +823,8 @@ export async function searchPlaceByText(
 
 
   return places.map(
+
+    
     (place) => ({
       placeId:
         place.id ||
@@ -838,6 +841,17 @@ export async function searchPlaceByText(
           .formattedAddress ||
         null,
 
+    countryCode:
+  place.addressComponents
+    ?.find(
+      (component) =>
+        component.types?.includes(
+          "country"
+        )
+    )
+    ?.shortText ||
+  null,
+      
       mapUrl:
         place
           .googleMapsUri ||
