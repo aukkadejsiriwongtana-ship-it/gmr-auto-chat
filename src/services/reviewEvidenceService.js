@@ -229,7 +229,7 @@ export async function createReviewEvidenceImage({
             y="${350 + lineIndex * 58}"
             font-size="34"
             fill="#202124"
-            font-family="Arial, sans-serif"
+            font-family="Noto Sans Thai, Noto Sans, sans-serif"
           >
             ${escapeXml(line)}
           </text>
@@ -268,7 +268,7 @@ export async function createReviewEvidenceImage({
         y="115"
         font-size="30"
         fill="#5f6368"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         REVIEW #${index}
       </text>
@@ -280,7 +280,7 @@ export async function createReviewEvidenceImage({
         font-size="40"
         font-weight="700"
         fill="#202124"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         ${safeBusinessName}
       </text>
@@ -310,7 +310,7 @@ export async function createReviewEvidenceImage({
         font-size="34"
         font-weight="700"
         fill="#202124"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         ${safeReviewerName}
       </text>
@@ -321,7 +321,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="31"
         fill="#f9ab00"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         ${stars}
       </text>
@@ -332,7 +332,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="25"
         fill="#5f6368"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         ${safeDate}
       </text>
@@ -356,7 +356,7 @@ export async function createReviewEvidenceImage({
         y="965"
         font-size="26"
         fill="#5f6368"
-        font-family="Arial, sans-serif"
+        font-family="Noto Sans Thai, Noto Sans, sans-serif"
       >
         เก็บไว้เป็นหลักฐานก่อนดำเนินการ
       </text>
