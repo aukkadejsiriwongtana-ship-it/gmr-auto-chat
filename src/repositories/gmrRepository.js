@@ -737,9 +737,11 @@ export async function saveReviewCandidate({
   reviewDate = null,
   reviewUrl = null,
   providerReviewId = null,
-  isRecent = null,
-  isVisible = null,
-  hasText = null,
+isRecent = null,
+isVisible = null,
+hasText = null,
+evidenceImagePath = null,
+}) {
 }) {
   const { data, error } = await supabase
     .from("gmr_reviews")
@@ -755,9 +757,11 @@ export async function saveReviewCandidate({
       review_date: reviewDate,
       review_url: reviewUrl,
       provider_review_id: providerReviewId,
-      is_recent: isRecent,
-      is_visible: isVisible,
-      has_text: hasText,
+is_recent: isRecent,
+is_visible: isVisible,
+has_text: hasText,
+evidence_image_path:
+  evidenceImagePath,
     })
     .select()
     .single();
