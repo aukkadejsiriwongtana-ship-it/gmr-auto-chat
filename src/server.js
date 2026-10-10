@@ -3082,7 +3082,8 @@ for (
   // -----------------------------------------------------
   // 5. พบ 1 ดาว
   // → Script 1
-  // → WAITING_PRICE
+  // → WAITING_MAP
+// → รอลูกค้าส่ง Review link / Screenshot
   // -----------------------------------------------------
 
  if (oneStarReviews.length > 0) {
@@ -3149,13 +3150,12 @@ await updateJob(
   latestJob.id,
   {
     review_case:
-      "old_review_waiting_customer",
+      "old_review",
 
     status:
       "waiting_review_input",
   }
 );
-
 
   await sendMessageToCustomer({
     platform,
