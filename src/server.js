@@ -1190,9 +1190,6 @@ if (
 
 // -----------------------------------------
 // ลูกค้าเป็นคนส่ง Map link มาเอง
-     
-  // -----------------------------------------
-  // ลูกค้าเป็นคนส่ง Map link มาเอง
   // ถือว่าเป็น Map ที่ต้องการตรวจ
   // ไม่ถามยืนยันซ้ำ
   // -----------------------------------------
@@ -1694,7 +1691,6 @@ await updateLastBotMessage(
 
 
   // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
-// 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
 const place = places[0];
 
 
@@ -5292,19 +5288,27 @@ if (
   imageClassification.type ===
   "REVIEW_SCREENSHOT"
 ) {
-  const customer =
-    await getOrCreateCustomer({
-      platform:
-        "line",
+  const existingCustomer =
+  await getCustomerByPlatformUserId(
+    "line",
+    platformUserId
+  );
 
-      platformUserId,
 
-      displayName:
-        lineDisplayName,
+const customer =
+  await getOrCreateCustomer({
+    platform:
+      "line",
 
-      language:
-        "th",
-    });
+    platformUserId,
+
+    displayName:
+      lineDisplayName,
+
+    language:
+      existingCustomer?.language ||
+      "th",
+  });
 
 
   const conversation =
@@ -5341,11 +5345,12 @@ if (
   handoffReason:
     null,
 });
-  const botReply =
-    
-    "รบกวนแจ้งชื่อแมพ หรือ ส่งชื่อลิงก์ Google Map เพื่อให้เช็ค code หลังบ้านให้ได้เลยครับ";
-
-
+ const botReply =
+  getCustomerText(
+    customer,
+    "รบกวนแจ้งชื่อแมพ หรือส่งลิงก์ Google Map มาได้เลยครับ เพื่อให้ตรวจสอบต่อได้",
+    "Please send the Google Maps business name or the Google Maps link so I can continue checking it."
+  );
   await saveMessage({
     customerId:
       customer.id,
