@@ -1153,7 +1153,40 @@ const hasActionableInput =
   const place =
     places[0];
 
+const messageHasThai =
+  /[\u0E00-\u0E7F]/.test(
+    String(message || "")
+  );
 
+
+const thailandPlace =
+  isThailandPlace(place);
+
+
+if (
+  !messageHasThai &&
+  thailandPlace === false &&
+  customer.language !== "en"
+) {
+  customer =
+    await updateCustomerLanguage(
+      customer.id,
+      "en"
+    );
+
+  console.log(
+    "FOREIGN MAP -> LANGUAGE EN:",
+    {
+      customerId:
+        customer.id,
+
+      formattedAddress:
+        place.formattedAddress,
+    }
+  );
+}
+
+     
   // -----------------------------------------
   // ลูกค้าเป็นคนส่ง Map link มาเอง
   // ถือว่าเป็น Map ที่ต้องการตรวจ
@@ -1659,7 +1692,42 @@ await updateLastBotMessage(
   // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
   const place = places[0];
 
+const businessNameHasThai =
+  /[\u0E00-\u0E7F]/.test(
+    String(message || "")
+  );
 
+
+const thailandPlace =
+  isThailandPlace(place);
+
+
+if (
+  !businessNameHasThai &&
+  thailandPlace === false &&
+  customer.language !== "en"
+) {
+  customer =
+    await updateCustomerLanguage(
+      customer.id,
+      "en"
+    );
+
+  console.log(
+    "FOREIGN BUSINESS -> LANGUAGE EN:",
+    {
+      customerId:
+        customer.id,
+
+      businessName:
+        place.businessName,
+
+      formattedAddress:
+        place.formattedAddress,
+    }
+  );
+}
+      
   // 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
   const template =
     await getTemplate(
