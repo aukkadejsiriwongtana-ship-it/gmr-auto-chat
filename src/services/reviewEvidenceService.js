@@ -374,14 +374,11 @@ export async function createReviewEvidenceImage({
     `;
 
 
- const fontPath =
-  THAI_FONT_PATH.pathname;
-
-console.log(
+ console.log(
   "REVIEW FONT PATH:",
-  fontPath
+  THAI_FONT_PATH
 );
-  
+
 const resvg =
   new Resvg(
     svg,
@@ -391,7 +388,7 @@ const resvg =
           false,
 
         fontFiles: [
-          fontPath,
+          THAI_FONT_PATH,
         ],
 
         defaultFontFamily:
