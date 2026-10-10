@@ -1765,28 +1765,6 @@ const classification =
   String(message || "")
     .trim();
 
-if (
-  platform === "line"
-) {
-  try {
-    await sendMessageToCustomer({
-      platform,
-      platformUserId,
-
-      text:
-        getCustomerText(
-          customer,
-          "ได้รับลิงก์แล้วครับ กำลังตรวจสอบรีวิวใน Google Map ให้อยู่ครับ",
-          "I've received the link. I'm checking the reviews on Google Maps now."
-        ),
-    });
-  } catch (error) {
-    console.error(
-      "MAP PROCESSING ACK FAILED:",
-      error
-    );
-  }
-}
      
   const places =
     await searchPlaceByText(
@@ -6204,6 +6182,50 @@ if (
   message =
     event.message.text || "";
 }
+
+ // ========================================
+// FAST MAP ACK
+// ลูกค้าส่ง Google Maps link
+// → ตอบรับทันที ก่อนเริ่มงานหนัก
+// ========================================
+
+if (
+  messageType === "text"
+) {
+  const detectedMapUrl =
+    extractGoogleMapsUrl(
+      message
+    );
+
+  if (detectedMapUrl) {
+
+    try {
+      const existingCustomer =
+        await getCustomerByPlatformUserId(
+          "line",
+          platformUserId
+        );
+
+      const ackText =
+        getCustomerText(
+          existingCustomer,
+          "ได้รับลิงก์แล้วครับ กำลังตรวจสอบรีวิวใน Google Map ให้อยู่ครับ",
+          "I've received the link. I'm checking the reviews on Google Maps now."
+        );
+
+      await replyLineTextMessage(
+        replyToken,
+        ackText
+      );
+
+    } catch (error) {
+      console.error(
+        "FAST MAP ACK FAILED:",
+        error
+      );
+    }
+  }
+}     
 
 
 // ========================================
