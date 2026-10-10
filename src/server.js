@@ -131,6 +131,18 @@ function detectCustomerLanguage(
   );
 }
 
+function getCustomerText(
+  customer,
+  thaiText,
+  englishText
+) {
+  return (
+    customer?.language === "en"
+      ? englishText
+      : thaiText
+  );
+}
+
 import {
   getPlaceReviews,
 } from "./services/googleReviewService.js";
