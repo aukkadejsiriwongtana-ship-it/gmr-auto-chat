@@ -477,14 +477,17 @@ const existingCustomer =
   // -------------------------------------------------------
   // 2. CONVERSATION
   // -------------------------------------------------------
+const conversation =
+  await getOrCreateConversation(customer.id);
 
-  const conversation =
-    await getOrCreateConversation(customer.id);
+
+let autoConfirmDirectMap =
+  false;
 
 
-  // -------------------------------------------------------
-  // 3. SAVE INBOUND MESSAGE
-  // -------------------------------------------------------
+// -------------------------------------------------------
+// 3. SAVE INBOUND MESSAGE
+// -------------------------------------------------------
 
   await saveMessage({
     customerId: customer.id,
@@ -868,7 +871,7 @@ if (
     // MAP URL
     // -----------------------------------------------------
 
-    if (
+   if (
   classification.type ===
   INPUT_TYPES.MAP_URL
 ) {
@@ -877,10 +880,6 @@ if (
     String(message || "")
       .trim();
 
-
-  // -----------------------------------------
-  // ค้น Google Map จาก URL
-  // -----------------------------------------
 
   const places =
     await searchPlaceByText(
@@ -948,44 +947,28 @@ if (
     places[0];
 
 
-  const template =
-    await getTemplate(
-      "confirm_map",
-      customer.language || "th"
-    );
+  // -----------------------------------------
+  // ลูกค้าเป็นคนส่ง Map link มาเอง
+  // ถือว่าเป็น Map ที่ต้องการตรวจ
+  // ไม่ถามยืนยันซ้ำ
+  // -----------------------------------------
 
+  await createJob({
+    customerId:
+      customer.id,
 
-  if (!template) {
-    throw new Error(
-      "confirm_map template not found"
-    );
-  }
+    businessName:
+      place.businessName,
 
+    placeId:
+      place.placeId,
 
-  const botReply =
-    template.content.replace(
-      "{{map_url}}",
-      place.mapUrl
-    );
+    mapUrl:
+      place.mapUrl,
 
-
-  const job =
-    await createJob({
-      customerId:
-        customer.id,
-
-      businessName:
-        place.businessName,
-
-      placeId:
-        place.placeId,
-
-      mapUrl:
-        place.mapUrl,
-
-      status:
-        "draft",
-    });
+    status:
+      "draft",
+  });
 
 
   const nextState =
@@ -1011,76 +994,36 @@ if (
   });
 
 
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
-  });
+  // ทำให้ request ปัจจุบัน
+  // ไหลลง confirmation flow ต่อทันที
+  conversation.state =
+    nextState;
 
 
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
+  autoConfirmDirectMap =
+    true;
 
 
-  return {
-    ok:
-      true,
+  console.log(
+    "DIRECT MAP AUTO CONFIRMED:",
+    {
+      customerId:
+        customer.id,
 
-    customerId:
-      customer.id,
-
-    jobId:
-      job.id,
-
-    stateBefore:
-      conversation.state,
-
-    stateAfter:
-      nextState,
-
-    inputType:
-      classification.type,
-
-    confidence:
-      classification.confidence,
-
-    placeFound:
-      true,
-
-    place: {
       placeId:
         place.placeId,
 
       businessName:
         place.businessName,
 
-      formattedAddress:
-        place.formattedAddress,
-
       mapUrl:
         place.mapUrl,
+    }
+  );
 
-      rating:
-        place.rating,
-
-      userRatingCount:
-        place.userRatingCount,
-    },
-
-    botReply,
-  };
+  // สำคัญ:
+  // ห้าม return ตรงนี้
+  // ต้องปล่อยให้ flow ลงไปด้านล่าง
 }
 
 
@@ -1673,10 +1616,12 @@ if (
   conversation.state ===
   GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION
 ) {
-  const normalized = String(message || "")
-    .trim()
-    .toLowerCase();
-
+  const normalized =
+  autoConfirmDirectMap
+    ? "ใช่"
+    : String(message || "")
+        .trim()
+        .toLowerCase();
   const yesWords = [
     "ใช่",
     "ใช่ครับ",
