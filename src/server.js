@@ -186,6 +186,44 @@ import {
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+function getPlatformLabel(
+  customer
+) {
+  const platform =
+    String(
+      customer?.platform || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (platform === "line") {
+    return "LINE";
+  }
+
+  if (
+    platform === "facebook_th" ||
+    platform === "fb_th"
+  ) {
+    return "Facebook เพจไทย";
+  }
+
+  if (
+    platform === "facebook_en" ||
+    platform === "fb_en"
+  ) {
+    return "Facebook เพจต่างประเทศ";
+  }
+
+  if (platform === "facebook") {
+    return "Facebook";
+  }
+
+  return (
+    customer?.platform ||
+    "ไม่ทราบช่องทาง"
+  );
+}
+
 async function triggerHumanAttention({
   customer,
   conversation,
@@ -213,14 +251,20 @@ async function triggerHumanAttention({
     "ไม่ทราบชื่อ";
 
   const state =
-    conversation?.state ||
-    "UNKNOWN";
+  conversation?.state ||
+  "UNKNOWN";
 
-  const text = [
-    "⚠️ ต้องตรวจแชทลูกค้า",
-    "",
-    `ลูกค้า: ${customerName}`,
-    `State: ${state}`,
+const platformLabel =
+  getPlatformLabel(
+    customer
+  );
+
+const text = [
+  "⚠️ ต้องตรวจแชทลูกค้า",
+  "",
+  `ลูกค้า: ${customerName}`,
+  `Platform: ${platformLabel}`,
+  `State: ${state}`,
     "",
     "ข้อความล่าสุด:",
     `"${String(message || "").trim()}"`,
