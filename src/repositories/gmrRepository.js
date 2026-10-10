@@ -110,6 +110,35 @@ export async function updateCustomerPhone(
   return data;
 }
 
+export async function updateCustomerLanguage(
+  customerId,
+  language
+) {
+  const safeLanguage =
+    language === "en"
+      ? "en"
+      : "th";
+
+  const { data, error } =
+    await supabase
+      .from("gmr_customers")
+      .update({
+        language:
+          safeLanguage,
+      })
+      .eq(
+        "id",
+        customerId
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 
 // =========================================================
 // CONVERSATION / STATE
