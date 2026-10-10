@@ -1018,3 +1018,26 @@ export async function updateQuote(
 
   return data;
 }
+
+export async function getPendingPriceJobs() {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "status",
+        "waiting_price"
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
