@@ -3450,6 +3450,233 @@ for (
 // → รอลูกค้าส่ง Review link / Screenshot
   // -----------------------------------------------------
 
+const recentOneStarFromLowest =
+  getRecentReviews(
+    oneStarReviews,
+    14
+  );
+
+
+console.log(
+  "RECENT 1 STAR FROM LOWEST DEBUG:",
+  {
+    count:
+      recentOneStarFromLowest.length,
+
+    reviews:
+      recentOneStarFromLowest.map(
+        (review) => ({
+          reviewerName:
+            review.reviewerName,
+
+          rating:
+            review.rating,
+
+          dateText:
+            review.dateText,
+
+          isoDate:
+            review.isoDate,
+
+          ageDays:
+            getReviewAgeDays(
+              review
+            ),
+
+          reviewUrl:
+            review.reviewUrl,
+        })
+      ),
+  }
+);
+
+if (
+  recentOneStarFromLowest.length > 0
+) {
+
+  const recentReviews =
+    recentOneStarFromLowest;
+
+
+  let botReply =
+    getCustomerText(
+      customer,
+      `จากที่เช็คพบรีวิว 1 ดาวที่เพิ่งลงภายใน 14 วัน จำนวน ${recentReviews.length} รีวิวครับ`,
+      `I found ${recentReviews.length} recent 1-star review(s) posted within the last 14 days.`
+    );
+
+
+  const reviewLines =
+    recentReviews
+      .map(
+        (review, index) => {
+
+          const reviewer =
+            review.reviewerName ||
+            getCustomerText(
+              customer,
+              "ไม่ทราบชื่อ",
+              "Unknown reviewer"
+            );
+
+
+          return [
+            `${index + 1}. ${reviewer}`,
+            `⭐ ${review.rating || 1}`,
+            review.dateText || "",
+            review.reviewUrl || "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+        }
+      )
+      .join("\n\n");
+
+
+  if (reviewLines) {
+    botReply +=
+      `\n\n${reviewLines}`;
+  }
+
+
+  for (
+    const review of recentReviews
+  ) {
+
+    await saveReviewCandidate({
+      customerId:
+        customer.id,
+
+      jobId:
+        latestJob.id,
+
+      businessName:
+        latestJob.business_name,
+
+      placeId:
+        latestJob.place_id,
+
+      mapUrl:
+        latestJob.map_url,
+
+      reviewerName:
+        review.reviewerName,
+
+      rating:
+        review.rating,
+
+      reviewText:
+        review.text,
+
+      reviewDate:
+        review.isoDate,
+
+      reviewUrl:
+        review.reviewUrl,
+
+      providerReviewId:
+        review.reviewId,
+
+      isRecent:
+        true,
+
+      isVisible:
+        true,
+
+      hasText:
+        Boolean(
+          review.text &&
+          review.text.trim()
+        ),
+    });
+  }
+
+
+  const nextState =
+    transitionState(
+      conversation.state,
+      GMR_STATES.WAITING_REVIEW_SELECTION
+    );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      nextState,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  await updateJob(
+    latestJob.id,
+    {
+      review_case:
+        "recent_review",
+
+      status:
+        "draft",
+    }
+  );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      nextState,
+
+    mapConfirmed:
+      true,
+
+    reviewCase:
+      "recent_review",
+
+    recentCount:
+      recentReviews.length,
+
+    botReply,
+  };
+}
+    
  if (oneStarReviews.length > 0) {
 
   const template =
