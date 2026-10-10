@@ -6849,8 +6849,13 @@ console.log(
 
 
 continue;
- 
-    
+}
+
+
+// ========================================
+// PAYMENT SLIP
+// ========================================
+
 if (
   imageClassification.type ===
   "PAYMENT_SLIP"
