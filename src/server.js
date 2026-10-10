@@ -1640,6 +1640,29 @@ const classification =
   String(message || "")
     .trim();
 
+if (
+  platform === "line"
+) {
+  try {
+    await sendMessageToCustomer({
+      platform,
+      platformUserId,
+
+      text:
+        getCustomerText(
+          customer,
+          "ได้รับลิงก์แล้วครับ กำลังตรวจสอบรีวิวใน Google Map ให้อยู่ครับ",
+          "I've received the link. I'm checking the reviews on Google Maps now."
+        ),
+    });
+  } catch (error) {
+    console.error(
+      "MAP PROCESSING ACK FAILED:",
+      error
+    );
+  }
+}
+     
   const places =
     await searchPlaceByText(
       mapUrl
@@ -2431,18 +2454,39 @@ if (faqResult.matched) {
 
 if (!autoConfirmDirectMap) {
 
-  await triggerHumanAttention({
-    customer,
-    conversation,
-    message,
-    reason:
-      "UNHANDLED_MESSAGE_IN_WAITING_MAP",
+  const botReply =
+    getCustomerText(
+      customer,
+      "ส่งลิงก์ Google Map หรือชื่อธุรกิจมาได้เลยครับ เดี๋ยวผมตรวจสอบให้ครับ",
+      "Please send the Google Maps link or business name and I'll check it for you."
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
   });
 
 
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
   return {
-    ok:
-      true,
+    ok: true,
 
     customerId:
       customer.id,
@@ -2459,14 +2503,13 @@ if (!autoConfirmDirectMap) {
     confidence:
       classification.confidence,
 
-    botReply:
-      null,
+    botReply,
 
     softHandoff:
-      true,
+      false,
 
     note:
-      "Human attention requested while waiting for map",
+      "Waiting for Google Maps link or business name.",
   };
 }
   }
