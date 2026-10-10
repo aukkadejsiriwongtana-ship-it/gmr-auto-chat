@@ -50,7 +50,7 @@ function escapeXml(value) {
 
 function wrapText(
   text,
-  maxCharacters = 48,
+  maxCharacters = 38,
   maxLines = 7
 ) {
   const normalized =
@@ -65,75 +65,99 @@ function wrapText(
   }
 
 
-  const words =
-    normalized.split(" ");
-
   const lines = [];
 
-  let current = "";
+  let remaining =
+    normalized;
 
 
-  for (const word of words) {
-
-    const candidate =
-      current
-        ? `${current} ${word}`
-        : word;
-
-
-    if (
-      candidate.length <=
-      maxCharacters
-    ) {
-      current =
-        candidate;
-
-      continue;
-    }
-
-
-    if (current) {
-      lines.push(current);
-    }
-
-    current =
-      word;
-
-
-    if (
-      lines.length >=
-      maxLines
-    ) {
-      break;
-    }
-  }
-
-
-  if (
-    current &&
+  while (
+    remaining.length > 0 &&
     lines.length < maxLines
   ) {
-    lines.push(current);
+
+    if (
+      remaining.length <=
+      maxCharacters
+    ) {
+      lines.push(
+        remaining
+      );
+
+      remaining =
+        "";
+
+      break;
+    }
+
+
+    let cutAt =
+      maxCharacters;
+
+
+    const lastSpace =
+      remaining.lastIndexOf(
+        " ",
+        maxCharacters
+      );
+
+
+    if (
+      lastSpace >
+      Math.floor(
+        maxCharacters * 0.5
+      )
+    ) {
+      cutAt =
+        lastSpace;
+    }
+
+
+    const line =
+      remaining
+        .slice(
+          0,
+          cutAt
+        )
+        .trim();
+
+
+    lines.push(
+      line
+    );
+
+
+    remaining =
+      remaining
+        .slice(
+          cutAt
+        )
+        .trim();
   }
 
 
   if (
-    lines.length === maxLines &&
-    normalized.length >
-      lines.join(" ").length
+    remaining &&
+    lines.length === maxLines
   ) {
-    lines[
-      lines.length - 1
-    ] =
-      `${lines[
-        lines.length - 1
-      ].slice(0, -3)}...`;
+    const lastIndex =
+      lines.length - 1;
+
+    lines[lastIndex] =
+      lines[lastIndex]
+        .slice(
+          0,
+          Math.max(
+            0,
+            maxCharacters - 3
+          )
+        ) +
+      "...";
   }
 
 
   return lines;
 }
-
 
 // =========================================================
 // CREATE REVIEW CARD PNG
