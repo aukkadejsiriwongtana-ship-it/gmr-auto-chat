@@ -4140,19 +4140,19 @@ const normalizedLower =
 
 
 // ========================================
-// ตรวจว่าข้อความล่าสุดของ Bot
-// คือคำถามให้ลูกค้าเลือก Review จริงหรือไม่
+// อ่านข้อความล่าสุดของ Bot จาก Conversation
+// last_bot_message อยู่ใน gmr_conversations
 // ========================================
 
-const freshCustomer =
-  await getCustomerById(
+const freshConversation =
+  await getConversationByCustomerId(
     customer.id
   );
 
 
 const lastBotMessage =
   String(
-    freshCustomer?.last_bot_message ||
+    freshConversation?.last_bot_message ||
     ""
   )
     .trim()
@@ -4168,9 +4168,30 @@ const reviewSelectionPromptWasSent =
   );
 
 
+console.log(
+  "REVIEW SELECTION PROMPT CHECK:",
+  {
+    customerId:
+      customer.id,
+
+    message:
+      normalizedLower,
+
+    lastBotMessage,
+
+    reviewSelectionPromptWasSent,
+
+    candidates:
+      candidates.length,
+  }
+);
+
+
 // ========================================
-// คำตอบที่ยอมรับเมื่อ Bot
-// ถามเลือก Review ไปแล้วเท่านั้น
+// ถ้ามี Review เดียว
+// และ Bot ถามเลือก Review ไปแล้ว
+// คำตอบธรรมชาติ เช่น ได้ / ใช่ / ok
+// = เลือก Review นั้น
 // ========================================
 
 const singleReviewYesWords = [
