@@ -93,6 +93,12 @@ import {
   getReviewAgeDays,
 } from "./services/reviewProvider.js";
 
+import {
+  createReviewEvidenceImage,
+  uploadReviewEvidence,
+  createReviewEvidenceSignedUrl,
+} from "./services/reviewEvidenceService.js";
+
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -1743,25 +1749,34 @@ if (recentOneStarReviews.length > 0) {
     }
 
 
-    // บันทึก reviews ลง DB
-    for (
-      const review of recentOneStarReviews
-    ) {
-      await saveReviewCandidate({
-        customerId:
-          customer.id,
+    // =====================================================
+// สร้างหลักฐานรูป + ส่งรูปให้ลูกค้า + บันทึก Review
+// =====================================================
 
-        jobId:
-          latestJob.id,
+for (
+  let index = 0;
+  index <
+    recentOneStarReviews.length;
+  index += 1
+) {
 
+  const review =
+    recentOneStarReviews[index];
+
+  let evidenceImagePath =
+    null;
+
+
+  try {
+
+    // -----------------------------------------
+    // 1. สร้าง Review Card PNG
+    // -----------------------------------------
+
+    const evidenceBuffer =
+      await createReviewEvidenceImage({
         businessName:
           latestJob.business_name,
-
-        placeId:
-          latestJob.place_id,
-
-        mapUrl:
-          latestJob.map_url,
 
         reviewerName:
           review.reviewerName,
@@ -1772,26 +1787,151 @@ if (recentOneStarReviews.length > 0) {
         reviewText:
           review.text,
 
-        reviewDate:
-          review.isoDate,
+        reviewDateText:
+          review.dateText,
 
-        reviewUrl:
-          review.reviewUrl,
-
-        providerReviewId:
-          review.reviewId,
-
-        isRecent: true,
-
-        isVisible: true,
-
-        hasText:
-          Boolean(
-            review.text &&
-            review.text.trim()
-          ),
+        index:
+          index + 1,
       });
-    }
+
+
+    // -----------------------------------------
+    // 2. Upload เข้า Supabase Storage
+    // -----------------------------------------
+
+    const evidenceUpload =
+      await uploadReviewEvidence({
+        buffer:
+          evidenceBuffer,
+
+        customerId:
+          customer.id,
+
+        jobId:
+          latestJob.id,
+
+        reviewId:
+          review.reviewId ||
+          null,
+
+        index:
+          index + 1,
+      });
+
+
+    evidenceImagePath =
+      evidenceUpload.filePath;
+
+
+    // -----------------------------------------
+    // 3. สร้าง Signed URL
+    // -----------------------------------------
+
+    const evidenceImageUrl =
+      await createReviewEvidenceSignedUrl(
+        evidenceImagePath
+      );
+
+
+    // -----------------------------------------
+    // 4. ส่งรูปให้ลูกค้าทาง LINE
+    // -----------------------------------------
+
+    await sendMessageToCustomer({
+      platform,
+      platformUserId,
+
+      imageUrl:
+        evidenceImageUrl,
+    });
+
+
+    console.log(
+      "REVIEW EVIDENCE SENT:",
+      {
+        jobId:
+          latestJob.id,
+
+        reviewerName:
+          review.reviewerName,
+
+        evidenceImagePath,
+      }
+    );
+
+  } catch (error) {
+
+    // ถ้ารูปมีปัญหา
+    // ห้ามทำให้ flow เลือกรีวิวพัง
+    console.error(
+      "REVIEW EVIDENCE FAILED:",
+      {
+        jobId:
+          latestJob.id,
+
+        reviewerName:
+          review.reviewerName,
+
+        error:
+          error.message,
+      }
+    );
+  }
+
+
+  // -----------------------------------------
+  // 5. เก็บ Review ลง DB
+  // -----------------------------------------
+
+  await saveReviewCandidate({
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    businessName:
+      latestJob.business_name,
+
+    placeId:
+      latestJob.place_id,
+
+    mapUrl:
+      latestJob.map_url,
+
+    reviewerName:
+      review.reviewerName,
+
+    rating:
+      review.rating,
+
+    reviewText:
+      review.text,
+
+    reviewDate:
+      review.isoDate,
+
+    reviewUrl:
+      review.reviewUrl,
+
+    providerReviewId:
+      review.reviewId,
+
+    isRecent:
+      true,
+
+    isVisible:
+      true,
+
+    hasText:
+      Boolean(
+        review.text &&
+        review.text.trim()
+      ),
+
+    evidenceImagePath,
+  });
+}
 
 
     const nextState =
