@@ -2991,6 +2991,42 @@ const imageReviews =
       latestJob.place_id
     );
 
+    console.log(
+  "NEWEST REVIEWS DEBUG:",
+  {
+    placeId:
+      latestJob.place_id,
+
+    total:
+      newestResult.reviews.length,
+
+    reviews:
+      newestResult.reviews.map(
+        (review) => ({
+          reviewerName:
+            review.reviewerName,
+
+          rating:
+            review.rating,
+
+          dateText:
+            review.dateText,
+
+          isoDate:
+            review.isoDate,
+
+          ageDays:
+            getReviewAgeDays(
+              review
+            ),
+
+          reviewUrl:
+            review.reviewUrl,
+        })
+      ),
+  }
+);
+
 const recentOneStarReviews =
   getRecentReviews(
     newestResult.reviews.filter(
@@ -2999,6 +3035,36 @@ const recentOneStarReviews =
     ),
     14
   );
+
+    console.log(
+  "RECENT 1 STAR DEBUG:",
+  {
+    count:
+      recentOneStarReviews.length,
+
+    reviews:
+      recentOneStarReviews.map(
+        (review) => ({
+          reviewerName:
+            review.reviewerName,
+
+          rating:
+            review.rating,
+
+          dateText:
+            review.dateText,
+
+          isoDate:
+            review.isoDate,
+
+          ageDays:
+            getReviewAgeDays(
+              review
+            ),
+        })
+      ),
+  }
+);
 
 
   // -----------------------------------------------------
