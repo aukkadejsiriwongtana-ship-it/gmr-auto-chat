@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import sharp from "sharp";
+import { Resvg } from "@resvg/resvg-js";
 import crypto from "crypto";
 import { readFile } from "node:fs/promises";
 
@@ -19,33 +19,6 @@ const THAI_FONT_PATH =
     "../../node_modules/@fontsource/noto-sans-thai/files/noto-sans-thai-thai-400-normal.woff2",
     import.meta.url
   );
-
-let thaiFontBase64 =
-  null;
-
-
-async function getThaiFontBase64() {
-
-  if (thaiFontBase64) {
-    return thaiFontBase64;
-  }
-
-
-  const fontBuffer =
-    await readFile(
-      THAI_FONT_PATH
-    );
-
-
-  thaiFontBase64 =
-    fontBuffer.toString(
-      "base64"
-    );
-
-
-  return thaiFontBase64;
-}
-
 
 if (
   !SUPABASE_URL ||
@@ -263,7 +236,7 @@ export async function createReviewEvidenceImage({
             y="${350 + lineIndex * 58}"
             font-size="34"
             fill="#202124"
-            class="review-text"
+            font-family="Noto Sans Thai"
           >
             ${escapeXml(line)}
           </text>
@@ -271,8 +244,6 @@ export async function createReviewEvidenceImage({
       )
       .join("");
 
-  const thaiFont =
-  await getThaiFontBase64();
 
   const svg =
   `
@@ -282,18 +253,7 @@ export async function createReviewEvidenceImage({
     xmlns="http://www.w3.org/2000/svg"
   >
 
-    <style>
-      @font-face {
-        font-family: "NotoSansThaiEmbedded";
-        src: url("data:font/woff2;base64,${thaiFont}") format("woff2");
-        font-weight: 400;
-        font-style: normal;
-      }
-
-      .review-text {
-        font-family: "NotoSansThaiEmbedded", "Noto Sans Thai", Arial, sans-serif;
-      }
-    </style>
+  
 
       <rect
         width="1080"
@@ -317,7 +277,7 @@ export async function createReviewEvidenceImage({
         y="115"
         font-size="30"
         fill="#5f6368"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         REVIEW #${index}
       </text>
@@ -329,7 +289,7 @@ export async function createReviewEvidenceImage({
         font-size="40"
         font-weight="700"
         fill="#202124"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         ${safeBusinessName}
       </text>
@@ -359,7 +319,7 @@ export async function createReviewEvidenceImage({
         font-size="34"
         font-weight="700"
         fill="#202124"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         ${safeReviewerName}
       </text>
@@ -370,7 +330,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="31"
         fill="#f9ab00"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         ${stars}
       </text>
@@ -381,7 +341,7 @@ export async function createReviewEvidenceImage({
         y="315"
         font-size="25"
         fill="#5f6368"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         ${safeDate}
       </text>
@@ -405,7 +365,7 @@ export async function createReviewEvidenceImage({
         y="965"
         font-size="26"
         fill="#5f6368"
-        class="review-text"
+        font-family="Noto Sans Thai"
       >
         เก็บไว้เป็นหลักฐานก่อนดำเนินการ
       </text>
@@ -414,19 +374,38 @@ export async function createReviewEvidenceImage({
     `;
 
 
-  const pngBuffer =
-    await sharp(
-      Buffer.from(svg)
-    )
-      .png({
-        compressionLevel:
-          9,
-      })
-      .toBuffer();
+ const fontPath =
+  THAI_FONT_PATH.pathname;
 
 
-  return pngBuffer;
-}
+const resvg =
+  new Resvg(
+    svg,
+    {
+      font: {
+        loadSystemFonts:
+          false,
+
+        fontFiles: [
+          fontPath,
+        ],
+
+        defaultFontFamily:
+          "Noto Sans Thai",
+      },
+    }
+  );
+
+
+const rendered =
+  resvg.render();
+
+
+const pngBuffer =
+  rendered.asPng();
+
+
+return pngBuffer;
 
 
 // =========================================================
