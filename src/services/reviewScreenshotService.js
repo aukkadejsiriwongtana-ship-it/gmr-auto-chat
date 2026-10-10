@@ -159,7 +159,92 @@ export async function createReviewScreenshot({
       }
     }
 
+// =========================================================
+// ปิด popup "Upgrade to a smarter Google Maps"
+// =========================================================
 
+try {
+
+  const mapsPopupClosed =
+    await page.evaluate(
+      () => {
+
+        const elements =
+          Array.from(
+            document.querySelectorAll(
+              'button, a, [role="button"]'
+            )
+          );
+
+
+        const target =
+          elements.find(
+            (element) => {
+
+              const text =
+                String(
+                  element.innerText ||
+                  element.textContent ||
+                  ""
+                )
+                  .trim()
+                  .toLowerCase();
+
+
+              return (
+                text.includes(
+                  "go back to web"
+                ) ||
+                text.includes(
+                  "back to web"
+                ) ||
+                text.includes(
+                  "กลับไปใช้เว็บ"
+                )
+              );
+            }
+          );
+
+
+        if (!target) {
+          return false;
+        }
+
+
+        target.click();
+
+        return true;
+      }
+    );
+
+
+  console.log(
+    "GOOGLE MAPS POPUP CLOSED:",
+    mapsPopupClosed
+  );
+
+
+  if (mapsPopupClosed) {
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          2000
+        )
+    );
+
+  }
+
+} catch (error) {
+
+  console.log(
+    "GOOGLE MAPS POPUP CLOSE SKIPPED:",
+    error?.message
+  );
+
+}
+    
     // เลื่อนลงเล็กน้อยเพื่อตัด browser/header ส่วนเกิน
     await page.evaluate(
       () => {
