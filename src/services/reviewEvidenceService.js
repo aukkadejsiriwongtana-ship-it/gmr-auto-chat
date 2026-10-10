@@ -1,8 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { Resvg } from "@resvg/resvg-js";
 import crypto from "crypto";
-import { readFile } from "node:fs/promises";
-
 
 
 const SUPABASE_URL =
@@ -404,8 +402,8 @@ const rendered =
 const pngBuffer =
   rendered.asPng();
 
-
 return pngBuffer;
+}
 
 
 // =========================================================
