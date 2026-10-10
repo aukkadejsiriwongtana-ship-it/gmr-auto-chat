@@ -270,7 +270,10 @@ async function triggerHumanAttention({
   }
 }
 
-function getGlobalFaqReply(message) {
+function getGlobalFaqReply(
+  message,
+  language = "th"
+) {
   const text =
     String(message || "")
       .trim()
@@ -280,9 +283,14 @@ function getGlobalFaqReply(message) {
     return null;
   }
 
+  const isEnglish =
+    language === "en";
+
+
   // ========================================
   // ระยะเวลาดำเนินการ
   // ========================================
+
   if (
     text.includes("กี่วัน") ||
     text.includes("ใช้เวลากี่วัน") ||
@@ -290,33 +298,39 @@ function getGlobalFaqReply(message) {
     text.includes("นานมั้ย") ||
     text.includes("ระยะเวลา") ||
     text.includes("กี่ชั่วโมง") ||
-    text.includes("how long")
+    text.includes("how long") ||
+    text.includes("how many days") ||
+    text.includes("processing time")
   ) {
-    return (
-      "ระยะเวลาดำเนินการประมาณ 1–14 วันครับ " +
-      "ขึ้นอยู่กับการตรวจสอบของระบบ Google"
-    );
+    return isEnglish
+      ? "The process usually takes around 1–14 days, depending on Google's review process."
+      : "ระยะเวลาดำเนินการประมาณ 1–14 วันครับ ขึ้นอยู่กับการตรวจสอบของระบบ Google";
   }
+
 
   // ========================================
   // ชำระหลังลบได้ไหม
   // ========================================
+
   if (
     text.includes("จ่ายหลัง") ||
     text.includes("ชำระหลัง") ||
     text.includes("ลบก่อนจ่าย") ||
     text.includes("จ่ายทีหลัง") ||
-    text.includes("pay after")
+    text.includes("pay after") ||
+    text.includes("pay later") ||
+    text.includes("payment after")
   ) {
-    return (
-      "ได้ครับ สามารถชำระหลังดำเนินการสำเร็จ " +
-      "และตรวจสอบหน้า Google Map แล้วได้ครับ"
-    );
+    return isEnglish
+      ? "Yes. Payment can be made after the review has been successfully removed and you have verified it on Google Maps."
+      : "ได้ครับ สามารถชำระหลังดำเนินการสำเร็จ และตรวจสอบหน้า Google Map แล้วได้ครับ";
   }
+
 
   // ========================================
   // มีผลต่อ Google Map ไหม
   // ========================================
+
   if (
     text.includes("มีผลกับแมพ") ||
     text.includes("มีผลต่อแมพ") ||
@@ -324,82 +338,107 @@ function getGlobalFaqReply(message) {
     text.includes("กระทบ map") ||
     text.includes("โดนแบน") ||
     text.includes("มีปัญหากับ google") ||
-    text.includes("affect the map")
+    text.includes("affect the map") ||
+    text.includes("affect my map") ||
+    text.includes("risk to my business") ||
+    text.includes("get banned")
   ) {
-    return (
-      "ไม่มีผลต่อ Google Map ครับ " +
-      "ทางเราดำเนินการโดยยื่นเรื่องให้ Google ตรวจสอบตามขั้นตอน"
-    );
+    return isEnglish
+      ? "It does not negatively affect your Google Maps listing. We submit the review for Google's assessment through the proper review process."
+      : "ไม่มีผลต่อ Google Map ครับ ทางเราดำเนินการโดยยื่นเรื่องให้ Google ตรวจสอบตามขั้นตอน";
   }
+
 
   // ========================================
   // ราคาต่อกี่รีวิว
   // ========================================
+
   if (
     text.includes("ราคาต่อกี่รีวิว") ||
     text.includes("ต่อกี่รีวิว") ||
     text.includes("ราคานี้กี่รีวิว") ||
     text.includes("กี่รีวิวต่อราคา") ||
-    text.includes("per review")
+    text.includes("per review") ||
+    text.includes("for one review")
   ) {
-    return "ราคาที่แจ้งเป็นราคาต่อ 1 รีวิวครับ";
+    return isEnglish
+      ? "The quoted price is per review."
+      : "ราคาที่แจ้งเป็นราคาต่อ 1 รีวิวครับ";
   }
+
 
   // ========================================
   // รีวิวจะกลับมาไหม
   // ========================================
+
   if (
     text.includes("กลับมาไหม") ||
     text.includes("กลับมาอีกไหม") ||
     text.includes("รีวิวกลับมา") ||
     text.includes("ซ่อนรีวิว") ||
     text.includes("แค่ซ่อน") ||
-    text.includes("come back")
+    text.includes("come back") ||
+    text.includes("return later") ||
+    text.includes("temporary") ||
+    text.includes("hidden")
   ) {
-    return (
-      "เป็นการยื่นให้ระบบ Google ตรวจสอบและนำรีวิวออกครับ " +
-      "ไม่ใช่การซ่อนรีวิวชั่วคราว"
-    );
+    return isEnglish
+      ? "The review is submitted to Google for assessment and removal. It is not simply temporarily hidden."
+      : "เป็นการยื่นให้ระบบ Google ตรวจสอบและนำรีวิวออกครับ ไม่ใช่การซ่อนรีวิวชั่วคราว";
   }
+
 
   // ========================================
   // ขอราคา
   // ========================================
+
   if (
     text === "ราคา" ||
     text.includes("ราคาเท่าไหร่") ||
     text.includes("ราคาเท่าไร") ||
     text.includes("ค่าบริการเท่าไหร่") ||
     text.includes("ค่าบริการเท่าไร") ||
-    text.includes("how much")
+    text.includes("how much") ||
+    text.includes("price") ||
+    text.includes("cost")
   ) {
-    return (
-      "ราคาจะขึ้นอยู่กับอายุและลักษณะของรีวิวครับ " +
-      "รบกวนส่งชื่อ Google Map หรือลิงก์รีวิวมาให้ตรวจสอบก่อนครับ"
-    );
+    return isEnglish
+      ? "The price depends on the age and details of the review. Please send the Google Maps business name, map link, or review link so I can check it first."
+      : "ราคาจะขึ้นอยู่กับอายุและลักษณะของรีวิวครับ รบกวนส่งชื่อ Google Map หรือลิงก์รีวิวมาให้ตรวจสอบก่อนครับ";
   }
 
-// ========================================
-// ขอส่วนลด
-// ========================================
-if (
-  text.includes("ลดได้ไหม") ||
-  text.includes("ลดได้มั้ย") ||
-  text.includes("ลดหน่อย") ||
-  text.includes("มีส่วนลดไหม") ||
-  text.includes("มีส่วนลดมั้ย") ||
-  text.includes("ขอส่วนลด") ||
-  text.includes("แพงไป") ||
-  text.includes("ลดราคา") ||
-  text.includes("discount")
-) {
-  return (
-    "ราคาที่แจ้งเป็นการนำออกจากระบบ ไม่ใช่การซ่อนนะครับ \n\n" +
-    "ชำระหลังดำเนินการเสร็จได้ \n\n" +
-    "หากโอเค พิมพ์ “ยืนยัน” เริ่มงานได้เลย ✅"
-  );
-}
-  
+
+  // ========================================
+  // ขอส่วนลด
+  // ========================================
+
+  if (
+    text.includes("ลดได้ไหม") ||
+    text.includes("ลดได้มั้ย") ||
+    text.includes("ลดหน่อย") ||
+    text.includes("มีส่วนลดไหม") ||
+    text.includes("มีส่วนลดมั้ย") ||
+    text.includes("ขอส่วนลด") ||
+    text.includes("แพงไป") ||
+    text.includes("ลดราคา") ||
+    text.includes("discount") ||
+    text.includes("cheaper") ||
+    text.includes("lower price")
+  ) {
+    return isEnglish
+      ? (
+          "The quoted price is for removal from the system, not temporary hiding.\n\n" +
+          "Payment can be made after the process is completed.\n\n" +
+          'If you would like to proceed, reply "Confirm" to start. ✅'
+        )
+      : (
+          "ราคาที่แจ้งเป็นการนำออกจากระบบ ไม่ใช่การซ่อนนะครับ\n\n" +
+          "ชำระหลังดำเนินการเสร็จได้\n\n" +
+          "หากโอเค พิมพ์ “ยืนยัน” เริ่มงานได้เลย ✅"
+        );
+  }
+
+
   return null;
 }
 
@@ -410,7 +449,10 @@ async function sendGlobalFaqIfMatched({
   message,
 }) {
   const faqReply =
-    getGlobalFaqReply(message);
+  getGlobalFaqReply(
+    message,
+    customer?.language || "th"
+  );
 
   if (!faqReply) {
     return {
@@ -994,9 +1036,12 @@ if (
 
   if (!places.length) {
 
-    const botReply =
-      "ยังอ่านข้อมูลจากลิงก์ Google Map นี้ไม่ได้ครับ รบกวนส่งชื่อธุรกิจมาได้เลยครับ";
-
+   const botReply =
+  getCustomerText(
+    customer,
+    "ยังอ่านข้อมูลจากลิงก์ Google Map นี้ไม่ได้ครับ รบกวนส่งชื่อธุรกิจมาได้เลยครับ",
+    "I couldn't read the business information from this Google Maps link. Please send me the business name instead."
+  );
 
     await saveMessage({
       customerId:
@@ -1338,8 +1383,12 @@ directRating,
   });
 
 
-  const botReply =
-    "เช็คแล้วดำเนินการได้ครับ";
+const botReply =
+  getCustomerText(
+    customer,
+    "เช็คแล้วดำเนินการได้ครับ",
+    "Checked. We can proceed with this review."
+  );
 
 await saveMessage({
   customerId:
@@ -1496,7 +1545,11 @@ await updateLastBotMessage(
 
   if (!places.length) {
   const botReply =
-    "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ";
+  getCustomerText(
+    customer,
+    "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ",
+    "I couldn't find the Google Maps listing from this business name. Please send the full business name or the Google Maps link."
+  );
 
 
   await saveMessage({
@@ -1903,8 +1956,12 @@ const imageReviews =
     );
 
 
-  const botReply =
-    "เช็คแล้วดำเนินการได้ครับ";
+ const botReply =
+  getCustomerText(
+    customer,
+    "เช็คแล้วดำเนินการได้ครับ",
+    "Checked. We can proceed with this review."
+  );
 
 
   await saveMessage({
@@ -2073,8 +2130,13 @@ if (recentOneStarReviews.length > 0) {
   recentOneStarReviews.length === 1
 ) {
   botReply =
-    "จากที่เช็คจะมีรีวิวที่เพิ่งลงและดำเนินการได้เลย 1 รีวิวครับ\n\n" +
-    "เอาเป็นรีวิวนี้เลยไหมครับ";
+    getCustomerText(
+      customer,
+      "จากที่เช็คจะมีรีวิวที่เพิ่งลงและดำเนินการได้เลย 1 รีวิวครับ\n\n" +
+        "เอาเป็นรีวิวนี้เลยไหมครับ",
+      "I found 1 recently posted review that can be processed.\n\n" +
+        "Would you like to proceed with this review?"
+    );
 }
 
 
@@ -2084,9 +2146,13 @@ if (recentOneStarReviews.length > 0) {
         .map(
           (review, index) => {
 
-            const reviewer =
-              review.reviewerName ||
-              "ไม่ทราบชื่อ";
+           const reviewer =
+  review.reviewerName ||
+  getCustomerText(
+    customer,
+    "ไม่ทราบชื่อ",
+    "Unknown reviewer"
+  );
 
             const rating =
               review.rating ||
@@ -2428,15 +2494,26 @@ for (
   }
 
 
-  const botReply1 =
+ const botReply1 =
+  getCustomerText(
+    customer,
     "จากที่เช็คบนแมพมี รีวิว 1 ดาวที่มีอายุงานนานแล้ว (> 2 สัปดาห์)\n\n" +
-    "ขั้นตอนการยื่นตรวจสอบจะทำได้ยากกว่า\n\n" +
-    "หากมีรีวิวเพิ่งลงภายใน 2 สัปดาห์ แนะนำส่งมาให้เช็คทันที จะดำเนินการได้ง่ายกว่าครับ";
+      "ขั้นตอนการยื่นตรวจสอบจะทำได้ยากกว่า\n\n" +
+      "หากมีรีวิวเพิ่งลงภายใน 2 สัปดาห์ แนะนำส่งมาให้เช็คทันที จะดำเนินการได้ง่ายกว่าครับ",
+    "I found a 1-star review on the map that is older than 2 weeks.\n\n" +
+      "Older reviews are generally more difficult to submit for assessment.\n\n" +
+      "If you receive a new review within 2 weeks, I recommend sending it to us as soon as possible."
+  );
 
 
-  const botReply2 =
+const botReply2 =
+  getCustomerText(
+    customer,
     "แต่ถ้ายังต้องการดำเนินการกับรีวิว 1 ดาวตัวปัจจุบัน\n\n" +
-    "ส่งลิงก์รีวิว หรือรูปรีวิวที่ต้องการลบมาได้เลยครับ เดี๋ยวเช็คราคาให้ก่อน";
+      "ส่งลิงก์รีวิว หรือรูปรีวิวที่ต้องการลบมาได้เลยครับ เดี๋ยวเช็คราคาให้ก่อน",
+    "If you would still like to proceed with the current 1-star review,\n\n" +
+      "please send the review link or a screenshot of the review and I'll check the price first."
+  );
 
 
   const botReply =
@@ -3065,7 +3142,11 @@ if (!selectedReview) {
 }
 
   const botReply =
-    "รับทราบครับ เดี๋ยวเจ้าหน้าที่ตรวจสอบและแจ้งราคาสำหรับรีวิวนี้ให้ครับ";
+  getCustomerText(
+    customer,
+    "รับทราบครับ เดี๋ยวเจ้าหน้าที่ตรวจสอบและแจ้งราคาสำหรับรีวิวนี้ให้ครับ",
+    "Got it. We'll check this review and send you the price shortly."
+  );
 
   await saveMessage({
     customerId: customer.id,
@@ -3250,16 +3331,30 @@ if (
     String(message || "").trim();
 
   const normalizedPhone =
-    rawPhone.replace(/[^\d+]/g, "");
+  rawPhone.replace(
+    /[^\d+]/g,
+    ""
+  );
 
-  const thaiPhonePattern =
-    /^(?:\+66|0)\d{8,9}$/;
 
- if (
-  !thaiPhonePattern.test(
+const thaiPhonePattern =
+  /^(?:\+66|0)\d{8,9}$/;
+
+
+const internationalPhonePattern =
+  /^\+[1-9]\d{7,14}$/;
+
+
+const isValidPhone =
+  thaiPhonePattern.test(
     normalizedPhone
-  )
-) {
+  ) ||
+  internationalPhonePattern.test(
+    normalizedPhone
+  );
+
+
+if (!isValidPhone) {
   const faqResult =
     await sendGlobalFaqIfMatched({
       customer,
@@ -3284,8 +3379,11 @@ if (
   }
 
   const botReply =
-    "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678";
-
+  getCustomerText(
+    customer,
+    "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678",
+    "Please send a valid phone number including the country code, for example +66812345678."
+  );
   await saveMessage({
     customerId: customer.id,
     platform,
@@ -3356,7 +3454,11 @@ if (
  const formattedPrice =
   Number(
     latestJob.price || 0
-  ).toLocaleString("th-TH");
+  ).toLocaleString(
+    customer.language === "en"
+      ? "en-US"
+      : "th-TH"
+  );
 
 const botReply =
   template.content.replace(
@@ -3881,8 +3983,20 @@ app.get("/test-sales-quote", async (req, res) => {
     }
 
 
-    const salesMessage =
-      `สำหรับรีวิวดังกล่าว ราคา ${amount.toLocaleString("th-TH")} บาท/รีวิว`;
+    const formattedAmount =
+  amount.toLocaleString(
+    customer.language === "en"
+      ? "en-US"
+      : "th-TH"
+  );
+
+
+const salesMessage =
+  getCustomerText(
+    customer,
+    `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
+    `For this review, the price is THB ${formattedAmount} per review.`
+  );
 
 
     // บันทึกราคาใน Job
@@ -4192,9 +4306,20 @@ async function processLineGroupPrice({
   }
 
 
-  const salesMessage =
-    `สำหรับรีวิวดังกล่าว ราคา ${amount.toLocaleString("th-TH")} บาท/รีวิว`;
+  const formattedAmount =
+  amount.toLocaleString(
+    customer.language === "en"
+      ? "en-US"
+      : "th-TH"
+  );
 
+
+const salesMessage =
+  getCustomerText(
+    customer,
+    `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
+    `For this review, the price is THB ${formattedAmount} per review.`
+  );
 
   // บันทึกราคา
   await updateJob(
