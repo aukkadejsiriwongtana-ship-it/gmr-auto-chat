@@ -132,20 +132,51 @@ function detectCustomerLanguage(
 }
 
 function isThailandPlace(place) {
+  const countryCode =
+    String(
+      place?.countryCode || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  if (countryCode) {
+    return countryCode === "TH";
+  }
+
+
   const address =
     String(
       place?.formattedAddress ||
       ""
     ).toLowerCase();
 
+
   if (!address) {
     return null;
   }
 
-  return (
+
+  if (
     address.includes("thailand") ||
     address.includes("ประเทศไทย")
-  );
+  ) {
+    return true;
+  }
+
+
+  // fallback:
+  // ถ้าที่อยู่มีอักษรไทย
+  // ให้ถือว่าเป็นประเทศไทย
+  if (
+    /[\u0E00-\u0E7F]/.test(
+      address
+    )
+  ) {
+    return true;
+  }
+
+
+  return false;
 }
 
 function getCustomerText(
