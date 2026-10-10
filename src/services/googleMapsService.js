@@ -193,6 +193,7 @@ if (
 // RESOLVE GOOGLE MAP SHORT URL
 // maps.app.goo.gl → Google Maps URL เต็ม
 // =========================================================
+
 async function resolveGoogleMapsWithBrowser(
   mapUrl
 ) {
@@ -232,13 +233,56 @@ async function resolveGoogleMapsWithBrowser(
     );
 
 
+    // รอ Google Maps render ตัวร้าน
     await new Promise(
       (resolve) =>
         setTimeout(
           resolve,
-          2500
+          5000
         )
     );
+
+
+    // ----------------------------------------
+    // ถ้ามี consent ให้พยายามกด
+    // ----------------------------------------
+
+    try {
+      const buttons =
+        await page.$$("button");
+
+      for (
+        const button of buttons
+      ) {
+        const buttonText =
+          await page.evaluate(
+            (el) =>
+              el.innerText ||
+              "",
+            button
+          );
+
+        if (
+          /accept all|ยอมรับทั้งหมด|accept|agree/i.test(
+            buttonText
+          )
+        ) {
+          await button.click();
+
+          await new Promise(
+            (resolve) =>
+              setTimeout(
+                resolve,
+                3000
+              )
+          );
+
+          break;
+        }
+      }
+    } catch {
+      // ไม่มี consent ก็ข้าม
+    }
 
 
     const result =
@@ -255,12 +299,50 @@ async function resolveGoogleMapsWithBrowser(
             null;
 
 
+          const h1Texts =
+            Array.from(
+              document.querySelectorAll(
+                "h1"
+              )
+            )
+              .map(
+                (el) =>
+                  (
+                    el.innerText ||
+                    el.textContent ||
+                    ""
+                  ).trim()
+              )
+              .filter(Boolean);
+
+
+          const ariaHeadings =
+            Array.from(
+              document.querySelectorAll(
+                '[role="heading"]'
+              )
+            )
+              .map(
+                (el) =>
+                  (
+                    el.innerText ||
+                    el.textContent ||
+                    ""
+                  ).trim()
+              )
+              .filter(Boolean);
+
+
           return {
             title:
               document.title ||
               null,
 
             ogTitle,
+
+            h1Texts,
+
+            ariaHeadings,
 
             url:
               window.location.href,
@@ -269,30 +351,49 @@ async function resolveGoogleMapsWithBrowser(
       );
 
 
-    const rawTitle =
-      result.ogTitle ||
-      result.title ||
-      "";
+    // ----------------------------------------
+    // ลำดับหา Business Name
+    // 1. H1
+    // 2. role=heading
+    // 3. og:title
+    // 4. document.title
+    // ----------------------------------------
+
+    const candidates = [
+      ...(result.h1Texts || []),
+      ...(result.ariaHeadings || []),
+      result.ogTitle,
+      result.title,
+    ]
+      .filter(Boolean)
+      .map(
+        (value) =>
+          String(value)
+            .replace(
+              /\s*[-–—]\s*Google Maps.*$/i,
+              ""
+            )
+            .replace(
+              /^Google Maps\s*[-–—]\s*/i,
+              ""
+            )
+            .trim()
+      )
+      .filter(
+        (value) =>
+          value &&
+          value.toLowerCase() !==
+            "google maps" &&
+          !/accept all|ยอมรับทั้งหมด/i.test(
+            value
+          )
+      );
 
 
-    const cleanedPlaceName =
-  rawTitle
-    .replace(
-      /\s*[-–—]\s*Google Maps.*$/i,
-      ""
-    )
-    .replace(
-      /^Google Maps\s*[-–—]\s*/i,
-      ""
-    )
-    .trim();
+    const placeName =
+      candidates[0] ||
+      null;
 
-const placeName =
-  cleanedPlaceName &&
-  cleanedPlaceName.toLowerCase() !==
-    "google maps"
-    ? cleanedPlaceName
-    : null;
 
     console.log(
       "GOOGLE MAP BROWSER RESOLVED:",
@@ -309,9 +410,13 @@ const placeName =
         ogTitle:
           result.ogTitle,
 
-        placeName:
-          placeName ||
-          null,
+        h1Texts:
+          result.h1Texts,
+
+        ariaHeadings:
+          result.ariaHeadings,
+
+        placeName,
       }
     );
 
@@ -321,9 +426,7 @@ const placeName =
         result.url ||
         mapUrl,
 
-      placeName:
-        placeName ||
-        null,
+      placeName,
     };
 
   } catch (error) {
