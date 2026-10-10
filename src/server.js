@@ -3843,6 +3843,177 @@ if (!isValidPhone) {
     );
 
 
+if (!latestJob) {
+  throw new Error(
+    "No active job found while receiving phone"
+  );
+}
+
+
+const hasPaymentHistory =
+  await hasPaymentByCustomerId(
+    customer.id
+  );
+
+
+const needsCreditApproval =
+  Number(
+    latestJob.price || 0
+  ) > 3000 &&
+  !hasPaymentHistory;
+
+
+if (needsCreditApproval) {
+
+  const creditRequest =
+    await sendCreditApprovalRequestToLineGroup({
+      customer,
+
+      job:
+        latestJob,
+
+      phone:
+        phoneForDb,
+    });
+
+
+  await updateJob(
+    latestJob.id,
+    {
+      status:
+        "waiting_credit_approval",
+
+      line_group_message_id:
+        creditRequest.messageId,
+    }
+  );
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.HANDOFF,
+
+    handoff:
+      true,
+
+    handoffReason:
+      "CREDIT_APPROVAL_PENDING",
+  });
+
+
+  const botReply =
+    getCustomerText(
+      customer,
+      "ได้รับเบอร์เรียบร้อยครับ ขณะนี้กำลังตรวจสอบข้อมูลก่อนเริ่มดำเนินการครับ",
+      "Thank you. We have received your phone number and are completing a quick verification before starting the service."
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      latestJob.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      GMR_STATES.HANDOFF,
+
+    phoneAccepted:
+      true,
+
+    phone:
+      phoneForDb,
+
+    creditApprovalPending:
+      true,
+
+    botReply,
+  };
+}
+
+
+// ========================================
+// ไม่ต้องตรวจเครดิต
+// ราคา <= 3,000
+// หรือมีประวัติชำระเงินแล้ว
+// → เริ่มงานทันที
+// ========================================
+
+const startResult =
+  await startApprovedJob({
+    customer,
+
+    conversation,
+
+    job:
+      latestJob,
+
+    platform,
+
+    phone:
+      phoneForDb,
+  });
+
+
+return {
+  ok: true,
+
+  customerId:
+    customer.id,
+
+  jobId:
+    latestJob.id,
+
+  stateBefore:
+    conversation.state,
+
+  stateAfter:
+    GMR_STATES.IN_PROGRESS,
+
+  phoneAccepted:
+    true,
+
+  phone:
+    phoneForDb,
+
+  creditApprovalPending:
+    false,
+
+  botReply:
+    startResult.botReply,
+};
   
  // -------------------------------------------------------
 // OTHER STATES → SOFT HANDOFF
