@@ -3467,16 +3467,14 @@ if (
   );
 
 
-const thaiPhonePattern =
-  /^(?:\+66|0)\d{8,9}$/;
-
+const localPhonePattern =
+  /^\d{10}$/;
 
 const internationalPhonePattern =
   /^\+[1-9]\d{7,14}$/;
 
-
 const isValidPhone =
-  thaiPhonePattern.test(
+  localPhonePattern.test(
     normalizedPhone
   ) ||
   internationalPhonePattern.test(
@@ -3511,8 +3509,8 @@ if (!isValidPhone) {
   const botReply =
   getCustomerText(
     customer,
-    "รบกวนส่งเบอร์โทรศัพท์ให้ถูกต้องอีกครั้งครับ เช่น 0812345678",
-    "Please send a valid phone number including the country code, for example +66812345678."
+    "รบกวนส่งเบอร์โทรศัพท์ให้ครบ 10 หลักครับ เช่น 0812345678",
+    "Please send a 10-digit phone number, for example 0812345678."
   );
   await saveMessage({
     customerId: customer.id,
