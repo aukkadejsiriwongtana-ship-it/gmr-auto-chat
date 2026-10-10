@@ -5904,12 +5904,6 @@ if (
       creditJob.customer_id
     );
 
-  const creditCustomer =
-    await getCustomerById(
-      creditJob.customer_id
-    );
-
-
   if (!creditCustomer) {
 
     await replyLineTextMessage(
