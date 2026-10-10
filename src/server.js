@@ -224,6 +224,125 @@ function getPlatformLabel(
   );
 }
 
+function getPlatformLabel(
+  customer
+) {
+  const platform =
+    String(
+      customer?.platform || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (platform === "line") {
+    return "LINE";
+  }
+
+  if (
+    platform === "facebook_th" ||
+    platform === "fb_th"
+  ) {
+    return "Facebook เพจไทย";
+  }
+
+  if (
+    platform === "facebook_en" ||
+    platform === "fb_en"
+  ) {
+    return "Facebook เพจต่างประเทศ";
+  }
+
+  if (platform === "facebook") {
+    return "Facebook";
+  }
+
+  return (
+    customer?.platform ||
+    "ไม่ทราบช่องทาง"
+  );
+}
+
+
+async function getCustomerStage({
+  customer,
+  conversation,
+}) {
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  const jobStatus =
+    String(
+      latestJob?.status || ""
+    )
+      .trim()
+      .toLowerCase();
+
+
+  // ========================================
+  // มีงานกำลังดำเนินการอยู่
+  // ========================================
+
+  const activeJobStatuses = [
+    "processing",
+    "removed",
+    "waiting_payment",
+    "removed_waiting_payment",
+  ];
+
+  if (
+    conversation?.state ===
+      GMR_STATES.IN_PROGRESS ||
+    conversation?.state ===
+      GMR_STATES.REMOVED_WAITING_PAYMENT ||
+    activeJobStatuses.includes(
+      jobStatus
+    )
+  ) {
+    return "ระหว่างดำเนินงาน";
+  }
+
+
+  // ========================================
+  // งานยังไม่เริ่ม
+  // ========================================
+
+  const preStartStatuses = [
+    "draft",
+    "waiting_price",
+    "waiting_confirm",
+    "waiting_phone",
+    "waiting_credit_approval",
+    "credit_rejected",
+  ];
+
+  if (
+    preStartStatuses.includes(
+      jobStatus
+    )
+  ) {
+    return "ก่อนเริ่มงาน";
+  }
+
+
+  // ========================================
+  // เคยชำระแล้ว + ไม่มีงานใหม่กำลังทำ
+  // ========================================
+
+  const hasPaymentHistory =
+    await hasPaymentByCustomerId(
+      customer.id
+    );
+
+  if (hasPaymentHistory) {
+    return "ลูกค้าเก่า / ยังไม่มีงานใหม่";
+  }
+
+
+  return "ก่อนเริ่มงาน";
+}
+
 async function triggerHumanAttention({
   customer,
   conversation,
@@ -259,11 +378,28 @@ const platformLabel =
     customer
   );
 
+const state =
+  conversation?.state ||
+  "UNKNOWN";
+
+const platformLabel =
+  getPlatformLabel(
+    customer
+  );
+
+const stageLabel =
+  await getCustomerStage({
+    customer,
+    conversation,
+  });
+
+
 const text = [
   "⚠️ ต้องตรวจแชทลูกค้า",
   "",
   `ลูกค้า: ${customerName}`,
   `Platform: ${platformLabel}`,
+  `Stage: ${stageLabel}`,
   `State: ${state}`,
     "",
     "ข้อความล่าสุด:",
