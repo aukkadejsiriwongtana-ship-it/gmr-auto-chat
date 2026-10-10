@@ -9,11 +9,11 @@
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.4",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "openai": "^6.8.1",
-   "sharp": "^0.34.4",
-"@fontsource/noto-sans-thai": "^5.2.8"
-  }
+  "@fontsource/noto-sans-thai": "^5.1.0",
+  "@supabase/supabase-js": "^2.57.4",
+  "dotenv": "^17.2.3",
+  "express": "^5.1.0",
+  "openai": "^6.8.1",
+  "sharp": "^0.34.4"
+}
 }
