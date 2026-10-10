@@ -6257,13 +6257,22 @@ if (!placeId) {
 // ต้องมีชื่อ Reviewer เพื่อใช้ค้น Review จริง
 // ========================================
 
-if (!screenshotReviewerName) {
+// ========================================
+// STEP 2
+// ต้องมีข้อมูลอย่างน้อย:
+// Reviewer Name หรือ Review Text
+// ========================================
+
+if (
+  !screenshotReviewerName &&
+  !screenshotReviewText
+) {
 
   const botReply =
     getCustomerText(
       customer,
-      "ตอนนี้ยังอ่านชื่อผู้รีวิวจากรูปไม่ชัดครับ รบกวนส่งรูปรีวิวที่เห็นชื่อผู้รีวิวชัดขึ้น หรือส่งลิงก์รีวิวมาได้เลยครับ",
-      "I couldn't clearly read the reviewer's name from the screenshot. Please send a clearer screenshot showing the reviewer name, or send the review link."
+      "ยังอ่านรายละเอียดรีวิวจากรูปนี้ไม่ได้ครับ รบกวนส่งรูปรีวิวอีกครั้ง หรือส่งลิงก์รีวิวมาได้เลยครับ",
+      "I couldn't read enough review details from this screenshot. Please send the screenshot again or send the direct review link."
     );
 
 
