@@ -99,27 +99,51 @@ const thaiFontBase64 =
     "base64"
   );
 
-
 await page.addStyleTag({
   content: `
     @font-face {
       font-family: "NotoSansThaiLocal";
       src: url("data:font/ttf;base64,${thaiFontBase64}")
         format("truetype");
-      font-weight: 100 900;
+      font-weight: 400;
       font-style: normal;
-    }
-
-    html,
-    body,
-    body * {
-      font-family:
-        "NotoSansThaiLocal",
-        Arial,
-        sans-serif !important;
     }
   `,
 });
+
+await page.evaluate(() => {
+  const thaiRegex =
+    /[\u0E00-\u0E7F]/;
+
+  const elements =
+    Array.from(
+      document.querySelectorAll(
+        "div, span, p, h1, h2, h3, h4, h5, h6"
+      )
+    );
+
+  for (const el of elements) {
+    const text =
+      (
+        el.innerText ||
+        el.textContent ||
+        ""
+      ).trim();
+
+    if (!text) {
+      continue;
+    }
+
+    if (thaiRegex.test(text)) {
+      el.style.fontFamily =
+        '"NotoSansThaiLocal", "DejaVu Sans", Arial, sans-serif';
+    }
+  }
+});
+
+console.log(
+  "THAI FONT APPLIED ONLY TO THAI TEXT"
+);
 
 
 console.log(
