@@ -1,3 +1,4 @@
+import puppeteer from "puppeteer";
 const GOOGLE_MAPS_API_KEY =
   process.env.GOOGLE_MAPS_API_KEY;
 
@@ -146,10 +147,11 @@ function extractPlaceNameFromGoogleMapsHtml(
     );
 
 
-  if (
-    titleMatch?.[1]
-  ) {
-    return titleMatch[1]
+if (
+  titleMatch?.[1]
+) {
+  const title =
+    titleMatch[1]
       .replace(
         /\s*[-–—]\s*Google Maps.*$/i,
         ""
@@ -159,7 +161,15 @@ function extractPlaceNameFromGoogleMapsHtml(
         "&"
       )
       .trim();
+
+  if (
+    title &&
+    title.toLowerCase() !==
+      "google maps"
+  ) {
+    return title;
   }
+}
 
 
   return null;
@@ -170,6 +180,167 @@ function extractPlaceNameFromGoogleMapsHtml(
 // RESOLVE GOOGLE MAP SHORT URL
 // maps.app.goo.gl → Google Maps URL เต็ม
 // =========================================================
+async function resolveGoogleMapsWithBrowser(
+  mapUrl
+) {
+  let browser;
+
+  try {
+    browser =
+      await puppeteer.launch({
+        headless: true,
+
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+        ],
+      });
+
+
+    const page =
+      await browser.newPage();
+
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+    );
+
+
+    await page.goto(
+      mapUrl,
+      {
+        waitUntil:
+          "domcontentloaded",
+
+        timeout:
+          30000,
+      }
+    );
+
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          2500
+        )
+    );
+
+
+    const result =
+      await page.evaluate(
+        () => {
+          const ogTitle =
+            document
+              .querySelector(
+                'meta[property="og:title"]'
+              )
+              ?.getAttribute(
+                "content"
+              ) ||
+            null;
+
+
+          return {
+            title:
+              document.title ||
+              null,
+
+            ogTitle,
+
+            url:
+              window.location.href,
+          };
+        }
+      );
+
+
+    const rawTitle =
+      result.ogTitle ||
+      result.title ||
+      "";
+
+
+    const cleanedPlaceName =
+  rawTitle
+    .replace(
+      /\s*[-–—]\s*Google Maps.*$/i,
+      ""
+    )
+    .replace(
+      /^Google Maps\s*[-–—]\s*/i,
+      ""
+    )
+    .trim();
+
+const placeName =
+  cleanedPlaceName &&
+  cleanedPlaceName.toLowerCase() !==
+    "google maps"
+    ? cleanedPlaceName
+    : null;
+
+    console.log(
+      "GOOGLE MAP BROWSER RESOLVED:",
+      {
+        originalUrl:
+          mapUrl,
+
+        resolvedUrl:
+          result.url,
+
+        title:
+          result.title,
+
+        ogTitle:
+          result.ogTitle,
+
+        placeName:
+          placeName ||
+          null,
+      }
+    );
+
+
+    return {
+      resolvedUrl:
+        result.url ||
+        mapUrl,
+
+      placeName:
+        placeName ||
+        null,
+    };
+
+  } catch (error) {
+
+    console.error(
+      "GOOGLE MAP BROWSER RESOLVE FAILED:",
+      {
+        mapUrl,
+
+        error:
+          error.message,
+      }
+    );
+
+
+    return {
+      resolvedUrl:
+        mapUrl,
+
+      placeName:
+        null,
+    };
+
+  } finally {
+
+    if (browser) {
+      await browser.close();
+    }
+  }
+}
 
 export async function resolveGoogleMapsUrl(
   mapUrl
@@ -317,6 +488,37 @@ export async function resolveGoogleMapsUrl(
       );
   }
 
+  // ========================================
+// CID link fallback
+// ถ้า fetch อ่านชื่อไม่ได้
+// ใช้ Browser จริงเปิด Google Maps
+// ========================================
+
+if (
+  !placeName &&
+  input.includes("cid=")
+) {
+  const browserResult =
+    await resolveGoogleMapsWithBrowser(
+      input
+    );
+
+
+  if (
+    browserResult.resolvedUrl
+  ) {
+    resolvedUrl =
+      browserResult.resolvedUrl;
+  }
+
+
+  if (
+    browserResult.placeName
+  ) {
+    placeName =
+      browserResult.placeName;
+  }
+}
 
   console.log(
     "GOOGLE MAP RESOLVE RESULT:",
