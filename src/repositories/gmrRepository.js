@@ -72,21 +72,63 @@ export async function getOrCreateCustomer({
   displayName = null,
   language = "th",
 }) {
-  const existing = await getCustomerByPlatformUserId(
-    platform,
-    platformUserId
-  );
+  const existing =
+    await getCustomerByPlatformUserId(
+      platform,
+      platformUserId
+    );
+
 
   if (existing) {
     return existing;
   }
 
-  return createCustomer({
-    platform,
-    platformUserId,
-    displayName,
-    language,
-  });
+
+  try {
+
+    return await createCustomer({
+      platform,
+      platformUserId,
+      displayName,
+      language,
+    });
+
+  } catch (error) {
+
+    // ========================================
+    // RACE CONDITION
+    // มี request อีกตัวสร้าง customer
+    // ในช่วงเวลาเดียวกัน
+    // ========================================
+
+    if (
+      error?.code === "23505"
+    ) {
+
+      console.log(
+        "CUSTOMER CREATE RACE DETECTED:",
+        {
+          platform,
+          platformUserId,
+        }
+      );
+
+
+      const customer =
+        await getCustomerByPlatformUserId(
+          platform,
+          platformUserId
+        );
+
+
+      if (customer) {
+        return customer;
+      }
+    }
+
+
+    throw error;
+  }
 }
 
 
@@ -187,15 +229,51 @@ export async function getOrCreateConversation(
   customerId
 ) {
   const existing =
-    await getConversationByCustomerId(customerId);
+    await getConversationByCustomerId(
+      customerId
+    );
+
 
   if (existing) {
     return existing;
   }
 
-  return createConversation(customerId);
-}
 
+  try {
+
+    return await createConversation(
+      customerId
+    );
+
+  } catch (error) {
+
+    if (
+      error?.code === "23505"
+    ) {
+
+      console.log(
+        "CONVERSATION CREATE RACE DETECTED:",
+        {
+          customerId,
+        }
+      );
+
+
+      const conversation =
+        await getConversationByCustomerId(
+          customerId
+        );
+
+
+      if (conversation) {
+        return conversation;
+      }
+    }
+
+
+    throw error;
+  }
+}
 
 export async function updateConversationState({
   customerId,
