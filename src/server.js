@@ -440,19 +440,79 @@ const text = [
         }
       );
 
-    if (!response.ok) {
-      const errorText =
-        await response.text();
+    const responseText =
+  await response.text();
 
-      throw new Error(
-        `LINE push failed ${response.status}: ${errorText}`
-      );
-    }
 
-    return {
-      sent: true,
-    };
+if (!response.ok) {
+  throw new Error(
+    `LINE push failed ${response.status}: ${responseText}`
+  );
+}
 
+
+let responseData = {};
+
+if (responseText) {
+  try {
+    responseData =
+      JSON.parse(responseText);
+  } catch {
+    responseData = {};
+  }
+}
+
+
+const messageId =
+  responseData
+    ?.sentMessages
+    ?.[0]
+    ?.id ||
+  null;
+
+
+// ========================================
+// ถ้าลูกค้ากำลังรอราคา
+// ให้ข้อความ Human Attention นี้
+// สามารถ Reply ราคาได้ทันที
+// ========================================
+
+if (
+  messageId &&
+  conversation?.state ===
+    GMR_STATES.WAITING_PRICE
+) {
+  const latestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  if (latestJob) {
+    await updateJob(
+      latestJob.id,
+      {
+        line_group_message_id:
+          messageId,
+      }
+    );
+
+    console.log(
+      "WAITING PRICE ATTENTION LINKED TO JOB:",
+      {
+        jobId:
+          latestJob.id,
+
+        messageId,
+      }
+    );
+  }
+}
+
+
+return {
+  sent: true,
+  messageId,
+};
   } catch (error) {
     console.error(
       "HUMAN ATTENTION LINE ERROR:",
