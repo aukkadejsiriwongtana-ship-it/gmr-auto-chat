@@ -271,6 +271,8 @@ export async function createReviewEvidenceImage({
       )
       .join("");
 
+  const thaiFont =
+  await getThaiFontBase64();
 
   const svg =
   `
