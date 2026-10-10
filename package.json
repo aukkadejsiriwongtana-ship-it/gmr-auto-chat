@@ -8,8 +8,9 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js"
   },
-  "dependencies": {
+ "dependencies": {
   "@fontsource/noto-sans-thai": "^5.1.0",
+  "@resvg/resvg-js": "^2.6.2",
   "@supabase/supabase-js": "^2.57.4",
   "dotenv": "^17.2.3",
   "express": "^5.1.0",
