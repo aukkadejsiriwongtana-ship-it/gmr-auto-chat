@@ -1571,11 +1571,6 @@ const hasActionableInput =
     GMR_STATES.WAITING_MAP
   ) {
 
-    const detectedMapUrl =
-  extractGoogleMapsUrl(
-    message
-  );
-
 const detectedMapUrl =
   extractGoogleMapsUrl(
     message
