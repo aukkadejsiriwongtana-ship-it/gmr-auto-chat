@@ -761,6 +761,29 @@ export async function getJobByLineGroupMessageId(
   return data;
 }
 
+export async function getPendingCreditApprovalJobs() {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "status",
+        "waiting_credit_approval"
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 export async function getJobById(
   jobId
 ) {
