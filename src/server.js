@@ -4688,6 +4688,24 @@ const needsCreditApproval =
 
 if (needsCreditApproval) {
 
+  // ========================================
+  // 1. เปลี่ยน Job เป็นรออนุมัติก่อน
+  // ต้องสำเร็จก่อน ถึงจะส่งข้อความเข้ากลุ่ม
+  // ========================================
+
+  await updateJob(
+    latestJob.id,
+    {
+      status:
+        "waiting_credit_approval",
+    }
+  );
+
+
+  // ========================================
+  // 2. ส่งคำขออนุมัติเข้ากลุ่ม
+  // ========================================
+
   const creditRequest =
     await sendCreditApprovalRequestToLineGroup({
       customer,
@@ -4700,13 +4718,29 @@ if (needsCreditApproval) {
     });
 
 
+  // ========================================
+  // 3. ผูก LINE messageId หลังส่งสำเร็จ
+  // ========================================
+
   await updateJob(
     latestJob.id,
     {
+      line_group_message_id:
+        creditRequest.messageId,
+    }
+  );
+
+
+  console.log(
+    "CREDIT APPROVAL CREATED:",
+    {
+      jobId:
+        latestJob.id,
+
       status:
         "waiting_credit_approval",
 
-      line_group_message_id:
+      messageId:
         creditRequest.messageId,
     }
   );
