@@ -693,15 +693,83 @@ if (
 
 
   // -------------------------------------------------------
-  // 5. NEW CUSTOMER
-  // -------------------------------------------------------
+// 5. NEW CUSTOMER
+// -------------------------------------------------------
 
-  if (conversation.state === GMR_STATES.NEW) {
+if (
+  conversation.state ===
+  GMR_STATES.NEW
+) {
 
-    const template = await getTemplate(
-      "welcome",
-      customer.language || "th"
+  const initialClassification =
+    classifyInput({
+      messageType,
+      text:
+        message || "",
+    });
+
+
+  const hasActionableInput =
+    [
+      INPUT_TYPES.MAP_URL,
+      INPUT_TYPES.REVIEW_URL,
+      INPUT_TYPES.BUSINESS_NAME,
+      INPUT_TYPES.IMAGE_REVIEW,
+    ].includes(
+      initialClassification.type
     );
+
+
+  // -----------------------------------------------------
+  // ลูกค้าส่งข้อมูลที่ใช้ต่อได้ทันที
+  // เช่น Map URL / Review URL / ชื่อธุรกิจ / รูปรีวิว
+  // → ไม่ต้องถามซ้ำ
+  // → เปลี่ยนเป็น WAITING_MAP แล้วให้ flow ด้านล่างทำต่อ
+  // -----------------------------------------------------
+
+  if (hasActionableInput) {
+
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.WAITING_MAP
+      );
+
+
+    await updateConversationState({
+      customerId:
+        customer.id,
+
+      state:
+        nextState,
+
+      handoff:
+        false,
+
+      handoffReason:
+        null,
+    });
+
+
+    // สำคัญ:
+    // อัปเดต object ใน memory
+    // เพื่อให้ request เดิมไหลเข้า WAITING_MAP ต่อได้ทันที
+    conversation.state =
+      nextState;
+
+  } else {
+
+    // -----------------------------------------------------
+    // ยังไม่ได้ส่งข้อมูลที่ใช้ดำเนินการ
+    // → ส่ง Welcome ตามปกติ
+    // -----------------------------------------------------
+
+    const template =
+      await getTemplate(
+        "welcome",
+        customer.language || "th"
+      );
+
 
     if (!template) {
       throw new Error(
@@ -709,42 +777,76 @@ if (
       );
     }
 
-    const botReply = template.content;
 
-    const nextState = transitionState(
-      conversation.state,
-      GMR_STATES.WAITING_MAP
-    );
+    const botReply =
+      template.content;
+
+
+    const nextState =
+      transitionState(
+        conversation.state,
+        GMR_STATES.WAITING_MAP
+      );
+
 
     await updateConversationState({
-      customerId: customer.id,
-      state: nextState,
-      handoff: false,
-      handoffReason: null,
+      customerId:
+        customer.id,
+
+      state:
+        nextState,
+
+      handoff:
+        false,
+
+      handoffReason:
+        null,
     });
 
+
     await saveMessage({
-      customerId: customer.id,
+      customerId:
+        customer.id,
+
       platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
     });
+
 
     await updateLastBotMessage(
       customer.id,
       botReply
     );
 
+
     return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: nextState,
-      inputType: null,
+      ok:
+        true,
+
+      customerId:
+        customer.id,
+
+      stateBefore:
+        GMR_STATES.NEW,
+
+      stateAfter:
+        nextState,
+
+      inputType:
+        initialClassification.type,
+
       botReply,
     };
   }
+}
 
 
   // -------------------------------------------------------
