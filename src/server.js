@@ -1150,8 +1150,9 @@ const hasActionableInput =
   }
 
 
-  const place =
-    places[0];
+ const place =
+  places[0];
+
 
 const messageHasThai =
   /[\u0E00-\u0E7F]/.test(
@@ -1186,6 +1187,9 @@ if (
   );
 }
 
+
+// -----------------------------------------
+// ลูกค้าเป็นคนส่ง Map link มาเอง
      
   // -----------------------------------------
   // ลูกค้าเป็นคนส่ง Map link มาเอง
@@ -1690,7 +1694,9 @@ await updateLastBotMessage(
 
 
   // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
-  const place = places[0];
+// 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
+const place = places[0];
+
 
 const businessNameHasThai =
   /[\u0E00-\u0E7F]/.test(
@@ -1727,6 +1733,9 @@ if (
     }
   );
 }
+
+
+// 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
       
   // 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
   const template =
