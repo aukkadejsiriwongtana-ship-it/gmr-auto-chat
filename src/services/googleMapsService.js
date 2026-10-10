@@ -104,6 +104,67 @@ function extractPlaceNameFromGoogleMapsUrl(
   }
 }
 
+function extractPlaceNameFromGoogleMapsHtml(
+  html
+) {
+  const text =
+    String(html || "");
+
+
+  // -----------------------------------------
+  // og:title
+  // -----------------------------------------
+
+  const ogTitleMatch =
+    text.match(
+      /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i
+    ) ||
+    text.match(
+      /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i
+    );
+
+
+  if (
+    ogTitleMatch?.[1]
+  ) {
+    return ogTitleMatch[1]
+      .replace(
+        /\s*[-–—]\s*Google Maps.*$/i,
+        ""
+      )
+      .trim();
+  }
+
+
+  // -----------------------------------------
+  // HTML title fallback
+  // -----------------------------------------
+
+  const titleMatch =
+    text.match(
+      /<title[^>]*>(.*?)<\/title>/is
+    );
+
+
+  if (
+    titleMatch?.[1]
+  ) {
+    return titleMatch[1]
+      .replace(
+        /\s*[-–—]\s*Google Maps.*$/i,
+        ""
+      )
+      .replace(
+        /&amp;/gi,
+        "&"
+      )
+      .trim();
+  }
+
+
+  return null;
+}
+
 
 // =========================================================
 // RESOLVE GOOGLE MAP SHORT URL
@@ -144,64 +205,71 @@ export async function resolveGoogleMapsUrl(
   let resolvedUrl =
     input;
 
+  let html =
+    "";
+
 
   try {
 
-    const url =
-      new URL(input);
+    // ========================================
+    // เปิด Google Maps URL จริง
+    //
+    // รองรับ:
+    // maps.app.goo.gl
+    // goo.gl
+    // maps.google.com/?cid=...
+    // google.com/maps/...
+    // ========================================
 
-    const hostname =
-      url.hostname
-        .toLowerCase();
-
-
-    // -----------------------------------------
-    // Short URL ต้องตาม redirect ก่อน
-    // -----------------------------------------
-
-    if (
-      hostname ===
-        "maps.app.goo.gl" ||
-      hostname ===
-        "goo.gl"
-    ) {
-
-      const response =
-        await fetch(
-          input,
-          {
-            method:
-              "GET",
-
-            redirect:
-              "follow",
-
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0",
-            },
-          }
-        );
-
-
-      if (
-        response.url
-      ) {
-        resolvedUrl =
-          response.url;
-      }
-
-
-      console.log(
-        "GOOGLE MAP SHORT URL RESOLVED:",
+    const response =
+      await fetch(
+        input,
         {
-          originalUrl:
-            input,
+          method:
+            "GET",
 
-          resolvedUrl,
+          redirect:
+            "follow",
+
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+
+            "Accept-Language":
+              "th-TH,th;q=0.9,en;q=0.8",
+          },
         }
       );
+
+
+    if (
+      response.url
+    ) {
+      resolvedUrl =
+        response.url;
     }
+
+
+    try {
+      html =
+        await response.text();
+    } catch {
+      html = "";
+    }
+
+
+    console.log(
+      "GOOGLE MAP URL RESOLVED:",
+      {
+        originalUrl:
+          input,
+
+        resolvedUrl,
+
+        hasHtml:
+          Boolean(html),
+      }
+    );
 
   } catch (error) {
 
@@ -217,14 +285,52 @@ export async function resolveGoogleMapsUrl(
     );
 
     // ไม่ throw
-    // เพื่อไม่ให้ flow ลูกค้าพัง
+    // ปล่อย fallback ด้านล่างทำงาน
   }
 
 
-  const placeName =
+  // ========================================
+  // วิธี 1:
+  // ดึงชื่อจาก URL หลัง redirect
+  // เช่น /maps/place/Seacon+Square/...
+  // ========================================
+
+  let placeName =
     extractPlaceNameFromGoogleMapsUrl(
       resolvedUrl
     );
+
+
+  // ========================================
+  // วิธี 2:
+  // CID URL อาจยังไม่มีชื่อใน URL
+  // → อ่านชื่อจาก HTML / og:title
+  // ========================================
+
+  if (
+    !placeName &&
+    html
+  ) {
+    placeName =
+      extractPlaceNameFromGoogleMapsHtml(
+        html
+      );
+  }
+
+
+  console.log(
+    "GOOGLE MAP RESOLVE RESULT:",
+    {
+      originalUrl:
+        input,
+
+      resolvedUrl,
+
+      placeName:
+        placeName ||
+        null,
+    }
+  );
 
 
   return {
@@ -233,10 +339,11 @@ export async function resolveGoogleMapsUrl(
 
     resolvedUrl,
 
-    placeName,
+    placeName:
+      placeName ||
+      null,
   };
 }
-
 
 // =========================================================
 // NORMALIZE TEXT QUERY
