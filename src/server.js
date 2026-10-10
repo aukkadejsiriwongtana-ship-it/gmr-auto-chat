@@ -1586,26 +1586,46 @@ if (faqResult.matched) {
   };
 }
 
-await triggerHumanAttention({
-  customer,
-  conversation,
-  message,
-  reason:
-    "UNHANDLED_MESSAGE_IN_WAITING_MAP",
-});
+if (!autoConfirmDirectMap) {
 
-return {
-  ok: true,
-  customerId: customer.id,
-  stateBefore: conversation.state,
-  stateAfter: conversation.state,
-  inputType: classification.type,
-  confidence: classification.confidence,
-  botReply: null,
-  softHandoff: true,
-  note:
-    "Human attention requested while waiting for map",
-};
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason:
+      "UNHANDLED_MESSAGE_IN_WAITING_MAP",
+  });
+
+
+  return {
+    ok:
+      true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    inputType:
+      classification.type,
+
+    confidence:
+      classification.confidence,
+
+    botReply:
+      null,
+
+    softHandoff:
+      true,
+
+    note:
+      "Human attention requested while waiting for map",
+  };
+}
   }
 
 // -------------------------------------------------------
