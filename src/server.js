@@ -3153,10 +3153,10 @@ await updateJob(
       "old_review",
 
     status:
-      "waiting_review_input",
+      "draft",
   }
 );
-
+   
   await sendMessageToCustomer({
     platform,
     platformUserId,
