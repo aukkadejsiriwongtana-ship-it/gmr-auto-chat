@@ -1620,8 +1620,8 @@ const classification =
    const botReply =
   getCustomerText(
     customer,
-    "ยังอ่านข้อมูลจากลิงก์ Google Map นี้ไม่ได้ครับ รบกวนส่งชื่อธุรกิจมาได้เลยครับ",
-    "I couldn't read the business information from this Google Maps link. Please send me the business name instead."
+    "ลิงก์นี้เข้าไม่ได้ครับ รบกวนแจ้งชื่อธุรกิจมาได้เลยครับ",
+    "We couldn't enter this Google Maps link. Please send me the business name instead."
   );
 
     await saveMessage({
