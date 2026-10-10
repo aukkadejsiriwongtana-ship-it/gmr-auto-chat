@@ -3106,7 +3106,7 @@ if (recentOneStarReviews.length > 0) {
         )
       );
 
-  if (
+if (
   recentOneStarReviews.length === 1
 ) {
   botReply =
@@ -4138,15 +4138,51 @@ return {
 const normalizedLower =
   normalized.toLowerCase();
 
+
+// ========================================
+// ตรวจว่าข้อความล่าสุดของ Bot
+// คือคำถามให้ลูกค้าเลือก Review จริงหรือไม่
+// ========================================
+
+const freshCustomer =
+  await getCustomerById(
+    customer.id
+  );
+
+
+const lastBotMessage =
+  String(
+    freshCustomer?.last_bot_message ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+
+
+const reviewSelectionPromptWasSent =
+  lastBotMessage.includes(
+    "เอาเป็นรีวิวนี้เลยไหมครับ"
+  ) ||
+  lastBotMessage.includes(
+    "would you like to proceed with this review?"
+  );
+
+
+// ========================================
+// คำตอบที่ยอมรับเมื่อ Bot
+// ถามเลือก Review ไปแล้วเท่านั้น
+// ========================================
+
 const singleReviewYesWords = [
   "ใช่",
   "ใช่ครับ",
-  "ได้",
-   "ได้ครับ",
   "ใช่ค่ะ",
+  "ได้",
+  "ได้ครับ",
+  "ได้ค่ะ",
+  "เอา",
   "เอาครับ",
   "เอาค่ะ",
-  "เอา",
   "รีวิวนี้",
   "อันนี้",
   "yes",
@@ -4155,8 +4191,10 @@ const singleReviewYesWords = [
   "okay",
 ];
 
+
 if (
   candidates.length === 1 &&
+  reviewSelectionPromptWasSent &&
   singleReviewYesWords.includes(
     normalizedLower
   )
