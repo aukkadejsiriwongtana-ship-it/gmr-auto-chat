@@ -6077,6 +6077,58 @@ let mapJob =
   );
 
 
+// ========================================
+// RACE CONDITION GUARD
+// ลูกค้าอาจส่งรูปต่อทันที
+// ขณะที่ Map ก่อนหน้ายัง resolve ไม่เสร็จ
+// ========================================
+
+if (!mapJob) {
+
+  for (
+    let retry = 0;
+    retry < 15;
+    retry += 1
+  ) {
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          1000
+        )
+    );
+
+
+    mapJob =
+      await getLatestJobWithMapByCustomerId(
+        customer.id
+      );
+
+
+    if (mapJob) {
+      console.log(
+        "IMAGE REVIEW FOUND MAP AFTER RETRY:",
+        {
+          customerId:
+            customer.id,
+
+          retry:
+            retry + 1,
+
+          jobId:
+            mapJob.id,
+
+          placeId:
+            mapJob.place_id,
+        }
+      );
+
+      break;
+    }
+  }
+}
+
 let placeId =
   mapJob?.place_id ||
   null;
