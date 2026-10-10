@@ -207,6 +207,56 @@ function extractGoogleMapsUrl(
     : null;
 }
 
+function isServiceInquiryMessage(
+  message
+) {
+  const text =
+    String(message || "")
+      .trim()
+      .toLowerCase();
+
+
+  const patterns = [
+    "สนใจ",
+    "สนใจครับ",
+    "สนใจค่ะ",
+    "สอบถาม",
+    "สอบถามครับ",
+    "สอบถามค่ะ",
+    "สนใจบริการ",
+    "ต้องการใช้บริการ",
+    "อยากลบรีวิว",
+    "ต้องการลบรีวิว",
+    "ลบรีวิว",
+    "google map review",
+    "google maps review",
+    "remove review",
+    "remove a review",
+    "remove google review",
+    "remove a google review",
+    "delete review",
+    "delete a review",
+    "review removal",
+    "i want to remove",
+    "i need to remove",
+    "interested in",
+  ];
+
+
+  return patterns.some(
+    (pattern) =>
+      text === pattern ||
+      text.startsWith(
+        `${pattern} `
+      ) ||
+      text.startsWith(
+        `${pattern}ครับ`
+      ) ||
+      text.startsWith(
+        `${pattern}ค่ะ`
+      )
+  );
+}
 
 
 import {
@@ -2423,7 +2473,80 @@ if (
   };
 }
 
+// -----------------------------------------------------
+// SERVICE INQUIRY
+// เช่น สนใจ / สอบถาม / อยากลบรีวิว
+// -----------------------------------------------------
 
+if (
+  isServiceInquiryMessage(
+    message
+  )
+) {
+
+  const template =
+    await getTemplate(
+      "welcome",
+      customer.language || "th"
+    );
+
+
+  if (!template) {
+    throw new Error(
+      "Welcome template not found"
+    );
+  }
+
+
+  const botReply =
+    template.content;
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    serviceInquiry:
+      true,
+
+    botReply,
+
+    softHandoff:
+      false,
+  };
+}
+    
     // -----------------------------------------------------
     // OTHER TEXT
     // -----------------------------------------------------
