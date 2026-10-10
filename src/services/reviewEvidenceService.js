@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { Resvg } from "@resvg/resvg-js";
 import crypto from "crypto";
+import { fileURLToPath } from "node:url";
 
 
 const SUPABASE_URL =
@@ -13,11 +14,12 @@ const REVIEW_BUCKET =
   "gmr-review-evidence";
 
 const THAI_FONT_PATH =
-  new URL(
-    "../../node_modules/@fontsource/noto-sans-thai/files/noto-sans-thai-thai-400-normal.woff2",
-    import.meta.url
+  fileURLToPath(
+    new URL(
+      "../assets/fonts/NotoSansThai-Regular.ttf",
+      import.meta.url
+    )
   );
-
 if (
   !SUPABASE_URL ||
   !SUPABASE_SERVICE_ROLE_KEY
