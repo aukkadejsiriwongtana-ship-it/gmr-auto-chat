@@ -1558,12 +1558,6 @@ export async function markLegacyCustomerMatched({
 match_requested_at:
   null,
 
-matched_at:
-  new Date().toISOString(),
-
-match_requested_at:
-  null,
-
 pending_message_text:
   null,
 
