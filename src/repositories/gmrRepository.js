@@ -632,9 +632,16 @@ export async function hasPaymentByCustomerId(
 export async function getPaidPricingHistoryByCustomerId(
   customerId
 ) {
-  // -------------------------------------------------------
-  // 1. ดึง Jobs ของลูกค้าคนนี้
-  // -------------------------------------------------------
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in getPaidPricingHistoryByCustomerId"
+    );
+  }
+
+
+  // =========================================================
+  // 1. JOBS
+  // =========================================================
 
   const {
     data: jobs,
@@ -642,7 +649,7 @@ export async function getPaidPricingHistoryByCustomerId(
   } = await supabase
     .from("gmr_jobs")
     .select(
-      "id, price, currency, created_at, paid_at"
+      "id, price, currency, created_at"
     )
     .eq(
       "customer_id",
@@ -660,9 +667,11 @@ export async function getPaidPricingHistoryByCustomerId(
       }
     );
 
+
   if (jobsError) {
     throw jobsError;
   }
+
 
   if (
     !jobs ||
@@ -678,9 +687,9 @@ export async function getPaidPricingHistoryByCustomerId(
     );
 
 
-  // -------------------------------------------------------
-  // 2. หาเฉพาะ Job ที่มี Payment Verified จริง
-  // -------------------------------------------------------
+  // =========================================================
+  // 2. VERIFIED PAYMENTS ONLY
+  // =========================================================
 
   const {
     data: payments,
@@ -688,7 +697,7 @@ export async function getPaidPricingHistoryByCustomerId(
   } = await supabase
     .from("gmr_payments")
     .select(
-      "job_id, verified_at"
+      "job_id, verified_at, created_at"
     )
     .in(
       "job_id",
@@ -699,9 +708,11 @@ export async function getPaidPricingHistoryByCustomerId(
       true
     );
 
+
   if (paymentsError) {
     throw paymentsError;
   }
+
 
   if (
     !payments ||
@@ -711,8 +722,11 @@ export async function getPaidPricingHistoryByCustomerId(
   }
 
 
+  // 1 Job อาจมีหลาย payment
+  // ใช้ payment verified ล่าสุด
   const verifiedPaymentsByJobId =
     new Map();
+
 
   for (
     const payment of payments
@@ -721,10 +735,12 @@ export async function getPaidPricingHistoryByCustomerId(
       continue;
     }
 
+
     const existing =
       verifiedPaymentsByJobId.get(
         payment.job_id
       );
+
 
     if (!existing) {
       verifiedPaymentsByJobId.set(
@@ -738,12 +754,17 @@ export async function getPaidPricingHistoryByCustomerId(
 
     const existingTime =
       new Date(
-        existing.verified_at || 0
+        existing.verified_at ||
+        existing.created_at ||
+        0
       ).getTime();
+
 
     const currentTime =
       new Date(
-        payment.verified_at || 0
+        payment.verified_at ||
+        payment.created_at ||
+        0
       ).getTime();
 
 
@@ -772,9 +793,14 @@ export async function getPaidPricingHistoryByCustomerId(
   }
 
 
-  // -------------------------------------------------------
-  // 3. ดึงข้อมูล Review ของ Jobs ที่จ่ายเงินจริงแล้ว
-  // -------------------------------------------------------
+  // =========================================================
+  // 3. REVIEWS
+  //
+  // หลักการ:
+  // - ถ้ามี selected_by_customer = true → ใช้ตัวนั้น
+  // - ถ้าไม่มี selected แต่มี Review เดียว → ใช้ตัวเดียวได้
+  // - ถ้ามีหลาย Review และไม่มี selected → ห้ามเดา category
+  // =========================================================
 
   const {
     data: reviews,
@@ -782,7 +808,7 @@ export async function getPaidPricingHistoryByCustomerId(
   } = await supabase
     .from("gmr_reviews")
     .select(
-      "job_id, is_recent, review_date, created_at"
+      "job_id, is_recent, review_date, created_at, selected_by_customer"
     )
     .in(
       "job_id",
@@ -795,52 +821,64 @@ export async function getPaidPricingHistoryByCustomerId(
       }
     );
 
+
   if (reviewsError) {
     throw reviewsError;
   }
 
 
-  // -------------------------------------------------------
-  // 4. 1 Job ใช้ Review ล่าสุดของ Job นั้น
-  // -------------------------------------------------------
-
-  const reviewByJobId =
+  const reviewsByJobId =
     new Map();
+
 
   for (
     const review of
       reviews || []
   ) {
-    if (
-      !review?.job_id ||
-      reviewByJobId.has(
-        review.job_id
-      )
-    ) {
+    if (!review?.job_id) {
       continue;
     }
 
-    reviewByJobId.set(
-      review.job_id,
-      review
-    );
+
+    if (
+      !reviewsByJobId.has(
+        review.job_id
+      )
+    ) {
+      reviewsByJobId.set(
+        review.job_id,
+        []
+      );
+    }
+
+
+    reviewsByJobId
+      .get(
+        review.job_id
+      )
+      .push(
+        review
+      );
   }
 
 
-  // -------------------------------------------------------
-  // 5. รวม Job + Payment + Review
-  // -------------------------------------------------------
+  // =========================================================
+  // 4. BUILD HISTORY
+  // =========================================================
 
   const history = [];
+
 
   for (
     const job of jobs
   ) {
-    if (
-      !verifiedPaymentsByJobId.has(
+    const payment =
+      verifiedPaymentsByJobId.get(
         job.id
-      )
-    ) {
+      );
+
+
+    if (!payment) {
       continue;
     }
 
@@ -859,15 +897,77 @@ export async function getPaidPricingHistoryByCustomerId(
     }
 
 
-    const payment =
-      verifiedPaymentsByJobId.get(
+    const jobReviews =
+      reviewsByJobId.get(
         job.id
+      ) || [];
+
+
+    let review =
+      null;
+
+
+    // ========================================
+    // 4.1 ถ้ามี selected review
+    // ใช้ตัวล่าสุดที่ selected
+    // ========================================
+
+    const selectedReviews =
+      jobReviews.filter(
+        (item) =>
+          item
+            ?.selected_by_customer ===
+          true
       );
 
-    const review =
-      reviewByJobId.get(
-        job.id
-      ) || null;
+
+    if (
+      selectedReviews.length > 0
+    ) {
+      review =
+        selectedReviews[0];
+    }
+
+
+    // ========================================
+    // 4.2 ไม่มี selected
+    // แต่มี review แค่ 1 ตัว
+    // ใช้ตัวนั้นได้
+    // ========================================
+
+    else if (
+      jobReviews.length === 1
+    ) {
+      review =
+        jobReviews[0];
+    }
+
+
+    // ========================================
+    // 4.3 มีหลายตัวแต่ไม่รู้ว่าใช้ตัวไหน
+    // ห้ามเดา NEW / OLD
+    // ========================================
+
+    else {
+      review =
+        null;
+    }
+
+
+    const isRecent =
+      typeof review?.is_recent ===
+      "boolean"
+        ? review.is_recent
+        : null;
+
+
+    // ถ้าไม่รู้ category
+    // อย่าเอา record นี้ไปใช้ Auto Price
+    if (
+      isRecent === null
+    ) {
+      continue;
+    }
 
 
     history.push({
@@ -881,19 +981,15 @@ export async function getPaidPricingHistoryByCustomerId(
         null,
 
       paidAt:
-        payment?.verified_at ||
-        job.paid_at ||
+        payment.verified_at ||
+        payment.created_at ||
         null,
 
       jobCreatedAt:
         job.created_at ||
         null,
 
-      isRecent:
-        typeof review?.is_recent ===
-        "boolean"
-          ? review.is_recent
-          : null,
+      isRecent,
 
       reviewDate:
         review?.review_date ||
@@ -902,12 +998,9 @@ export async function getPaidPricingHistoryByCustomerId(
   }
 
 
-  // -------------------------------------------------------
-  // 6. เรียงใหม่สุดก่อน
-  //
-  // Auto pricing จะเลือก "ราคาเดิมล่าสุด"
-  // ของแต่ละ Rate
-  // -------------------------------------------------------
+  // =========================================================
+  // 5. NEWEST PAID HISTORY FIRST
+  // =========================================================
 
   history.sort(
     (a, b) => {
@@ -918,12 +1011,14 @@ export async function getPaidPricingHistoryByCustomerId(
           0
         ).getTime();
 
+
       const bTime =
         new Date(
           b.paidAt ||
           b.jobCreatedAt ||
           0
         ).getTime();
+
 
       return bTime - aTime;
     }
