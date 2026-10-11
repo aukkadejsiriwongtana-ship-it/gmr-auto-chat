@@ -9312,6 +9312,17 @@ if (
         new Date().toISOString();
 
 
+      const pendingMessageText =
+  legacyCustomer
+    .pending_message_text ||
+  null;
+
+
+const pendingMessageType =
+  legacyCustomer
+    .pending_message_type ||
+  "text";
+
       const importedJobs = [];
 
 
@@ -9585,18 +9596,105 @@ if (
           null,
       });
 
+      // ========================================
+// REPLAY ข้อความแรกของลูกค้า
+//
+// หลัง Match สำเร็จแล้ว customer คนนี้
+// มี verified payment history จริง
+// ดังนั้น processTestMessage รอบนี้
+// จะมองเป็น EXISTING_CUSTOMER
+// ========================================
 
-      await replyLineTextMessage(
-        event.replyToken,
+let replayResult =
+  null;
 
-        `✅ ยืนยันลูกค้าเก่าเรียบร้อยแล้ว\nLegacy: ${
-          legacyCustomer.display_name ||
-          "-"
-        }\nLINE: ${
-          matchedCustomer.display_name ||
-          "-"
-        }\nนำเข้าประวัติราคา ${importedJobs.length} ประเภทเรียบร้อย`
-      );
+
+if (
+  pendingMessageType === "text" &&
+  pendingMessageText
+) {
+
+  try {
+
+    replayResult =
+      await processTestMessage({
+        platform:
+          matchedCustomer.platform,
+
+        platformUserId:
+          matchedCustomer
+            .platform_user_id,
+
+        message:
+          pendingMessageText,
+
+        messageType:
+          "text",
+
+        displayName:
+          matchedCustomer
+            .display_name ||
+          legacyCustomer
+            .display_name ||
+          "Customer",
+      });
+
+
+    console.log(
+      "LEGACY PENDING MESSAGE REPLAYED:",
+      {
+        legacyCustomerId:
+          legacyCustomer.id,
+
+        customerId:
+          matchedCustomer.id,
+
+        replayResult,
+      }
+    );
+
+
+  } catch (replayError) {
+
+    console.error(
+      "LEGACY PENDING MESSAGE REPLAY FAILED:",
+      {
+        legacyCustomerId:
+          legacyCustomer.id,
+
+        customerId:
+          matchedCustomer.id,
+
+        pendingMessageText,
+
+        error:
+          replayError.message,
+      }
+    );
+  }
+}
+
+     await replyLineTextMessage(
+  event.replyToken,
+
+  `✅ ยืนยันลูกค้าเก่าเรียบร้อยแล้ว
+Legacy: ${
+    legacyCustomer.display_name ||
+    "-"
+  }
+LINE: ${
+    matchedCustomer.display_name ||
+    "-"
+  }
+นำเข้าประวัติราคา ${importedJobs.length} ประเภทเรียบร้อย
+${
+  pendingMessageText
+    ? replayResult
+      ? "✅ ดำเนินการข้อความแรกของลูกค้าต่ออัตโนมัติแล้ว"
+      : "⚠️ Match สำเร็จ แต่ข้อความแรกต้องตรวจสอบต่อ"
+    : "ไม่มีข้อความเดิมที่ต้องดำเนินการต่อ"
+}`
+);
 
 
       console.log(
