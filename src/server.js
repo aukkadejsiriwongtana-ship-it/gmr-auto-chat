@@ -9393,9 +9393,12 @@ app.get(
 // ตรวจเฉพาะงาน status = processing
 //
 // Logic:
-// เจอ Review      -> missing_count = 0
-// ไม่เจอครั้งที่ 1 -> missing_count = 1
-// ไม่เจอครั้งที่ 2 -> waiting_payment + แจ้งทีม
+// เจอ Review   -> คง processing
+// หาไม่เจอ     -> waiting_payment + แจ้งทีมทันที
+//
+// หมายเหตุ:
+// Network / Google / Provider error
+// จะไม่ถือว่า Review ถูกลบ
 // =========================================================
 
 app.post(
@@ -9501,20 +9504,15 @@ app.post(
 
               reason:
                 lookupReason,
-
-              currentMissingCount:
-                Number(
-                  job.review_missing_count ||
-                  0
-                ),
             }
           );
 
         } catch (error) {
 
-          // สำคัญ:
-          // Network / Google / Provider error
-          // ห้ามนับว่า Review ถูกลบ
+          // ========================================
+          // Provider / Network Error
+          // ห้ามตีความว่า Review ถูกลบ
+          // ========================================
 
           console.error(
             "REVIEW MONITOR LOOKUP ERROR:",
@@ -9586,76 +9584,34 @@ app.post(
 
         // ========================================
         // หา Review ไม่เจอ
-        // ========================================
-
-        const missingCount =
-          Number(
-            job.review_missing_count ||
-            0
-          ) + 1;
-
-
-        // ========================================
-        // ไม่เจอรอบแรก
-        // ยังไม่ถือว่างานสำเร็จ
-        // ========================================
-
-        if (
-          missingCount < 2
-        ) {
-
-          await updateJob(
-            job.id,
-            {
-              review_missing_count:
-                missingCount,
-
-              last_review_check_at:
-                checkedAt,
-            }
-          );
-
-
-          console.log(
-            "REVIEW MISSING FIRST CHECK:",
-            {
-              jobId:
-                job.id,
-
-              missingCount,
-
-              reason:
-                lookupReason,
-            }
-          );
-
-
-          results.push({
-            jobId:
-              job.id,
-
-            result:
-              "MISSING_ONCE",
-
-            missingCount,
-
-            reason:
-              lookupReason,
-          });
-
-
-          continue;
-        }
-
-
-        // ========================================
-        // ไม่เจอ 2 รอบติดกัน
-        // ถือว่า Review น่าจะถูกนำออกแล้ว
+        //
+        // ไม่รอ Second Confirmation จากระบบแล้ว
+        // ให้ทีมเป็นผู้ตรวจยืนยันจาก LINE Group
         // ========================================
 
         const removedAt =
           checkedAt;
 
+
+        console.log(
+          "REVIEW NOT FOUND:",
+          {
+            jobId:
+              job.id,
+
+            reviewUrl,
+
+            reason:
+              lookupReason,
+
+            checkedAt,
+          }
+        );
+
+
+        // ========================================
+        // เปลี่ยน Job เป็น waiting_payment
+        // ========================================
 
         await updateJob(
           job.id,
@@ -9667,7 +9623,7 @@ app.post(
               removedAt,
 
             review_missing_count:
-              missingCount,
+              1,
 
             last_review_check_at:
               checkedAt,
@@ -9683,6 +9639,10 @@ app.post(
             job.customer_id
           );
 
+
+        // ========================================
+        // เปลี่ยน Conversation State
+        // ========================================
 
         if (customer) {
 
@@ -9704,7 +9664,7 @@ app.post(
 
 
         // ========================================
-        // อัปเดต Google Sheet
+        // Update Google Sheet
         // ========================================
 
         try {
@@ -9738,8 +9698,9 @@ app.post(
 
 
         // ========================================
-        // แจ้งทีมก่อน
-        // ตอนนี้ยังไม่ทักลูกค้าเอง
+        // แจ้ง LINE กลุ่มให้ทีมตรวจเอง
+        //
+        // ยังไม่ส่งข้อความหาลูกค้าอัตโนมัติ
         // ========================================
 
         if (customer) {
@@ -9790,7 +9751,8 @@ app.post(
             customerId:
               job.customer_id,
 
-            missingCount,
+            reason:
+              lookupReason,
 
             removedAt,
           }
@@ -9804,7 +9766,11 @@ app.post(
           result:
             "REMOVED_DETECTED",
 
-          missingCount,
+          missingCount:
+            1,
+
+          reason:
+            lookupReason,
 
           removedAt,
         });
