@@ -1041,3 +1041,31 @@ export async function getPendingPriceJobs() {
 
   return data || [];
 }
+
+export async function getJobsForReviewMonitoring() {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "status",
+        "processing"
+      )
+      .not(
+        "review_url",
+        "is",
+        null
+      )
+      .order(
+        "created_at",
+        {
+          ascending: true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
