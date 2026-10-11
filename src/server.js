@@ -67,7 +67,8 @@ getPaymentByLineGroupMessageId,
   getJobById,
 updatePayment,
   getJobsForReviewMonitoring,
-  getPendingPriceJobs,
+getPendingPriceJobs,
+getWaitingPaymentJobsByCustomerId,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -192,6 +193,226 @@ function getCustomerText(
       ? englishText
       : thaiText
   );
+}
+
+// =========================================================
+// PAYMENT / PRICE HELPERS
+// =========================================================
+
+function getCurrencyFromUnitPrice({
+  price,
+  currency = null,
+}) {
+  const unitPrice =
+    Number(price || 0);
+
+  const savedCurrency =
+    String(
+      currency || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  if (
+    [
+      "THB",
+      "USD",
+    ].includes(
+      savedCurrency
+    )
+  ) {
+    return savedCurrency;
+  }
+
+  return (
+    unitPrice >= 2500
+      ? "THB"
+      : "USD"
+  );
+}
+
+
+function formatMoney(
+  amount,
+  currency
+) {
+  const number =
+    Number(amount || 0);
+
+  return number.toLocaleString(
+    currency === "USD"
+      ? "en-US"
+      : "th-TH",
+    {
+      maximumFractionDigits:
+        2,
+    }
+  );
+}
+
+
+function buildPaymentBreakdown({
+  jobs,
+  currency,
+  language = "th",
+}) {
+
+  const sameCurrencyJobs =
+    (jobs || [])
+      .filter(
+        (job) =>
+          getCurrencyFromUnitPrice({
+            price:
+              job.price,
+
+            currency:
+              job.currency,
+          }) === currency
+      );
+
+
+  // ==========================================
+  // รวมงานราคาเดียวกัน
+  //
+  // เช่น
+  // 5,500 x 2
+  // 9,900 x 1
+  // ==========================================
+
+  const grouped =
+    new Map();
+
+
+  for (
+    const job of
+      sameCurrencyJobs
+  ) {
+
+    const price =
+      Number(
+        job.price || 0
+      );
+
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      continue;
+    }
+
+
+    const key =
+      String(price);
+
+
+    if (
+      !grouped.has(key)
+    ) {
+
+      grouped.set(
+        key,
+        {
+          price,
+          count:
+            0,
+        }
+      );
+    }
+
+
+    grouped.get(
+      key
+    ).count += 1;
+  }
+
+
+  const groups =
+    Array.from(
+      grouped.values()
+    );
+
+
+  const total =
+    groups.reduce(
+      (
+        sum,
+        item
+      ) =>
+        sum +
+        (
+          item.price *
+          item.count
+        ),
+      0
+    );
+
+
+  const totalReviews =
+    groups.reduce(
+      (
+        sum,
+        item
+      ) =>
+        sum +
+        item.count,
+      0
+    );
+
+
+  const lines =
+    groups.map(
+      (item) => {
+
+        const priceText =
+          formatMoney(
+            item.price,
+            currency
+          );
+
+
+        const lineTotal =
+          formatMoney(
+            item.price *
+              item.count,
+            currency
+          );
+
+
+        if (
+          currency ===
+          "THB"
+        ) {
+
+          return (
+            `• ${priceText} บาท/รีวิว` +
+            ` × ${item.count}` +
+            ` = ${lineTotal} บาท`
+          );
+        }
+
+
+        return (
+          `• $${priceText} USD/review` +
+          ` × ${item.count}` +
+          ` = $${lineTotal} USD`
+        );
+      }
+    );
+
+
+  return {
+    jobs:
+      sameCurrencyJobs,
+
+    groups,
+
+    total,
+
+    totalReviews,
+
+    lines,
+  };
 }
 
 function extractGoogleMapsUrl(
@@ -5255,141 +5476,584 @@ app.get("/test-lowest-reviews", async (req, res) => {
 // SALES QUOTE TEST
 // =========================================================
 
-app.get("/test-sales-quote", async (req, res) => {
-  try {
+app.get(
+  "/test-sales-quote",
+  async (req, res) => {
 
-    const platform =
-      req.query.platform || "line";
+    try {
 
-    const platformUserId =
-      req.query.platformUserId;
+      const platform =
+        req.query.platform ||
+        "line";
 
-    const amount =
-      Number(req.query.amount);
 
-    if (!platformUserId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing platformUserId",
+      const platformUserId =
+        req.query.platformUserId;
+
+
+      const amount =
+        Number(
+          req.query.amount
+        );
+
+
+      if (!platformUserId) {
+
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Missing platformUserId",
+          });
+      }
+
+
+      if (
+        !Number.isFinite(
+          amount
+        ) ||
+        amount <= 0
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Invalid amount",
+          });
+      }
+
+
+      const customer =
+        await getCustomerByPlatformUserId(
+          platform,
+          platformUserId
+        );
+
+
+      if (!customer) {
+
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Customer not found",
+          });
+      }
+
+
+      const conversation =
+        await getConversationByCustomerId(
+          customer.id
+        );
+
+
+      if (!conversation) {
+
+        throw new Error(
+          "Conversation not found"
+        );
+      }
+
+
+      if (
+        conversation.state !==
+        GMR_STATES
+          .WAITING_PRICE
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            ok: false,
+
+            error:
+              `Customer is not waiting for price. Current state: ${conversation.state}`,
+          });
+      }
+
+
+      const latestJob =
+        await getLatestJobByCustomerId(
+          customer.id
+        );
+
+
+      if (!latestJob) {
+
+        throw new Error(
+          "No active job found"
+        );
+      }
+
+
+      // ========================================
+      // amount = ราคาต่อ 1 รีวิว
+      // ========================================
+
+      const unitPrice =
+        Number(amount);
+
+
+      const currency =
+        unitPrice >= 2500
+          ? "THB"
+          : "USD";
+
+
+      const formattedAmount =
+        formatMoney(
+          unitPrice,
+          currency
+        );
+
+
+      const salesMessage =
+        currency === "THB"
+          ? getCustomerText(
+              customer,
+
+              `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
+
+              `For this review, the price is THB ${formattedAmount} per review.`
+            )
+          : getCustomerText(
+              customer,
+
+              `สำหรับรีวิวดังกล่าว ราคา $${formattedAmount} USD/รีวิว`,
+
+              `For this review, the price is $${formattedAmount} USD per review.`
+            );
+
+
+      await updateJob(
+        latestJob.id,
+        {
+          price:
+            unitPrice,
+
+          currency,
+
+          status:
+            "waiting_confirm",
+        }
+      );
+
+
+      const quote =
+        await createQuote({
+          jobId:
+            latestJob.id,
+
+          amount:
+            unitPrice,
+
+          currency,
+
+          quotedBy:
+            "sales",
+
+          quoteMessage:
+            salesMessage,
+
+          script3Sent:
+            false,
+        });
+
+
+      const template =
+        await getTemplate(
+          "script_3_after_quote",
+          customer.language ||
+            "th"
+        );
+
+
+      if (!template) {
+
+        throw new Error(
+          "script_3_after_quote template not found"
+        );
+      }
+
+
+      const botReply =
+        `${salesMessage}\n\n${template.content}`;
+
+
+      const nextState =
+        transitionState(
+          conversation.state,
+          GMR_STATES
+            .WAITING_CONFIRM
+        );
+
+
+      await updateConversationState({
+        customerId:
+          customer.id,
+
+        state:
+          nextState,
+
+        handoff:
+          false,
+
+        handoffReason:
+          null,
       });
-    }
 
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid amount",
+
+      await updateQuote(
+        quote.id,
+        {
+          script3_sent:
+            true,
+        }
+      );
+
+
+      await sendMessageToCustomer({
+        platform:
+          customer.platform,
+
+        platformUserId:
+          customer.platform_user_id,
+
+        text:
+          botReply,
       });
-    }
 
 
-    // หา customer
-    const customer =
-      await getCustomerByPlatformUserId(
-        platform,
-        platformUserId
-      );
+      await saveMessage({
+        customerId:
+          customer.id,
 
-    if (!customer) {
-      return res.status(404).json({
-        ok: false,
-        error: "Customer not found",
+        platform:
+          customer.platform,
+
+        direction:
+          "outbound",
+
+        messageType:
+          "text",
+
+        messageText:
+          botReply,
       });
-    }
 
 
-    // หา conversation
-    const conversation =
-      await getConversationByCustomerId(
-        customer.id
+      await updateLastBotMessage(
+        customer.id,
+        botReply
       );
 
-    if (!conversation) {
-      throw new Error(
-        "Conversation not found"
+
+      return res
+        .status(200)
+        .json({
+          ok: true,
+
+          customerId:
+            customer.id,
+
+          jobId:
+            latestJob.id,
+
+          quoteId:
+            quote.id,
+
+          unitPrice,
+
+          currency,
+
+          stateBefore:
+            conversation.state,
+
+          stateAfter:
+            nextState,
+
+          botReply,
+        });
+
+
+    } catch (error) {
+
+      console.error(
+        "TEST SALES QUOTE ERROR:",
+        error
       );
+
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+
+          error:
+            error.message,
+        });
     }
+  }
+);
+
+// =========================================================
+// LINE GROUP SALES PRICE
+// Sales กด Reply ข้อความงานในกลุ่ม แล้วพิมพ์ราคา
+//
+// amount = ราคาต่อ 1 รีวิว
+//
+// >= 2,500 / review → THB
+// <  2,500 / review → USD
+// =========================================================
+
+async function processLineGroupPrice({
+  quotedMessageId,
+  text,
+}) {
+
+  if (!quotedMessageId) {
+    return {
+      ok: false,
+      handled: false,
+      reason: "NOT_A_REPLY",
+    };
+  }
 
 
-    if (
-      conversation.state !==
-      GMR_STATES.WAITING_PRICE
-    ) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          `Customer is not waiting for price. Current state: ${conversation.state}`,
-      });
-    }
-
-
-    // หา job ล่าสุด
-    const latestJob =
-      await getLatestJobByCustomerId(
-        customer.id
-      );
-
-    if (!latestJob) {
-      throw new Error(
-        "No active job found"
-      );
-    }
-
-
-     // =====================================================
-    // PRICE / CURRENCY
-    //
-    // IMPORTANT:
-    // amount = ราคาต่อ 1 รีวิว
-    //
-    // >= 2,500 / review → THB
-    // <  2,500 / review → USD
-    //
-    // ห้ามใช้ยอดรวมหลายรีวิวในการตัดสิน currency
-    // =====================================================
-
-    const unitPrice =
-      Number(amount);
-
-
-    if (
-      !Number.isFinite(unitPrice) ||
-      unitPrice <= 0
-    ) {
-      throw new Error(
-        "Invalid unit price"
-      );
-    }
-
-
-    const currency =
-      unitPrice >= 2500
-        ? "THB"
-        : "USD";
-
-  // =====================================================
-  // PRICE / CURRENCY
+  // ========================================
+  // รองรับ:
   //
-  // amount = ราคาต่อ 1 รีวิว
-  //
-  // >= 2,500 / review → THB
-  // <  2,500 / review → USD
-  // =====================================================
+  // 5900
+  // 5,900
+  // 5900 บาท
+  // 5900 THB
+  // 199 USD
+  // $199
+  // ========================================
 
-  const unitPrice =
-    Number(amount);
+  const normalizedText =
+    String(text || "")
+      .trim()
+      .replace(/,/g, "");
+
+
+  const priceMatch =
+    normalizedText.match(
+      /^\$?\s*(\d+(?:\.\d{1,2})?)\s*(?:บาท|thb|usd)?$/i
+    );
+
+
+  if (!priceMatch) {
+    return {
+      ok: false,
+      handled: true,
+      reason:
+        "INVALID_PRICE",
+    };
+  }
+
+
+  const amount =
+    Number(
+      priceMatch[1]
+    );
 
 
   if (
-    !Number.isFinite(unitPrice) ||
-    unitPrice <= 0
+    !Number.isFinite(amount) ||
+    amount <= 0
   ) {
+
+    return {
+      ok: false,
+      handled: true,
+      reason:
+        "INVALID_PRICE",
+    };
+  }
+
+
+  // ========================================
+  // หา Job จากข้อความที่ Sales Reply
+  // ========================================
+
+  let job =
+    await getJobByLineGroupMessageId(
+      quotedMessageId
+    );
+
+
+  console.log(
+    "PRICE JOB LOOKUP:",
+    {
+      quotedMessageId,
+
+      directJobId:
+        job?.id ||
+        null,
+
+      directStatus:
+        job?.status ||
+        null,
+    }
+  );
+
+
+  // ========================================
+  // FALLBACK
+  //
+  // ถ้า quotedMessageId จับคู่ไม่ได้
+  // และมี waiting_price แค่ Job เดียว
+  // → ใช้ Job นั้น
+  // ========================================
+
+  if (
+    !job ||
+    job.status !==
+      "waiting_price"
+  ) {
+
+    const pendingPriceJobs =
+      await getPendingPriceJobs();
+
+
+    console.log(
+      "PRICE JOB FALLBACK:",
+      {
+        pendingCount:
+          pendingPriceJobs.length,
+
+        pendingJobIds:
+          pendingPriceJobs.map(
+            (item) =>
+              item.id
+          ),
+      }
+    );
+
+
+    if (
+      pendingPriceJobs.length ===
+      1
+    ) {
+
+      job =
+        pendingPriceJobs[0];
+
+
+      console.log(
+        "PRICE JOB FALLBACK MATCHED:",
+        {
+          jobId:
+            job.id,
+
+          customerId:
+            job.customer_id,
+        }
+      );
+
+    } else if (
+      pendingPriceJobs.length ===
+      0
+    ) {
+
+      return {
+        ok: false,
+        handled: true,
+        reason:
+          "JOB_NOT_FOUND",
+      };
+
+    } else {
+
+      return {
+        ok: false,
+        handled: true,
+        reason:
+          "MULTIPLE_WAITING_PRICE_JOBS",
+      };
+    }
+  }
+
+
+  if (
+    job.status !==
+    "waiting_price"
+  ) {
+
+    return {
+      ok: false,
+      handled: true,
+
+      reason:
+        "JOB_NOT_WAITING_PRICE",
+
+      jobId:
+        job.id,
+    };
+  }
+
+
+  // ========================================
+  // CUSTOMER
+  // ========================================
+
+  const customer =
+    await getCustomerById(
+      job.customer_id
+    );
+
+
+  if (!customer) {
     throw new Error(
-      "Invalid unit price"
+      "Customer not found for price job"
     );
   }
+
+
+  const conversation =
+    await getConversationByCustomerId(
+      customer.id
+    );
+
+
+  if (!conversation) {
+    throw new Error(
+      "Conversation not found for price job"
+    );
+  }
+
+
+  if (
+    conversation.state !==
+      GMR_STATES.WAITING_PRICE
+  ) {
+
+    return {
+      ok: false,
+      handled: true,
+
+      reason:
+        "CUSTOMER_NOT_WAITING_PRICE",
+
+      currentState:
+        conversation.state,
+    };
+  }
+
+
+  // ========================================
+  // PRICE / CURRENCY
+  //
+  // amount = ราคาต่อ 1 รีวิว
+  // ========================================
+
+  const unitPrice =
+    Number(amount);
 
 
   const currency =
@@ -5399,15 +6063,15 @@ app.get("/test-sales-quote", async (req, res) => {
 
 
   const formattedAmount =
-    unitPrice.toLocaleString(
-      currency === "USD"
-        ? "en-US"
-        : "th-TH"
+    formatMoney(
+      unitPrice,
+      currency
     );
 
 
   const salesMessage =
-    currency === "THB"
+    currency ===
+      "THB"
       ? getCustomerText(
           customer,
 
@@ -5424,9 +6088,9 @@ app.get("/test-sales-quote", async (req, res) => {
         );
 
 
-  // =====================================================
+  // ========================================
   // SAVE JOB
-  // =====================================================
+  // ========================================
 
   await updateJob(
     job.id,
@@ -5442,9 +6106,9 @@ app.get("/test-sales-quote", async (req, res) => {
   );
 
 
-  // =====================================================
+  // ========================================
   // CREATE QUOTE
-  // =====================================================
+  // ========================================
 
   const quote =
     await createQuote({
@@ -5467,12 +6131,17 @@ app.get("/test-sales-quote", async (req, res) => {
     });
 
 
-  // ดึง Script 3
+  // ========================================
+  // SCRIPT 3
+  // ========================================
+
   const template =
     await getTemplate(
       "script_3_after_quote",
-      customer.language || "th"
+      customer.language ||
+        "th"
     );
+
 
   if (!template) {
     throw new Error(
@@ -5485,21 +6154,28 @@ app.get("/test-sales-quote", async (req, res) => {
     `${salesMessage}\n\n${template.content}`;
 
 
-  // WAITING_PRICE -> WAITING_CONFIRM
+  // ========================================
+  // WAITING_PRICE → WAITING_CONFIRM
+  // ========================================
+
   const nextState =
     transitionState(
       conversation.state,
-      GMR_STATES.WAITING_CONFIRM
+      GMR_STATES
+        .WAITING_CONFIRM
     );
 
 
   await updateConversationState({
     customerId:
       customer.id,
+
     state:
       nextState,
+
     handoff:
       false,
+
     handoffReason:
       null,
   });
@@ -5514,27 +6190,39 @@ app.get("/test-sales-quote", async (req, res) => {
   );
 
 
-  // ส่งหาลูกค้าจริง
+  // ========================================
+  // SEND CUSTOMER
+  // ========================================
+
   await sendMessageToCustomer({
     platform:
       customer.platform,
+
     platformUserId:
       customer.platform_user_id,
+
     text:
       botReply,
   });
 
 
-  // เก็บ outbound log
+  // ========================================
+  // SAVE OUTBOUND
+  // ========================================
+
   await saveMessage({
     customerId:
       customer.id,
+
     platform:
       customer.platform,
+
     direction:
       "outbound",
+
     messageType:
       "text",
+
     messageText:
       botReply,
   });
@@ -5548,16 +6236,27 @@ app.get("/test-sales-quote", async (req, res) => {
 
   return {
     ok: true,
+
     handled: true,
+
     jobId:
       job.id,
+
     customerId:
       customer.id,
-    amount,
+
+    amount:
+      unitPrice,
+
+    currency,
+
     stateBefore:
       conversation.state,
+
     stateAfter:
       nextState,
+
+    botReply,
   };
 }
 
