@@ -3699,9 +3699,13 @@ for (
         "recent_review",
 
       recentCount:
-        recentOneStarReviews.length,
+  recentOneStarReviews.length,
 
-      botReply,
+botReply:
+  null,
+
+sentBotReply:
+  botReply,
     };
   }
 
