@@ -46,9 +46,10 @@ import {
   updateLastUserMessage,
   updateLastBotMessage,
   createJob,
-  getLatestJobByCustomerId,
+    getLatestJobByCustomerId,
   hasPaymentByCustomerId,
-isPaymentReferenceUsed,
+  getPaidPricingHistoryByCustomerId,
+  isPaymentReferenceUsed,
 createPayment,
 getLatestJobWithMapByCustomerId,
   getJobByLineGroupMessageId,
@@ -214,6 +215,102 @@ async function getCustomerType(
   return hasPaymentHistory
     ? "EXISTING_CUSTOMER"
     : "NEW_CUSTOMER";
+}
+
+// =========================================================
+// EXISTING CUSTOMER AUTO PRICE
+//
+// NEW REVIEW = อายุ 1-14 วัน
+// OLD REVIEW = มากกว่า 14 วัน
+//
+// ใช้ราคาล่าสุดที่ลูกค้าคนนี้เคยชำระจริง
+// ของแต่ละประเภท
+// =========================================================
+
+async function getExistingCustomerRates(
+  customerId
+) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in getExistingCustomerRates"
+    );
+  }
+
+  const history =
+    await getPaidPricingHistoryByCustomerId(
+      customerId
+    );
+
+
+  let newReviewRate = null;
+  let oldReviewRate = null;
+
+  let newReviewCurrency = null;
+  let oldReviewCurrency = null;
+
+
+  // history ถูกเรียงล่าสุด -> เก่าสุดแล้ว
+  // เพราะฉะนั้นเจอครั้งแรก = ราคาล่าสุด
+  for (
+    const item of history
+  ) {
+    if (
+      item.isRecent === true &&
+      newReviewRate === null
+    ) {
+      newReviewRate =
+        Number(item.price);
+
+      newReviewCurrency =
+        item.currency ||
+        null;
+    }
+
+
+    if (
+      item.isRecent === false &&
+      oldReviewRate === null
+    ) {
+      oldReviewRate =
+        Number(item.price);
+
+      oldReviewCurrency =
+        item.currency ||
+        null;
+    }
+
+
+    if (
+      newReviewRate !== null &&
+      oldReviewRate !== null
+    ) {
+      break;
+    }
+  }
+
+
+  return {
+    newReviewRate,
+    newReviewCurrency,
+
+    oldReviewRate,
+    oldReviewCurrency,
+
+    hasNewReviewRate:
+      Number.isFinite(
+        newReviewRate
+      ) &&
+      newReviewRate > 0,
+
+    hasOldReviewRate:
+      Number.isFinite(
+        oldReviewRate
+      ) &&
+      oldReviewRate > 0,
+
+    historyCount:
+      history.length,
+  };
 }
 
 function getCustomerText(
@@ -1482,7 +1579,54 @@ console.log(
   // 2. CONVERSATION
   // -------------------------------------------------------
 const conversation =
-  await getOrCreateConversation(customer.id);
+  await getOrCreateConversation(
+    customer.id
+  );
+
+
+// =========================================================
+// CUSTOMER TYPE
+// =========================================================
+
+const customerType =
+  await getCustomerType(
+    customer.id
+  );
+
+const isExistingCustomer =
+  customerType ===
+  "EXISTING_CUSTOMER";
+
+const isNewCustomer =
+  customerType ===
+  "NEW_CUSTOMER";
+
+
+let existingCustomerRates =
+  null;
+
+if (isExistingCustomer) {
+  existingCustomerRates =
+    await getExistingCustomerRates(
+      customer.id
+    );
+}
+
+
+console.log(
+  "CUSTOMER TYPE:",
+  {
+    customerId:
+      customer.id,
+
+    customerType,
+
+    isExistingCustomer,
+
+    rates:
+      existingCustomerRates,
+  }
+);
 
 
 let autoConfirmDirectMap =
@@ -1546,8 +1690,10 @@ const isExplicitRestart =
 
 if (
   existingCustomer &&
-  conversation.state === GMR_STATES.NEW &&
-  !isExplicitRestart
+  conversation.state ===
+    GMR_STATES.NEW &&
+  !isExplicitRestart &&
+  !isExistingCustomer
 ) {
   const hasPayment =
     await hasPaymentByCustomerId(
