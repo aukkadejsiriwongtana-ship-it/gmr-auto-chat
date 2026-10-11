@@ -1454,11 +1454,17 @@ export async function markLegacyCustomerMatched({
       match_status:
         "matched",
 
-      matched_at:
-        new Date().toISOString(),
+     matched_at:
+  new Date().toISOString(),
 
-      match_requested_at:
-        null,
+match_requested_at:
+  null,
+
+pending_message_text:
+  null,
+
+pending_message_type:
+  null,
     })
     .eq(
       "id",
