@@ -1094,6 +1094,45 @@ export async function isPaymentReferenceUsed(
   return Boolean(data);
 }
 
+export async function getVerifiedPaymentByJobId(
+  jobId
+) {
+  if (!jobId) {
+    throw new Error(
+      "Missing jobId in getVerifiedPaymentByJobId"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_payments")
+    .select("*")
+    .eq(
+      "job_id",
+      jobId
+    )
+    .eq(
+      "payment_verified",
+      true
+    )
+    .order(
+      "created_at",
+      {
+        ascending: false,
+      }
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function createPayment({
   jobId,
   amount,
