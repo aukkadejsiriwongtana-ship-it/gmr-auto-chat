@@ -474,6 +474,40 @@ export async function getLatestJobByCustomerId(
 }
 
 // =========================================================
+// GET WAITING PAYMENT JOBS BY CUSTOMER
+// ใช้รวมเฉพาะงานที่สำเร็จแล้วและยังไม่ได้ชำระ
+// =========================================================
+
+export async function getWaitingPaymentJobsByCustomerId(
+  customerId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "customer_id",
+        customerId
+      )
+      .eq(
+        "status",
+        "waiting_payment"
+      )
+      .order(
+        "removed_at",
+        {
+          ascending: true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+// =========================================================
 // CUSTOMER HISTORY CHECK
 // =========================================================
 
