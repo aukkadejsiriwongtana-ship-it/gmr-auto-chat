@@ -2421,7 +2421,263 @@ const conversation =
     customer.id
   );
 
+// =========================================================
+// LEGACY CUSTOMER AUTO MATCH CHECK
+//
+// ใช้เฉพาะ LINE
+// - ชื่อตรง 1 คน → ส่งให้ทีมยืนยัน
+// - ชื่อตรงหลายคน → ห้ามเดา ส่ง Human Attention
+// - ไม่เจอ → เข้า Flow ปกติ
+// =========================================================
 
+if (
+  String(platform || "")
+    .toLowerCase() === "line"
+) {
+
+  const legacyMatches =
+    await getPendingLegacyCustomersByDisplayName(
+      customer.display_name
+    );
+
+
+  console.log(
+    "LEGACY CUSTOMER MATCH CHECK:",
+    {
+      customerId:
+        customer.id,
+
+      displayName:
+        customer.display_name,
+
+      matchCount:
+        legacyMatches.length,
+
+      legacyIds:
+        legacyMatches.map(
+          (item) => item.id
+        ),
+    }
+  );
+
+
+  // ========================================
+  // เจอเพียง 1 คน
+  // → ส่งให้ทีมตรวจ
+  // ========================================
+
+  if (
+    legacyMatches.length === 1
+  ) {
+
+    const legacyCustomer =
+      legacyMatches[0];
+
+
+    try {
+
+      const matchRequest =
+        await sendLegacyCustomerMatchRequest({
+          customer,
+          legacyCustomer,
+        });
+
+
+      await updateConversationState({
+        customerId:
+          customer.id,
+
+        state:
+          GMR_STATES.HANDOFF,
+
+        handoff:
+          true,
+
+        handoffReason:
+          "LEGACY_MATCH_PENDING",
+      });
+
+
+      console.log(
+        "LEGACY MATCH REQUEST SENT:",
+        {
+          customerId:
+            customer.id,
+
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          lineGroupMessageId:
+            matchRequest.messageId,
+        }
+      );
+
+
+      return {
+        ok: true,
+
+        customerId:
+          customer.id,
+
+        legacyMatchPending:
+          true,
+
+        legacyCustomerId:
+          legacyCustomer.id,
+
+        stateBefore:
+          conversation.state,
+
+        stateAfter:
+          GMR_STATES.HANDOFF,
+
+        botReply:
+          null,
+      };
+
+
+    } catch (error) {
+
+      console.error(
+        "LEGACY MATCH REQUEST FAILED:",
+        {
+          customerId:
+            customer.id,
+
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          error:
+            error.message,
+        }
+      );
+
+
+      await updateConversationState({
+        customerId:
+          customer.id,
+
+        state:
+          GMR_STATES.HANDOFF,
+
+        handoff:
+          true,
+
+        handoffReason:
+          "LEGACY_MATCH_REQUEST_FAILED",
+      });
+
+
+      await triggerHumanAttention({
+        customer,
+        conversation,
+
+        message:
+          `พบ Legacy Customer ชื่อตรงกัน แต่ส่งคำขอยืนยันไม่สำเร็จ: ${
+            legacyCustomer.display_name ||
+            "-"
+          } / ${
+            legacyCustomer.business_name ||
+            "-"
+          }`,
+
+        reason:
+          "LEGACY_MATCH_REQUEST_FAILED",
+      });
+
+
+      return {
+        ok: true,
+
+        customerId:
+          customer.id,
+
+        legacyMatchPending:
+          true,
+
+        legacyMatchError:
+          true,
+
+        botReply:
+          null,
+      };
+    }
+  }
+
+
+  // ========================================
+  // เจอมากกว่า 1 คน
+  // → ห้ามเลือกเอง
+  // ========================================
+
+  if (
+    legacyMatches.length > 1
+  ) {
+
+    const candidateText =
+      legacyMatches
+        .map(
+          (
+            item,
+            index
+          ) =>
+            `${index + 1}. ${
+              item.display_name ||
+              "-"
+            } / ${
+              item.business_name ||
+              "-"
+            }`
+        )
+        .join("\n");
+
+
+    await updateConversationState({
+      customerId:
+        customer.id,
+
+      state:
+        GMR_STATES.HANDOFF,
+
+      handoff:
+        true,
+
+      handoffReason:
+        "LEGACY_MATCH_AMBIGUOUS",
+    });
+
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        `พบ Legacy Customer ชื่อซ้ำหลายรายการ\n${candidateText}`,
+
+      reason:
+        "LEGACY_MATCH_AMBIGUOUS",
+    });
+
+
+    return {
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      legacyMatchAmbiguous:
+        true,
+
+      legacyMatchCount:
+        legacyMatches.length,
+
+      botReply:
+        null,
+    };
+  }
+}
+
+  
 // =========================================================
 // CUSTOMER TYPE
 // =========================================================
