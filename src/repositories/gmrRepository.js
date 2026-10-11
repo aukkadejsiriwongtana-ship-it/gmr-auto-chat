@@ -1420,6 +1420,104 @@ export async function getPendingLegacyCustomersByDisplayName(
   return data || [];
 }
 
+// =========================================================
+// CLAIM LEGACY CUSTOMER IMPORT
+//
+// pending_confirmation -> importing
+//
+// ใช้กัน:
+// - กดยืนยันซ้ำ
+// - webhook ซ้ำ
+// - import พร้อมกัน 2 request
+// =========================================================
+
+export async function claimLegacyCustomerImport({
+  legacyCustomerId,
+  customerId,
+}) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in claimLegacyCustomerImport"
+    );
+  }
+
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in claimLegacyCustomerImport"
+    );
+  }
+
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      match_status:
+        "importing",
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .eq(
+      "pending_customer_id",
+      customerId
+    )
+    .eq(
+      "match_status",
+      "pending_confirmation"
+    )
+    .select()
+    .maybeSingle();
+
+
+  if (error) {
+    throw error;
+  }
+
+
+  // null = มี request อื่น claim ไปแล้ว
+  return data;
+}
+
+export async function rollbackLegacyCustomerImport(
+  legacyCustomerId
+) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in rollbackLegacyCustomerImport"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      match_status:
+        "pending_confirmation",
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .eq(
+      "match_status",
+      "importing"
+    )
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function markLegacyCustomerMatched({
   legacyCustomerId,
   customerId,
@@ -1460,10 +1558,10 @@ export async function markLegacyCustomerMatched({
 match_requested_at:
   null,
 
-pending_message_text:
-  null,
+matched_at:
+  new Date().toISOString(),
 
-pending_message_type:
+match_requested_at:
   null,
 
 pending_message_text:
