@@ -78,7 +78,9 @@ setLegacyCustomerPendingMatch,
 getLegacyCustomerByLineGroupMessageId,
 rejectLegacyCustomerMatch,
 markLegacyCustomerMatched,
-
+claimLegacyCustomerImport,
+rollbackLegacyCustomerImport,
+  
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -9302,6 +9304,73 @@ if (
     }
 
 
+// ========================================
+// SAFETY CHECK:
+// Legacy record ต้องยืนยันว่าเคยชำระเงินจริง
+// ========================================
+
+if (
+  legacyCustomer.has_verified_payment !==
+  true
+) {
+
+  await replyLineTextMessage(
+    event.replyToken,
+    "❌ ยังไม่สามารถยืนยันลูกค้าเก่ารายนี้ได้ เนื่องจาก Legacy record ยังไม่ได้ยืนยันประวัติการชำระเงินจริง"
+  );
+
+  console.error(
+    "LEGACY IMPORT BLOCKED: PAYMENT NOT VERIFIED",
+    {
+      legacyCustomerId:
+        legacyCustomer.id,
+
+      customerId:
+        matchedCustomer.id,
+    }
+  );
+
+  continue;
+}
+
+
+// ========================================
+// CLAIM IMPORT
+//
+// request แรกเท่านั้นที่ได้สิทธิ์ Import
+// ========================================
+
+const claimedLegacy =
+  await claimLegacyCustomerImport({
+    legacyCustomerId:
+      legacyCustomer.id,
+
+    customerId:
+      matchedCustomer.id,
+  });
+
+
+if (!claimedLegacy) {
+
+  await replyLineTextMessage(
+    event.replyToken,
+    "⚠️ รายการลูกค้าเก่านี้กำลังถูกดำเนินการ หรือดำเนินการไปแล้วครับ"
+  );
+
+  console.log(
+    "LEGACY IMPORT DUPLICATE BLOCKED:",
+    {
+      legacyCustomerId:
+        legacyCustomer.id,
+
+      customerId:
+        matchedCustomer.id,
+    }
+  );
+
+  continue;
+}
+    
     // ========================================
     // ทีมตอบ "ยืนยันลูกค้าเก่า"
     // ========================================
@@ -9727,7 +9796,26 @@ ${
         }
       );
 
+try {
 
+  await rollbackLegacyCustomerImport(
+    legacyCustomer.id
+  );
+
+} catch (rollbackError) {
+
+  console.error(
+    "LEGACY IMPORT ROLLBACK FAILED:",
+    {
+      legacyCustomerId:
+        legacyCustomer.id,
+
+      error:
+        rollbackError.message,
+    }
+  );
+}
+      
       await replyLineTextMessage(
         event.replyToken,
         `❌ Import ลูกค้าเก่าไม่สำเร็จ: ${error.message}\nกรุณายังไม่กดยืนยันซ้ำจนกว่าจะตรวจสอบข้อมูลครับ`
