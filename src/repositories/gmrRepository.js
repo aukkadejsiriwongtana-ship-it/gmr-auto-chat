@@ -507,6 +507,8 @@ export async function getWaitingPaymentJobsByCustomerId(
   return data || [];
 }
 
+
+
 // =========================================================
 // CUSTOMER HISTORY CHECK
 // =========================================================
@@ -562,6 +564,327 @@ export async function hasPaymentByCustomerId(
   }
 
   return Boolean(payment);
+}
+
+// =========================================================
+// GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
+//
+// ใช้สำหรับลูกค้าเก่า
+//
+// ดึงเฉพาะงานที่:
+// 1. เป็นของ customer คนนี้
+// 2. มีราคาจริง
+// 3. มี payment_verified = true
+//
+// พร้อมข้อมูลว่า Review นั้นเป็น:
+// - NEW  = อายุ 1-14 วัน  (is_recent = true)
+// - OLD  = มากกว่า 14 วัน (is_recent = false)
+//
+// ใช้เป็นฐานสำหรับ Auto Pricing ลูกค้าเก่า
+// =========================================================
+
+export async function getPaidPricingHistoryByCustomerId(
+  customerId
+) {
+  // -------------------------------------------------------
+  // 1. ดึง Jobs ของลูกค้าคนนี้
+  // -------------------------------------------------------
+
+  const {
+    data: jobs,
+    error: jobsError,
+  } = await supabase
+    .from("gmr_jobs")
+    .select(
+      "id, price, currency, created_at, paid_at"
+    )
+    .eq(
+      "customer_id",
+      customerId
+    )
+    .not(
+      "price",
+      "is",
+      null
+    )
+    .order(
+      "created_at",
+      {
+        ascending: false,
+      }
+    );
+
+  if (jobsError) {
+    throw jobsError;
+  }
+
+  if (
+    !jobs ||
+    jobs.length === 0
+  ) {
+    return [];
+  }
+
+
+  const jobIds =
+    jobs.map(
+      (job) => job.id
+    );
+
+
+  // -------------------------------------------------------
+  // 2. หาเฉพาะ Job ที่มี Payment Verified จริง
+  // -------------------------------------------------------
+
+  const {
+    data: payments,
+    error: paymentsError,
+  } = await supabase
+    .from("gmr_payments")
+    .select(
+      "job_id, verified_at"
+    )
+    .in(
+      "job_id",
+      jobIds
+    )
+    .eq(
+      "payment_verified",
+      true
+    );
+
+  if (paymentsError) {
+    throw paymentsError;
+  }
+
+  if (
+    !payments ||
+    payments.length === 0
+  ) {
+    return [];
+  }
+
+
+  const verifiedPaymentsByJobId =
+    new Map();
+
+  for (
+    const payment of payments
+  ) {
+    if (!payment?.job_id) {
+      continue;
+    }
+
+    const existing =
+      verifiedPaymentsByJobId.get(
+        payment.job_id
+      );
+
+    if (!existing) {
+      verifiedPaymentsByJobId.set(
+        payment.job_id,
+        payment
+      );
+
+      continue;
+    }
+
+
+    const existingTime =
+      new Date(
+        existing.verified_at || 0
+      ).getTime();
+
+    const currentTime =
+      new Date(
+        payment.verified_at || 0
+      ).getTime();
+
+
+    if (
+      currentTime >
+      existingTime
+    ) {
+      verifiedPaymentsByJobId.set(
+        payment.job_id,
+        payment
+      );
+    }
+  }
+
+
+  const verifiedJobIds =
+    Array.from(
+      verifiedPaymentsByJobId.keys()
+    );
+
+
+  if (
+    verifiedJobIds.length === 0
+  ) {
+    return [];
+  }
+
+
+  // -------------------------------------------------------
+  // 3. ดึงข้อมูล Review ของ Jobs ที่จ่ายเงินจริงแล้ว
+  // -------------------------------------------------------
+
+  const {
+    data: reviews,
+    error: reviewsError,
+  } = await supabase
+    .from("gmr_reviews")
+    .select(
+      "job_id, is_recent, review_date, created_at"
+    )
+    .in(
+      "job_id",
+      verifiedJobIds
+    )
+    .order(
+      "created_at",
+      {
+        ascending: false,
+      }
+    );
+
+  if (reviewsError) {
+    throw reviewsError;
+  }
+
+
+  // -------------------------------------------------------
+  // 4. 1 Job ใช้ Review ล่าสุดของ Job นั้น
+  // -------------------------------------------------------
+
+  const reviewByJobId =
+    new Map();
+
+  for (
+    const review of
+      reviews || []
+  ) {
+    if (
+      !review?.job_id ||
+      reviewByJobId.has(
+        review.job_id
+      )
+    ) {
+      continue;
+    }
+
+    reviewByJobId.set(
+      review.job_id,
+      review
+    );
+  }
+
+
+  // -------------------------------------------------------
+  // 5. รวม Job + Payment + Review
+  // -------------------------------------------------------
+
+  const history = [];
+
+  for (
+    const job of jobs
+  ) {
+    if (
+      !verifiedPaymentsByJobId.has(
+        job.id
+      )
+    ) {
+      continue;
+    }
+
+
+    const price =
+      Number(
+        job.price || 0
+      );
+
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      continue;
+    }
+
+
+    const payment =
+      verifiedPaymentsByJobId.get(
+        job.id
+      );
+
+    const review =
+      reviewByJobId.get(
+        job.id
+      ) || null;
+
+
+    history.push({
+      jobId:
+        job.id,
+
+      price,
+
+      currency:
+        job.currency ||
+        null,
+
+      paidAt:
+        payment?.verified_at ||
+        job.paid_at ||
+        null,
+
+      jobCreatedAt:
+        job.created_at ||
+        null,
+
+      isRecent:
+        typeof review?.is_recent ===
+        "boolean"
+          ? review.is_recent
+          : null,
+
+      reviewDate:
+        review?.review_date ||
+        null,
+    });
+  }
+
+
+  // -------------------------------------------------------
+  // 6. เรียงใหม่สุดก่อน
+  //
+  // Auto pricing จะเลือก "ราคาเดิมล่าสุด"
+  // ของแต่ละ Rate
+  // -------------------------------------------------------
+
+  history.sort(
+    (a, b) => {
+      const aTime =
+        new Date(
+          a.paidAt ||
+          a.jobCreatedAt ||
+          0
+        ).getTime();
+
+      const bTime =
+        new Date(
+          b.paidAt ||
+          b.jobCreatedAt ||
+          0
+        ).getTime();
+
+      return bTime - aTime;
+    }
+  );
+
+
+  return history;
 }
 
 export async function isPaymentReferenceUsed(
