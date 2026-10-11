@@ -72,6 +72,12 @@ updatePayment,
 getPendingPriceJobs,
 getWaitingPaymentJobsByCustomerId,
 getExistingCustomerOpenBatchJobs,
+
+getPendingLegacyCustomersByDisplayName,
+setLegacyCustomerPendingMatch,
+getLegacyCustomerByLineGroupMessageId,
+rejectLegacyCustomerMatch,
+
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -949,6 +955,238 @@ return {
         error.message,
     };
   }
+}
+
+// =========================================================
+// LEGACY CUSTOMER MATCH REQUEST
+//
+// เมื่อชื่อ LINE ตรงกับ Legacy Customer
+// ยังไม่ถือว่าเป็นคนเดียวกันทันที
+// ส่งให้ทีมตรวจและ Reply ยืนยันใน LINE Group
+// =========================================================
+
+async function sendLegacyCustomerMatchRequest({
+  customer,
+  legacyCustomer,
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+
+  if (!token || !groupId) {
+    throw new Error(
+      "Missing LINE config for legacy customer match"
+    );
+  }
+
+
+  if (!customer?.id) {
+    throw new Error(
+      "Missing customer in sendLegacyCustomerMatchRequest"
+    );
+  }
+
+
+  if (!legacyCustomer?.id) {
+    throw new Error(
+      "Missing legacyCustomer in sendLegacyCustomerMatchRequest"
+    );
+  }
+
+
+  const newRate =
+    Number(
+      legacyCustomer.new_review_rate || 0
+    );
+
+  const oldRate =
+    Number(
+      legacyCustomer.old_review_rate || 0
+    );
+
+
+  const newCurrency =
+    String(
+      legacyCustomer.new_review_currency ||
+      "THB"
+    ).toUpperCase();
+
+
+  const oldCurrency =
+    String(
+      legacyCustomer.old_review_currency ||
+      "THB"
+    ).toUpperCase();
+
+
+  const formatLegacyRate = (
+    amount,
+    currency
+  ) => {
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      return "-";
+    }
+
+    if (currency === "USD") {
+      return `$${formatMoney(
+        amount,
+        "USD"
+      )} USD`;
+    }
+
+    return `${formatMoney(
+      amount,
+      "THB"
+    )} บาท`;
+  };
+
+
+  const text = [
+    "⚠️ พบลูกค้าที่อาจเป็นลูกค้าเก่า",
+    "",
+    `LINE Name: ${
+      customer.display_name ||
+      "-"
+    }`,
+    `Legacy Name: ${
+      legacyCustomer.display_name ||
+      "-"
+    }`,
+    "",
+    `ธุรกิจเดิม: ${
+      legacyCustomer.business_name ||
+      "-"
+    }`,
+    `เบอร์เดิม: ${
+      legacyCustomer.phone ||
+      "-"
+    }`,
+    "",
+    "ราคาเดิม:",
+    `NEW Review: ${formatLegacyRate(
+      newRate,
+      newCurrency
+    )}`,
+    `OLD Review: ${formatLegacyRate(
+      oldRate,
+      oldCurrency
+    )}`,
+    "",
+    `หมายเหตุ: ${
+      legacyCustomer.note ||
+      "-"
+    }`,
+    "",
+    "กรุณาตรวจว่าเป็นลูกค้าคนเดียวกันหรือไม่",
+    "",
+    "Reply ข้อความนี้:",
+    "✅ ยืนยันลูกค้าเก่า",
+    "❌ ไม่ใช่",
+  ].join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw new Error(
+      `LEGACY MATCH LINE PUSH FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+
+  let responseData = {};
+
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(
+          responseText
+        );
+
+    } catch {
+      responseData = {};
+    }
+  }
+
+
+  const messageId =
+    responseData
+      ?.sentMessages
+      ?.[0]
+      ?.id ||
+    null;
+
+
+  if (!messageId) {
+    throw new Error(
+      "Legacy match LINE messageId missing"
+    );
+  }
+
+
+  // ========================================
+  // บันทึกว่า Legacy คนนี้
+  // กำลังรอยืนยันกับ Customer คนไหน
+  // ========================================
+
+  await setLegacyCustomerPendingMatch({
+    legacyCustomerId:
+      legacyCustomer.id,
+
+    customerId:
+      customer.id,
+
+    lineGroupMessageId:
+      messageId,
+  });
+
+
+  return {
+    messageId,
+    text,
+  };
 }
 
 async function sendCreditApprovalRequestToLineGroup({
