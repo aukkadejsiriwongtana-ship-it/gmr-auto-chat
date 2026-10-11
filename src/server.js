@@ -695,7 +695,6 @@ function getPlatformLabel(
 }
 
 
-
 async function getCustomerStage({
   customer,
   conversation,
@@ -724,6 +723,7 @@ async function getCustomerStage({
     "removed_waiting_payment",
   ];
 
+
   if (
     conversation?.state ===
       GMR_STATES.IN_PROGRESS ||
@@ -742,22 +742,20 @@ async function getCustomerStage({
   // ========================================
 
   const preStartStatuses = [
-  "draft",
+    "draft",
+    "waiting_price",
+    "waiting_confirm",
+    "waiting_phone",
+    "waiting_credit_approval",
 
-  const preStartStatuses = [
-  "draft",
-  "waiting_price",
-  "waiting_confirm",
-  "waiting_phone",
-  "waiting_credit_approval",
+    // Existing customer
+    "existing_evidence_pending",
+    "existing_evidence_failed",
+    "existing_batch_draft",
 
-  // Existing customer flow
-  "existing_evidence_pending",
-  "existing_evidence_failed",
-  "existing_batch_draft",
+    "credit_rejected",
+  ];
 
-  "credit_rejected",
-];
 
   if (
     preStartStatuses.includes(
@@ -777,6 +775,7 @@ async function getCustomerStage({
       customer.id
     );
 
+
   if (hasPaymentHistory) {
     return "ลูกค้าเก่า / ยังไม่มีงานใหม่";
   }
@@ -784,6 +783,7 @@ async function getCustomerStage({
 
   return "ก่อนเริ่มงาน";
 }
+
 
 async function triggerHumanAttention({
   customer,
