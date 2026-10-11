@@ -80,6 +80,8 @@ rejectLegacyCustomerMatch,
 markLegacyCustomerMatched,
 claimLegacyCustomerImport,
 rollbackLegacyCustomerImport,
+  getLegacyImportedJob,
+getVerifiedPaymentByJobId,
   
 } from "./repositories/gmrRepository.js";
 
@@ -9395,229 +9397,372 @@ const pendingMessageType =
       const importedJobs = [];
 
 
-      // ========================================
-      // NEW REVIEW HISTORY
-      // ========================================
+    // ========================================
+// NEW REVIEW HISTORY
+// Resume-safe / Idempotent
+// ========================================
 
-      const newReviewRate =
-        Number(
+const newReviewRate =
+  Number(
+    legacyCustomer
+      .new_review_rate ||
+    0
+  );
+
+
+if (
+  Number.isFinite(
+    newReviewRate
+  ) &&
+  newReviewRate > 0
+) {
+
+  const newCurrency =
+    String(
+      legacyCustomer
+        .new_review_currency ||
+      "THB"
+    ).toUpperCase();
+
+
+  // ========================================
+  // 1. หา Job ที่เคย Import ไว้ก่อน
+  // ========================================
+
+  let historicalNewJob =
+    await getLegacyImportedJob({
+      legacySourceId:
+        legacyCustomer.id,
+
+      reviewCase:
+        "legacy_import_new",
+    });
+
+
+  // ========================================
+  // 2. ไม่มี Job เดิม → ค่อยสร้าง
+  // ========================================
+
+  if (!historicalNewJob) {
+
+    historicalNewJob =
+      await createJob({
+        customerId:
+          matchedCustomer.id,
+
+        businessName:
           legacyCustomer
-            .new_review_rate ||
-          0
-        );
+            .business_name ||
+          null,
+
+        reviewCase:
+          "legacy_import_new",
+
+        status:
+          "paid",
+
+        legacySourceId:
+          legacyCustomer.id,
+      });
+
+  } else if (
+    historicalNewJob.customer_id !==
+    matchedCustomer.id
+  ) {
+
+    throw new Error(
+      "Legacy NEW history is already linked to another customer"
+    );
+  }
 
 
-      if (
-        Number.isFinite(
-          newReviewRate
-        ) &&
-        newReviewRate > 0
-      ) {
+  // ========================================
+  // 3. Update ราคาให้ตรง Legacy record
+  // ========================================
 
-        const newCurrency =
-          String(
-            legacyCustomer
-              .new_review_currency ||
-            "THB"
-          ).toUpperCase();
+  historicalNewJob =
+    await updateJob(
+      historicalNewJob.id,
+      {
+        price:
+          newReviewRate,
 
+        currency:
+          newCurrency,
 
-        const historicalNewJob =
-          await createJob({
-            customerId:
-              matchedCustomer.id,
-
-            businessName:
-              legacyCustomer
-                .business_name ||
-              null,
-
-            reviewCase:
-              "legacy_import_new",
-
-            status:
-              "paid",
-          });
-
-
-        await updateJob(
-          historicalNewJob.id,
-          {
-            price:
-              newReviewRate,
-
-            currency:
-              newCurrency,
-          }
-        );
-
-
-        await saveReviewCandidate({
-          customerId:
-            matchedCustomer.id,
-
-          jobId:
-            historicalNewJob.id,
-
-          businessName:
-            legacyCustomer
-              .business_name ||
-            null,
-
-          reviewerName:
-            "LEGACY_IMPORT",
-
-          reviewText:
-            "Imported historical NEW review rate",
-
-          isRecent:
-            true,
-
-          isVisible:
-            null,
-
-          hasText:
-            null,
-        });
-
-
-        await createPayment({
-          jobId:
-            historicalNewJob.id,
-
-          amount:
-            newReviewRate,
-
-          paymentMethod:
-            "LEGACY_IMPORT",
-
-          slipReceived:
-            false,
-
-          paymentVerified:
-            true,
-
-          verifiedAt,
-        });
-
-
-        importedJobs.push(
-          historicalNewJob.id
-        );
+        status:
+          "paid",
       }
+    );
+
+
+  // ========================================
+  // 4. Review มีแล้ว → ไม่สร้างซ้ำ
+  // ========================================
+
+  const existingNewReviews =
+    await getReviewsByJobId(
+      historicalNewJob.id
+    );
+
+
+  if (
+    !existingNewReviews ||
+    existingNewReviews.length === 0
+  ) {
+
+    await saveReviewCandidate({
+      customerId:
+        matchedCustomer.id,
+
+      jobId:
+        historicalNewJob.id,
+
+      businessName:
+        legacyCustomer
+          .business_name ||
+        null,
+
+      reviewerName:
+        "LEGACY_IMPORT",
+
+      reviewText:
+        "Imported historical NEW review rate",
+
+      isRecent:
+        true,
+
+      isVisible:
+        null,
+
+      hasText:
+        null,
+    });
+  }
+
+
+  // ========================================
+  // 5. Verified Payment มีแล้ว
+  // → ไม่สร้างซ้ำ
+  // ========================================
+
+  const existingNewPayment =
+    await getVerifiedPaymentByJobId(
+      historicalNewJob.id
+    );
+
+
+  if (!existingNewPayment) {
+
+    await createPayment({
+      jobId:
+        historicalNewJob.id,
+
+      amount:
+        newReviewRate,
+
+      paymentMethod:
+        "LEGACY_IMPORT",
+
+      slipReceived:
+        false,
+
+      paymentVerified:
+        true,
+
+      verifiedAt,
+    });
+  }
+
+
+  importedJobs.push(
+    historicalNewJob.id
+  );
+}
 
 
       // ========================================
-      // OLD REVIEW HISTORY
-      // ========================================
+// OLD REVIEW HISTORY
+// Resume-safe / Idempotent
+// ========================================
 
-      const oldReviewRate =
-        Number(
+const oldReviewRate =
+  Number(
+    legacyCustomer
+      .old_review_rate ||
+    0
+  );
+
+
+if (
+  Number.isFinite(
+    oldReviewRate
+  ) &&
+  oldReviewRate > 0
+) {
+
+  const oldCurrency =
+    String(
+      legacyCustomer
+        .old_review_currency ||
+      "THB"
+    ).toUpperCase();
+
+
+  // ========================================
+  // 1. หา Job ที่เคย Import ไว้ก่อน
+  // ========================================
+
+  let historicalOldJob =
+    await getLegacyImportedJob({
+      legacySourceId:
+        legacyCustomer.id,
+
+      reviewCase:
+        "legacy_import_old",
+    });
+
+
+  // ========================================
+  // 2. ไม่มี Job เดิม → ค่อยสร้าง
+  // ========================================
+
+  if (!historicalOldJob) {
+
+    historicalOldJob =
+      await createJob({
+        customerId:
+          matchedCustomer.id,
+
+        businessName:
           legacyCustomer
-            .old_review_rate ||
-          0
-        );
+            .business_name ||
+          null,
+
+        reviewCase:
+          "legacy_import_old",
+
+        status:
+          "paid",
+
+        legacySourceId:
+          legacyCustomer.id,
+      });
+
+  } else if (
+    historicalOldJob.customer_id !==
+    matchedCustomer.id
+  ) {
+
+    throw new Error(
+      "Legacy OLD history is already linked to another customer"
+    );
+  }
 
 
-      if (
-        Number.isFinite(
-          oldReviewRate
-        ) &&
-        oldReviewRate > 0
-      ) {
+  // ========================================
+  // 3. Update ราคา
+  // ========================================
 
-        const oldCurrency =
-          String(
-            legacyCustomer
-              .old_review_currency ||
-            "THB"
-          ).toUpperCase();
+  historicalOldJob =
+    await updateJob(
+      historicalOldJob.id,
+      {
+        price:
+          oldReviewRate,
 
+        currency:
+          oldCurrency,
 
-        const historicalOldJob =
-          await createJob({
-            customerId:
-              matchedCustomer.id,
-
-            businessName:
-              legacyCustomer
-                .business_name ||
-              null,
-
-            reviewCase:
-              "legacy_import_old",
-
-            status:
-              "paid",
-          });
-
-
-        await updateJob(
-          historicalOldJob.id,
-          {
-            price:
-              oldReviewRate,
-
-            currency:
-              oldCurrency,
-          }
-        );
-
-
-        await saveReviewCandidate({
-          customerId:
-            matchedCustomer.id,
-
-          jobId:
-            historicalOldJob.id,
-
-          businessName:
-            legacyCustomer
-              .business_name ||
-            null,
-
-          reviewerName:
-            "LEGACY_IMPORT",
-
-          reviewText:
-            "Imported historical OLD review rate",
-
-          isRecent:
-            false,
-
-          isVisible:
-            null,
-
-          hasText:
-            null,
-        });
-
-
-        await createPayment({
-          jobId:
-            historicalOldJob.id,
-
-          amount:
-            oldReviewRate,
-
-          paymentMethod:
-            "LEGACY_IMPORT",
-
-          slipReceived:
-            false,
-
-          paymentVerified:
-            true,
-
-          verifiedAt,
-        });
-
-
-        importedJobs.push(
-          historicalOldJob.id
-        );
+        status:
+          "paid",
       }
+    );
 
+
+  // ========================================
+  // 4. Review มีแล้ว → ไม่สร้างซ้ำ
+  // ========================================
+
+  const existingOldReviews =
+    await getReviewsByJobId(
+      historicalOldJob.id
+    );
+
+
+  if (
+    !existingOldReviews ||
+    existingOldReviews.length === 0
+  ) {
+
+    await saveReviewCandidate({
+      customerId:
+        matchedCustomer.id,
+
+      jobId:
+        historicalOldJob.id,
+
+      businessName:
+        legacyCustomer
+          .business_name ||
+        null,
+
+      reviewerName:
+        "LEGACY_IMPORT",
+
+      reviewText:
+        "Imported historical OLD review rate",
+
+      isRecent:
+        false,
+
+      isVisible:
+        null,
+
+      hasText:
+        null,
+    });
+  }
+
+
+  // ========================================
+  // 5. Verified Payment มีแล้ว
+  // → ไม่สร้างซ้ำ
+  // ========================================
+
+  const existingOldPayment =
+    await getVerifiedPaymentByJobId(
+      historicalOldJob.id
+    );
+
+
+  if (!existingOldPayment) {
+
+    await createPayment({
+      jobId:
+        historicalOldJob.id,
+
+      amount:
+        oldReviewRate,
+
+      paymentMethod:
+        "LEGACY_IMPORT",
+
+      slipReceived:
+        false,
+
+      paymentVerified:
+        true,
+
+      verifiedAt,
+    });
+  }
+
+
+  importedJobs.push(
+    historicalOldJob.id
+  );
+}
 
       // ========================================
       // ต้องมีอย่างน้อย 1 ราคา
