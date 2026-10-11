@@ -9297,7 +9297,96 @@ console.log(
   }
 });
 
+// =========================================================
+// TEST REVIEW REMOVAL DETECTION
+// ใช้ทดสอบลิงก์รีวิวที่ทราบว่าถูกลบแล้ว
+// ไม่แก้ Job / ไม่แก้ Customer / ไม่เปลี่ยน Status
+// =========================================================
 
+app.get(
+  "/test-review-monitor-link",
+  async (req, res) => {
+    try {
+
+      const reviewUrl =
+        "https://maps.app.goo.gl/MrUD3MewCAq2nFT76?g_st=il";
+
+
+      const result =
+        await getReviewFromDirectUrl(
+          reviewUrl
+        );
+
+
+      console.log(
+        "TEST REVIEW MONITOR RESULT:",
+        {
+          reviewUrl,
+
+          found:
+            Boolean(
+              result?.found &&
+              result?.review
+            ),
+
+          reason:
+            result?.reason ||
+            null,
+
+          reviewerName:
+            result?.review
+              ?.reviewerName ||
+            null,
+
+          rating:
+            result?.review
+              ?.rating ||
+            null,
+        }
+      );
+
+
+      return res
+        .status(200)
+        .json({
+          ok: true,
+
+          reviewUrl,
+
+          found:
+            Boolean(
+              result?.found &&
+              result?.review
+            ),
+
+          reason:
+            result?.reason ||
+            null,
+
+          review:
+            result?.review ||
+            null,
+        });
+
+    } catch (error) {
+
+      console.error(
+        "TEST REVIEW MONITOR ERROR:",
+        error
+      );
+
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
 
 // =========================================================
 // AUTO REVIEW REMOVAL MONITOR
