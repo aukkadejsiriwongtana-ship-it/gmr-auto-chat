@@ -1164,6 +1164,50 @@ export async function getJobByLineGroupMessageId(
   return data;
 }
 
+// =========================================================
+// GET WAITING CREDIT JOBS BY CUSTOMER
+//
+// ใช้กับ Existing Customer Batch
+// หลังลูกค้ากด "ยืนยันทั้งหมด"
+// =========================================================
+
+export async function getWaitingCreditApprovalJobsByCustomerId(
+  customerId
+) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in getWaitingCreditApprovalJobsByCustomerId"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_jobs")
+    .select("*")
+    .eq(
+      "customer_id",
+      customerId
+    )
+    .eq(
+      "status",
+      "waiting_credit_approval"
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 export async function getPendingCreditApprovalJobs() {
   const { data, error } =
     await supabase
