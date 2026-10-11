@@ -1482,7 +1482,10 @@ export async function setLegacyCustomerPendingMatch({
   legacyCustomerId,
   customerId,
   lineGroupMessageId,
+  pendingMessageText = null,
+  pendingMessageType = "text",
 }) {
+  
   if (!legacyCustomerId) {
     throw new Error(
       "Missing legacyCustomerId in setLegacyCustomerPendingMatch"
@@ -1519,7 +1522,13 @@ export async function setLegacyCustomerPendingMatch({
         "pending_confirmation",
 
       match_requested_at:
-        new Date().toISOString(),
+  new Date().toISOString(),
+
+pending_message_text:
+  pendingMessageText,
+
+pending_message_type:
+  pendingMessageType,
     })
     .eq(
       "id",
