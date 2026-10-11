@@ -1465,6 +1465,12 @@ pending_message_text:
 
 pending_message_type:
   null,
+
+pending_message_text:
+  null,
+
+pending_message_type:
+  null,
     })
     .eq(
       "id",
