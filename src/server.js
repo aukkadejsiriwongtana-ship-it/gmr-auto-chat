@@ -8980,9 +8980,24 @@ app.post("/sheet-control", async (req, res) => {
 
 
     const normalizedValue =
-      String(value || "")
-        .trim()
-        .toUpperCase();
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(
+      /[\s_-]+/g,
+      ""
+    );
+
+
+console.log(
+  "SHEET CONTROL VALUE:",
+  {
+    rawValue:
+      value,
+
+    normalizedValue,
+  }
+);
 
 
     // =====================================================
