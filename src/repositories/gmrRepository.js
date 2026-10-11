@@ -507,7 +507,53 @@ export async function getWaitingPaymentJobsByCustomerId(
   return data || [];
 }
 
+// =========================================================
+// GET OPEN EXISTING CUSTOMER BATCH
+//
+// งานของลูกค้าเก่าที่:
+// - รับ Review แล้ว
+// - Auto price แล้ว
+// - ยังไม่ได้ยืนยันเริ่มงาน
+//
+// ลูกค้า 1 คนสามารถมีหลาย Review ใน batch เดียว
+// =========================================================
 
+export async function getExistingCustomerOpenBatchJobs(
+  customerId
+) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in getExistingCustomerOpenBatchJobs"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_jobs")
+    .select("*")
+    .eq(
+      "customer_id",
+      customerId
+    )
+    .eq(
+      "status",
+      "existing_batch_draft"
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
 
 // =========================================================
 // CUSTOMER HISTORY CHECK
