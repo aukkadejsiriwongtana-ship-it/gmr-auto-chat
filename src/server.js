@@ -5338,444 +5338,130 @@ app.get("/test-sales-quote", async (req, res) => {
     }
 
 
-    const formattedAmount =
-  amount.toLocaleString(
-    customer.language === "en"
-      ? "en-US"
-      : "th-TH"
-  );
+     // =====================================================
+    // PRICE / CURRENCY
+    //
+    // IMPORTANT:
+    // amount = ราคาต่อ 1 รีวิว
+    //
+    // >= 2,500 / review → THB
+    // <  2,500 / review → USD
+    //
+    // ห้ามใช้ยอดรวมหลายรีวิวในการตัดสิน currency
+    // =====================================================
+
+    const unitPrice =
+      Number(amount);
 
 
-const salesMessage =
-  getCustomerText(
-    customer,
-    `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
-    `For this review, the price is THB ${formattedAmount} per review.`
-  );
-
-
-    // บันทึกราคาใน Job
-    await updateJob(
-      latestJob.id,
-      {
-        price: amount,
-        currency: "THB",
-        status: "waiting_confirm",
-      }
-    );
-
-
-    // สร้าง quote
-    const quote =
-      await createQuote({
-        jobId: latestJob.id,
-        amount,
-        currency: "THB",
-        quotedBy: "sales",
-        quoteMessage: salesMessage,
-        script3Sent: false,
-      });
-
-
-    // อ่าน Script 3
-    const template =
-      await getTemplate(
-        "script_3_after_quote",
-        customer.language || "th"
-      );
-
-    if (!template) {
+    if (
+      !Number.isFinite(unitPrice) ||
+      unitPrice <= 0
+    ) {
       throw new Error(
-        "script_3_after_quote template not found"
+        "Invalid unit price"
       );
     }
 
 
-    const script3 =
-      template.content;
+    const currency =
+      unitPrice >= 2500
+        ? "THB"
+        : "USD";
 
+  // =====================================================
+  // PRICE / CURRENCY
+  //
+  // amount = ราคาต่อ 1 รีวิว
+  //
+  // >= 2,500 / review → THB
+  // <  2,500 / review → USD
+  // =====================================================
 
-    // Bot reply = ราคาจาก Sales + Script 3
-    const botReply =
-      `${salesMessage}\n\n${script3}`;
-
-
-    // เปลี่ยน State
-    const nextState =
-      transitionState(
-        conversation.state,
-        GMR_STATES.WAITING_CONFIRM
-      );
-
-
-    await updateConversationState({
-      customerId: customer.id,
-      state: nextState,
-      handoff: false,
-      handoffReason: null,
-    });
-
-
-    await updateQuote(
-      quote.id,
-      {
-        script3_sent: true,
-      }
-    );
-
-
-    await saveMessage({
-      customerId: customer.id,
-      platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
-    });
-
-
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
-
-    return res.status(200).json({
-      ok: true,
-
-      customerId:
-        customer.id,
-
-      jobId:
-        latestJob.id,
-
-      quoteId:
-        quote.id,
-
-      amount,
-
-      stateBefore:
-        conversation.state,
-
-      stateAfter:
-        nextState,
-
-      botReply,
-    });
-
-  } catch (error) {
-
-    console.error(
-      "TEST SALES QUOTE ERROR:",
-      error
-    );
-
-    return res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
-  }
-});
-
-
-// =========================================================
-// START SERVER
-// =========================================================
-
-app.get("/test-google-sheet", async (req, res) => {
-  try {
-
-    const result =
-      await appendJobToGoogleSheet({
-        jobId:
-          "TEST_JOB_001",
-
-        customerId:
-          "TEST_CUSTOMER_001",
-
-        customerName:
-          "Test Customer",
-
-        platform:
-          "line",
-
-        phone:
-          "+66812345678",
-
-        businessName:
-          "Wraptor Thailand",
-
-        reviewUrl:
-          "https://www.google.com/maps/reviews/test",
-
-        price:
-          5000,
-
-        status:
-          "processing",
-
-        startedAt:
-          new Date().toISOString(),
-
-        removedAt:
-          "",
-
-        paidAt:
-          "",
-      });
-
-    res.status(200).json({
-      ok: true,
-      sheetResult: result,
-    });
-
-  } catch (error) {
-
-    console.error(
-      "TEST GOOGLE SHEET ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      ok: false,
-      error:
-        error.message,
-    });
-  }
-});
-
-async function processLineGroupPrice({
-  quotedMessageId,
-  text,
-}) {
-  if (!quotedMessageId) {
-    return {
-      ok: false,
-      handled: false,
-      reason: "NOT_A_REPLY",
-    };
-  }
-
-  // รองรับ:
-  // 5900
-  // 5,900
-  // 5900 บาท
-  // 5,900 บาท
-  const normalizedText =
-    String(text || "")
-      .trim()
-      .replace(/,/g, "");
-
-  const priceMatch =
-    normalizedText.match(
-      /^(\d+(?:\.\d{1,2})?)\s*(?:บาท|thb)?$/i
-    );
-
-  if (!priceMatch) {
-    return {
-      ok: false,
-      handled: true,
-      reason: "INVALID_PRICE",
-    };
-  }
-
-  const amount =
-    Number(priceMatch[1]);
-
-  if (
-    !Number.isFinite(amount) ||
-    amount <= 0
-  ) {
-    return {
-      ok: false,
-      handled: true,
-      reason: "INVALID_PRICE",
-    };
-  }
-
-
-  // หา Job จากข้อความที่เซลล์กด Reply
-  let job =
-  await getJobByLineGroupMessageId(
-    quotedMessageId
-  );
-
-
-console.log(
-  "PRICE JOB LOOKUP:",
-  {
-    quotedMessageId,
-
-    directJobId:
-      job?.id ||
-      null,
-
-    directStatus:
-      job?.status ||
-      null,
-  }
-);
-
-
-// ========================================
-// FALLBACK
-// LINE quotedMessageId จับคู่ไม่ได้
-// ถ้ามี waiting_price แค่งานเดียว
-// ให้ใช้งานนั้น
-// ========================================
-
-if (
-  !job ||
-  job.status !== "waiting_price"
-) {
-
-  const pendingPriceJobs =
-    await getPendingPriceJobs();
-
-
-  console.log(
-    "PRICE JOB FALLBACK:",
-    {
-      pendingCount:
-        pendingPriceJobs.length,
-
-      pendingJobIds:
-        pendingPriceJobs.map(
-          (item) =>
-            item.id
-        ),
-    }
-  );
+  const unitPrice =
+    Number(amount);
 
 
   if (
-    pendingPriceJobs.length === 1
+    !Number.isFinite(unitPrice) ||
+    unitPrice <= 0
   ) {
-
-    job =
-      pendingPriceJobs[0];
-
-
-    console.log(
-      "PRICE JOB FALLBACK MATCHED:",
-      {
-        jobId:
-          job.id,
-
-        customerId:
-          job.customer_id,
-      }
-    );
-
-  } else if (
-    pendingPriceJobs.length === 0
-  ) {
-
-    return {
-      ok: false,
-      handled: true,
-      reason:
-        "JOB_NOT_FOUND",
-    };
-
-  } else {
-
-    return {
-      ok: false,
-      handled: true,
-      reason:
-        "MULTIPLE_WAITING_PRICE_JOBS",
-    };
-  }
-}
-
-
-  if (
-    job.status !== "waiting_price"
-  ) {
-    return {
-      ok: false,
-      handled: true,
-      reason: "JOB_NOT_WAITING_PRICE",
-      jobId: job.id,
-    };
-  }
-
-
-  // หา Customer ของ Job นี้
-  const customer =
-    await getCustomerById(
-      job.customer_id
-    );
-
-  if (!customer) {
     throw new Error(
-      "Customer not found for price job"
+      "Invalid unit price"
     );
   }
 
 
-  const conversation =
-    await getConversationByCustomerId(
-      customer.id
-    );
-
-  if (!conversation) {
-    throw new Error(
-      "Conversation not found for price job"
-    );
-  }
-
-
-  if (
-    conversation.state !==
-    GMR_STATES.WAITING_PRICE
-  ) {
-    return {
-      ok: false,
-      handled: true,
-      reason: "CUSTOMER_NOT_WAITING_PRICE",
-      currentState:
-        conversation.state,
-    };
-  }
+  const currency =
+    unitPrice >= 2500
+      ? "THB"
+      : "USD";
 
 
   const formattedAmount =
-  amount.toLocaleString(
-    customer.language === "en"
-      ? "en-US"
-      : "th-TH"
-  );
+    unitPrice.toLocaleString(
+      currency === "USD"
+        ? "en-US"
+        : "th-TH"
+    );
 
 
-const salesMessage =
-  getCustomerText(
-    customer,
-    `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
-    `For this review, the price is THB ${formattedAmount} per review.`
-  );
+  const salesMessage =
+    currency === "THB"
+      ? getCustomerText(
+          customer,
 
-  // บันทึกราคา
+          `สำหรับรีวิวดังกล่าว ราคา ${formattedAmount} บาท/รีวิว`,
+
+          `For this review, the price is THB ${formattedAmount} per review.`
+        )
+      : getCustomerText(
+          customer,
+
+          `สำหรับรีวิวดังกล่าว ราคา $${formattedAmount} USD/รีวิว`,
+
+          `For this review, the price is $${formattedAmount} USD per review.`
+        );
+
+
+  // =====================================================
+  // SAVE JOB
+  // =====================================================
+
   await updateJob(
     job.id,
     {
-      price: amount,
-      currency: "THB",
-      status: "waiting_confirm",
+      price:
+        unitPrice,
+
+      currency,
+
+      status:
+        "waiting_confirm",
     }
   );
 
 
-  // สร้าง Quote
+  // =====================================================
+  // CREATE QUOTE
+  // =====================================================
+
   const quote =
     await createQuote({
-      jobId: job.id,
-      amount,
-      currency: "THB",
+      jobId:
+        job.id,
+
+      amount:
+        unitPrice,
+
+      currency,
+
       quotedBy:
         "line_group_sales",
+
       quoteMessage:
         salesMessage,
+
       script3Sent:
         false,
     });
@@ -9204,12 +8890,15 @@ app.post("/sheet-control", async (req, res) => {
       // → ส่งข้อความเก็บเงินหาลูกค้า
       // ===================================================
 
-      if (
+            if (
         normalizedValue ===
         "CONFIRM_REMOVED"
       ) {
 
-        // กันการกดยืนยันผิด Job
+        // =================================================
+        // ต้องเป็น Job ที่ Monitor ตรวจไม่เจอแล้วเท่านั้น
+        // =================================================
+
         if (
           Number(
             job.review_missing_count ||
@@ -9220,7 +8909,8 @@ app.post("/sheet-control", async (req, res) => {
           return res
             .status(400)
             .json({
-              ok: false,
+              ok:
+                false,
 
               error:
                 "This job is not awaiting removal confirmation",
@@ -9238,27 +8928,155 @@ app.post("/sheet-control", async (req, res) => {
           confirmedAt;
 
 
-        const template =
-          await getTemplate(
-            "removed_payment",
-            customer.language || "th"
+        // =================================================
+        // PAYMENT CURRENCY
+        //
+        // ใช้ currency ที่บันทึกไว้ตั้งแต่ตอน Sales ตั้งราคา
+        //
+        // รองรับ Job เก่าที่ยังไม่มี currency:
+        // ใช้ราคาต่อรีวิวตัดสินให้ชั่วคราว
+        // =================================================
+
+        const unitPrice =
+          Number(
+            job.price ||
+            0
           );
 
 
-        if (!template) {
+        const paymentCurrency =
+          String(
+            job.currency ||
+            (
+              unitPrice >= 2500
+                ? "THB"
+                : "USD"
+            )
+          )
+            .trim()
+            .toUpperCase();
+
+
+        if (
+          ![
+            "THB",
+            "USD"
+          ].includes(
+            paymentCurrency
+          )
+        ) {
+
           throw new Error(
-            "removed_payment template not found"
+            `Unsupported payment currency: ${paymentCurrency}`
           );
         }
 
 
-        const botReply =
-          template.content;
+        const formattedPrice =
+          unitPrice.toLocaleString(
+            paymentCurrency === "USD"
+              ? "en-US"
+              : "th-TH"
+          );
 
 
-        // -----------------------------------------------
-        // 1. Update Job
-        // -----------------------------------------------
+        // =================================================
+        // PAYMENT CONFIG
+        // =================================================
+
+        const thbPaymentQrUrl =
+          String(
+            process.env
+              .THB_PAYMENT_QR_URL ||
+            ""
+          ).trim();
+
+
+        const stripePaymentLink =
+          String(
+            process.env
+              .STRIPE_PAYMENT_LINK ||
+            ""
+          ).trim();
+
+
+        // =================================================
+        // PAYMENT MESSAGE
+        // =================================================
+
+        let botReply;
+
+
+        if (
+          paymentCurrency ===
+          "THB"
+        ) {
+
+          botReply =
+            getCustomerText(
+              customer,
+
+              "ดำเนินการเรียบร้อยแล้วครับ ✅\n\n" +
+              `ยอดชำระสำหรับรีวิวนี้ ${formattedPrice} บาท\n\n` +
+              "สามารถสแกน QR ด้านล่างเพื่อชำระได้เลยครับ\n\n" +
+              "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
+
+              "The review has been successfully processed. ✅\n\n" +
+              `Payment due for this review: THB ${formattedPrice}\n\n` +
+              "You can make payment using the QR code below.\n\n" +
+              "After payment, please send the payment slip in this chat."
+            );
+
+        } else {
+
+          if (
+            !stripePaymentLink
+          ) {
+
+            throw new Error(
+              "STRIPE_PAYMENT_LINK is not configured"
+            );
+          }
+
+
+          botReply =
+            getCustomerText(
+              customer,
+
+              "ดำเนินการเรียบร้อยแล้วครับ ✅\n\n" +
+              `ยอดชำระสำหรับรีวิวนี้ $${formattedPrice} USD\n\n` +
+              "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
+              `${stripePaymentLink}\n\n` +
+              "หลังชำระแล้วแจ้งกลับในแชทนี้ได้เลยครับ",
+
+              "The review has been successfully processed. ✅\n\n" +
+              `Payment due for this review: $${formattedPrice} USD\n\n` +
+              "Please complete payment using the link below:\n" +
+              `${stripePaymentLink}\n\n` +
+              "Once payment is complete, please let us know here."
+            );
+        }
+
+
+        // =================================================
+        // THB ต้องมี QR ก่อนเปลี่ยนสถานะ
+        // =================================================
+
+        if (
+          paymentCurrency ===
+            "THB" &&
+          !thbPaymentQrUrl
+        ) {
+
+          throw new Error(
+            "THB_PAYMENT_QR_URL is not configured"
+          );
+        }
+
+
+        // =================================================
+        // 1. UPDATE JOB
+        // =================================================
 
         await updateJob(
           job.id,
@@ -9274,13 +9092,16 @@ app.post("/sheet-control", async (req, res) => {
 
             review_removed_detected_at:
               removedAt,
+
+            currency:
+              paymentCurrency,
           }
         );
 
 
-        // -----------------------------------------------
-        // 2. Update Conversation
-        // -----------------------------------------------
+        // =================================================
+        // 2. UPDATE CONVERSATION
+        // =================================================
 
         await updateConversationState({
           customerId:
@@ -9298,9 +9119,9 @@ app.post("/sheet-control", async (req, res) => {
         });
 
 
-        // -----------------------------------------------
-        // 3. Update Google Sheet
-        // -----------------------------------------------
+        // =================================================
+        // 3. UPDATE GOOGLE SHEET
+        // =================================================
 
         try {
 
@@ -9317,6 +9138,7 @@ app.post("/sheet-control", async (req, res) => {
               "",
           });
 
+
         } catch (error) {
 
           console.error(
@@ -9332,9 +9154,9 @@ app.post("/sheet-control", async (req, res) => {
         }
 
 
-        // -----------------------------------------------
-        // 4. Notify Customer
-        // -----------------------------------------------
+        // =================================================
+        // 4. SEND PAYMENT TEXT
+        // =================================================
 
         await sendMessageToCustomer({
           platform:
@@ -9348,9 +9170,33 @@ app.post("/sheet-control", async (req, res) => {
         });
 
 
-        // -----------------------------------------------
-        // 5. Save outbound message
-        // -----------------------------------------------
+        // =================================================
+        // 5. THB → SEND QR IMAGE
+        //
+        // sendMessageToCustomer รองรับ imageUrl อยู่แล้ว
+        // =================================================
+
+        if (
+          paymentCurrency ===
+          "THB"
+        ) {
+
+          await sendMessageToCustomer({
+            platform:
+              customer.platform,
+
+            platformUserId:
+              customer.platform_user_id,
+
+            imageUrl:
+              thbPaymentQrUrl,
+          });
+        }
+
+
+        // =================================================
+        // 6. SAVE OUTBOUND TEXT
+        // =================================================
 
         await saveMessage({
           customerId:
@@ -9385,7 +9231,17 @@ app.post("/sheet-control", async (req, res) => {
             customerId:
               customer.id,
 
+            unitPrice,
+
+            paymentCurrency,
+
             removedAt,
+
+            paymentMethod:
+              paymentCurrency ===
+                "THB"
+                ? "QR"
+                : "STRIPE",
           }
         );
 
@@ -9410,6 +9266,17 @@ app.post("/sheet-control", async (req, res) => {
 
             status:
               "waiting_payment",
+
+            unitPrice,
+
+            currency:
+              paymentCurrency,
+
+            paymentMethod:
+              paymentCurrency ===
+                "THB"
+                ? "QR"
+                : "STRIPE",
 
             removedAt,
 
