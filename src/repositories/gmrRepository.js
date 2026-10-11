@@ -428,6 +428,7 @@ export async function createJob({
   reviewVisible = null,
   reviewHasText = null,
   status = "draft",
+  legacySourceId = null,
 }) {
   const { data, error } = await supabase
     .from("gmr_jobs")
@@ -440,7 +441,8 @@ export async function createJob({
       review_case: reviewCase,
       review_visible: reviewVisible,
       review_has_text: reviewHasText,
-      status,
+status,
+legacy_source_id: legacySourceId,
     })
     .select()
     .single();
@@ -452,6 +454,45 @@ export async function createJob({
   return data;
 }
 
+export async function getLegacyImportedJob({
+  legacySourceId,
+  reviewCase,
+}) {
+  if (!legacySourceId) {
+    throw new Error(
+      "Missing legacySourceId in getLegacyImportedJob"
+    );
+  }
+
+  if (!reviewCase) {
+    throw new Error(
+      "Missing reviewCase in getLegacyImportedJob"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_jobs")
+    .select("*")
+    .eq(
+      "legacy_source_id",
+      legacySourceId
+    )
+    .eq(
+      "review_case",
+      reviewCase
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 
 export async function getLatestJobByCustomerId(
   customerId
