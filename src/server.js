@@ -1075,6 +1075,597 @@ async function sendCreditApprovalRequestToLineGroup({
   };
 }
 
+// =========================================================
+// EXISTING CUSTOMER BATCH CREDIT APPROVAL
+//
+// ลูกค้าเก่า:
+// - ไม่ถามเบอร์โทร
+// - อนุมัติทั้ง Batch
+// - LINE messageId ผูกกับ Anchor Job เพียง Job เดียว
+// =========================================================
+
+async function sendExistingCustomerBatchCreditApprovalToLineGroup({
+  customer,
+  jobs,
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+
+  if (!token || !groupId) {
+    throw new Error(
+      "Missing LINE config for existing customer batch credit approval"
+    );
+  }
+
+
+  if (
+    !Array.isArray(jobs) ||
+    jobs.length === 0
+  ) {
+    throw new Error(
+      "No jobs supplied for existing customer batch credit approval"
+    );
+  }
+
+
+  // ========================================
+  // รวมรายการตาม Currency + Unit Price
+  //
+  // เช่น
+  // 5,500 THB × 3
+  // 9,900 THB × 1
+  // 199 USD × 2
+  // ========================================
+
+  const grouped =
+    new Map();
+
+
+  for (const job of jobs) {
+    const price =
+      Number(
+        job.price || 0
+      );
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      continue;
+    }
+
+
+    const currency =
+      getCurrencyFromUnitPrice({
+        price,
+
+        currency:
+          job.currency,
+      });
+
+
+    const key =
+      `${currency}:${price}`;
+
+
+    if (!grouped.has(key)) {
+      grouped.set(
+        key,
+        {
+          currency,
+          price,
+          count: 0,
+        }
+      );
+    }
+
+
+    grouped.get(key).count += 1;
+  }
+
+
+  const groups =
+    Array.from(
+      grouped.values()
+    );
+
+
+  const detailLines =
+    groups.map(
+      ({
+        currency,
+        price,
+        count,
+      }) => {
+
+        const formattedPrice =
+          formatMoney(
+            price,
+            currency
+          );
+
+
+        const lineTotal =
+          formatMoney(
+            price * count,
+            currency
+          );
+
+
+        if (currency === "THB") {
+          return (
+            `• ${formattedPrice} บาท/รีวิว` +
+            ` × ${count}` +
+            ` = ${lineTotal} บาท`
+          );
+        }
+
+
+        return (
+          `• $${formattedPrice} USD/review` +
+          ` × ${count}` +
+          ` = $${lineTotal} USD`
+        );
+      }
+    );
+
+
+  // ========================================
+  // Total THB
+  // ========================================
+
+  const totalTHB =
+    jobs.reduce(
+      (
+        total,
+        job
+      ) => {
+
+        const price =
+          Number(
+            job.price || 0
+          );
+
+
+        const currency =
+          getCurrencyFromUnitPrice({
+            price,
+
+            currency:
+              job.currency,
+          });
+
+
+        if (
+          currency !== "THB" ||
+          !Number.isFinite(price)
+        ) {
+          return total;
+        }
+
+
+        return total + price;
+      },
+      0
+    );
+
+
+  // ========================================
+  // Total USD
+  // ========================================
+
+  const totalUSD =
+    jobs.reduce(
+      (
+        total,
+        job
+      ) => {
+
+        const price =
+          Number(
+            job.price || 0
+          );
+
+
+        const currency =
+          getCurrencyFromUnitPrice({
+            price,
+
+            currency:
+              job.currency,
+          });
+
+
+        if (
+          currency !== "USD" ||
+          !Number.isFinite(price)
+        ) {
+          return total;
+        }
+
+
+        return total + price;
+      },
+      0
+    );
+
+
+  const totalLines = [];
+
+
+  if (totalTHB > 0) {
+    totalLines.push(
+      `รวม THB: ${formatMoney(
+        totalTHB,
+        "THB"
+      )} บาท`
+    );
+  }
+
+
+  if (totalUSD > 0) {
+    totalLines.push(
+      `รวม USD: $${formatMoney(
+        totalUSD,
+        "USD"
+      )} USD`
+    );
+  }
+
+
+  const text = [
+    "⚠️ ขออนุมัติเครดิตลูกค้าเก่า",
+    "",
+    `ลูกค้า: ${
+      customer.display_name ||
+      "ไม่ทราบชื่อ"
+    }`,
+    `Platform: ${
+      String(
+        customer.platform ||
+        "line"
+      ).toUpperCase()
+    }`,
+    "",
+    `จำนวนรีวิวในชุด: ${jobs.length} รีวิว`,
+    "",
+    "รายละเอียดราคา:",
+    ...detailLines,
+    "",
+    ...totalLines,
+    "",
+    "ลูกค้ารายนี้มีประวัติชำระเงินกับระบบแล้ว",
+    "แต่ช่วงเริ่มต้นของระบบยังต้องขออนุมัติเครดิตก่อนเริ่มงาน",
+    "",
+    "Reply ข้อความนี้:",
+    "✅ อนุมัติ",
+    "❌ ไม่อนุมัติ",
+  ].join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw new Error(
+      `EXISTING BATCH CREDIT APPROVAL LINE PUSH FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+
+  let responseData = {};
+
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(
+          responseText
+        );
+
+    } catch {
+      responseData = {};
+    }
+  }
+
+
+  const messageId =
+    responseData
+      ?.sentMessages
+      ?.[0]
+      ?.id ||
+    null;
+
+
+  if (!messageId) {
+    throw new Error(
+      "Existing customer batch credit approval LINE messageId missing"
+    );
+  }
+
+
+  return {
+    messageId,
+    text,
+  };
+}
+
+// =========================================================
+// START APPROVED EXISTING CUSTOMER BATCH
+//
+// ใช้หลังทีมอนุมัติเครดิตลูกค้าเก่า
+// - เริ่มทุก Job ใน Batch
+// - ลง Google Sheet ทุก Job
+// - เปลี่ยน Conversation ครั้งเดียว
+// - ส่งข้อความลูกค้าเพียงครั้งเดียว
+// =========================================================
+
+async function startApprovedExistingCustomerBatch({
+  customer,
+  conversation,
+  jobs,
+}) {
+  if (
+    !Array.isArray(jobs) ||
+    jobs.length === 0
+  ) {
+    throw new Error(
+      "No jobs supplied to startApprovedExistingCustomerBatch"
+    );
+  }
+
+
+  // ========================================
+  // Safety Check ก่อนเริ่ม
+  // ========================================
+
+  const invalidJobs =
+    jobs.filter(
+      (job) => {
+        const price =
+          Number(
+            job.price || 0
+          );
+
+        return (
+          job.status !==
+            "waiting_credit_approval" ||
+          !job.review_url ||
+          !Number.isFinite(price) ||
+          price <= 0
+        );
+      }
+    );
+
+
+  if (invalidJobs.length > 0) {
+    throw new Error(
+      `Invalid jobs in existing batch: ${
+        invalidJobs
+          .map(
+            (job) =>
+              job.id
+          )
+          .join(", ")
+      }`
+    );
+  }
+
+
+  const startedAt =
+    new Date().toISOString();
+
+
+  const startedJobs = [];
+
+
+  // ========================================
+  // 1. เปลี่ยนทุก Job → processing
+  // ========================================
+
+  for (const job of jobs) {
+    const updatedJob =
+      await updateJob(
+        job.id,
+        {
+          status:
+            "processing",
+
+          started_at:
+            startedAt,
+        }
+      );
+
+
+    startedJobs.push(
+      updatedJob
+    );
+  }
+
+
+  // ========================================
+  // 2. Conversation → IN_PROGRESS
+  // ทำครั้งเดียว
+  // ========================================
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.IN_PROGRESS,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  // ========================================
+  // 3. ลง Google Sheet ทุก Job
+  //
+  // Sheet fail ไม่ทำให้งานในระบบย้อนกลับ
+  // เหมือน behavior ของ startApprovedJob เดิม
+  // ========================================
+
+  for (
+    const updatedJob of
+      startedJobs
+  ) {
+
+    try {
+      await appendJobToGoogleSheet({
+        jobId:
+          updatedJob.id,
+
+        customerId:
+          customer.id,
+
+        customerName:
+          customer.display_name ||
+          "",
+
+        platform:
+          customer.platform ||
+          "line",
+
+        phone:
+          customer.phone ||
+          "",
+
+        businessName:
+          updatedJob.business_name ||
+          "",
+
+        reviewUrl:
+          updatedJob.review_url ||
+          "",
+
+        price:
+          updatedJob.price ||
+          "",
+
+        status:
+          updatedJob.status ||
+          "processing",
+
+        startedAt,
+
+        removedAt:
+          "",
+
+        paidAt:
+          "",
+      });
+
+    } catch (error) {
+      console.error(
+        "EXISTING BATCH GOOGLE SHEET FAILED:",
+        {
+          jobId:
+            updatedJob.id,
+
+          error:
+            error.message,
+        }
+      );
+    }
+  }
+
+
+  // ========================================
+  // 4. แจ้งลูกค้าเพียง 1 ข้อความ
+  // ========================================
+
+  const botReply =
+    getCustomerText(
+      customer,
+
+      `เริ่มดำเนินการเรียบร้อยแล้วครับ ✅
+
+จำนวนทั้งหมด ${startedJobs.length} รีวิว
+
+ทางเราจะดำเนินการตามรายการที่ยืนยันไว้ และแจ้งให้ทราบเมื่อมีผลสำเร็จครับ`,
+
+      `Your batch has now been started. ✅
+
+Total: ${startedJobs.length} review(s)
+
+We'll proceed with the confirmed reviews and notify you as results become available.`
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      customer.platform ||
+      "line",
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    startedJobs,
+    startedAt,
+    botReply,
+  };
+}
 
 async function startApprovedJob({
   customer,
@@ -2140,10 +2731,460 @@ if (
     GMR_STATES.WAITING_MAP
   ) {
 
+// =========================================================
+// EXISTING CUSTOMER
+// CONFIRM ALL BATCH
+// =========================================================
+
+const confirmAllWords = [
+  "ยืนยันทั้งหมด",
+  "ยืนยันทั้งหมดครับ",
+  "ยืนยันทั้งหมดค่ะ",
+
+  "ยืนยันรายการทั้งหมด",
+  "ตกลงทั้งหมด",
+
+  "confirm all",
+  "confirm all reviews",
+  "confirm batch",
+];
+
+
+const isConfirmAll =
+  confirmAllWords.includes(
+    normalizedMessage
+  );
+
+
+if (
+  isExistingCustomer &&
+  isConfirmAll
+) {
+
+  // ========================================
+  // 1. ดึงเฉพาะงานที่ Evidence ผ่านแล้ว
+  // ========================================
+
+  const batchJobs =
+    await getExistingCustomerOpenBatchJobs(
+      customer.id
+    );
+
+
+  // ========================================
+  // ไม่มีงานใน Batch
+  // ========================================
+
+  if (batchJobs.length === 0) {
+
+    const botReply =
+      getCustomerText(
+        customer,
+
+        "ยังไม่มีรีวิวที่พร้อมยืนยันในรายการครับ รบกวนส่งลิงก์รีวิวที่ต้องการดำเนินการมาก่อนได้เลยครับ",
+
+        "There are no reviews ready to confirm yet. Please send the review link(s) you would like us to process first."
+      );
+
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    return {
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      existingCustomerBatch:
+        true,
+
+      batchConfirmed:
+        false,
+
+      batchSize:
+        0,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        conversation.state,
+
+      botReply,
+    };
+  }
+
+
+  // ========================================
+  // 2. Safety Check
+  // ทุก Job ต้องมีราคา + Review URL
+  // ========================================
+
+  const invalidJobs =
+    batchJobs.filter(
+      (job) => {
+
+        const price =
+          Number(
+            job.price || 0
+          );
+
+        return (
+          !Number.isFinite(price) ||
+          price <= 0 ||
+          !job.review_url
+        );
+      }
+    );
+
+
+  if (invalidJobs.length > 0) {
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        "ลูกค้ากดยืนยัน Existing Customer Batch",
+
+      reason:
+        "EXISTING_BATCH_INVALID_JOB_DATA",
+    });
+
+
+    return {
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      existingCustomerBatch:
+        true,
+
+      batchConfirmed:
+        false,
+
+      batchSize:
+        batchJobs.length,
+
+      invalidJobIds:
+        invalidJobs.map(
+          (job) =>
+            job.id
+        ),
+
+      botReply:
+        null,
+
+      softHandoff:
+        true,
+    };
+  }
+
+
+  // ========================================
+  // 3. เปลี่ยนทุก Job
+  // existing_batch_draft
+  // → waiting_credit_approval
+  // ========================================
+
+  for (
+    const job of
+      batchJobs
+  ) {
+
+    await updateJob(
+      job.id,
+      {
+        status:
+          "waiting_credit_approval",
+      }
+    );
+  }
+
+
+  let creditRequest;
+
+
+  // ========================================
+  // 4. ส่ง Batch เข้า LINE Group
+  //
+  // ถ้าส่งไม่สำเร็จ
+  // rollback กลับ Draft ทุก Job
+  // ========================================
+
+  try {
+
+    creditRequest =
+      await sendExistingCustomerBatchCreditApprovalToLineGroup({
+        customer,
+
+        jobs:
+          batchJobs,
+      });
+
+  } catch (error) {
+
+    console.error(
+      "EXISTING CUSTOMER BATCH CREDIT REQUEST FAILED:",
+      error
+    );
+
+
+    for (
+      const job of
+        batchJobs
+    ) {
+
+      try {
+        await updateJob(
+          job.id,
+          {
+            status:
+              "existing_batch_draft",
+          }
+        );
+
+      } catch (
+        rollbackError
+      ) {
+
+        console.error(
+          "EXISTING BATCH ROLLBACK FAILED:",
+          {
+            jobId:
+              job.id,
+
+            error:
+              rollbackError.message,
+          }
+        );
+      }
+    }
+
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        "ลูกค้ากดยืนยัน Existing Customer Batch",
+
+      reason:
+        "EXISTING_BATCH_CREDIT_REQUEST_FAILED",
+    });
+
+
+    const botReply =
+      getCustomerText(
+        customer,
+
+        "ระบบยังยืนยันรายการไม่สำเร็จครับ กรุณารอสักครู่แล้วพิมพ์ “ยืนยันทั้งหมด” อีกครั้งได้เลยครับ",
+
+        'The batch could not be confirmed yet. Please wait a moment and reply "Confirm all" again.'
+      );
+
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+
+    return {
+      ok: true,
+
+      customerId:
+        customer.id,
+
+      existingCustomerBatch:
+        true,
+
+      batchConfirmed:
+        false,
+
+      creditRequestFailed:
+        true,
+
+      stateBefore:
+        conversation.state,
+
+      stateAfter:
+        conversation.state,
+
+      botReply,
+    };
+  }
+
+
+  // ========================================
+  // 5. ใช้ Job แรกเป็น Anchor
+  //
+  // สำคัญ:
+  // LINE messageId ห้ามใส่ทุก Job
+  // เพราะ getJobByLineGroupMessageId()
+  // ต้องเจอเพียง Job เดียว
+  // ========================================
+
+  const anchorJob =
+    batchJobs[0];
+
+
+  await updateJob(
+    anchorJob.id,
+    {
+      line_group_message_id:
+        creditRequest.messageId,
+    }
+  );
+
+
+  // ========================================
+  // 6. Conversation → HANDOFF
+  // รอทีมอนุมัติเครดิต
+  // ========================================
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.HANDOFF,
+
+    handoff:
+      true,
+
+    handoffReason:
+      "EXISTING_BATCH_CREDIT_APPROVAL_PENDING",
+  });
+
+
+  // ========================================
+  // 7. แจ้งลูกค้า
+  // ไม่ขอเบอร์โทร
+  // ========================================
+
+  const botReply =
+    getCustomerText(
+      customer,
+
+      `ยืนยันรายการเรียบร้อยครับ ✅
+
+จำนวนทั้งหมด ${batchJobs.length} รีวิว
+
+ขณะนี้กำลังตรวจสอบข้อมูลก่อนเริ่มดำเนินการครับ`,
+
+      `Your batch has been confirmed. ✅
+
+Total: ${batchJobs.length} review(s)
+
+We're completing a quick verification before starting the service.`
+    );
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    customerType:
+      "EXISTING_CUSTOMER",
+
+    existingCustomerBatch:
+      true,
+
+    batchConfirmed:
+      true,
+
+    batchSize:
+      batchJobs.length,
+
+    anchorJobId:
+      anchorJob.id,
+
+    creditApprovalPending:
+      true,
+
+    lineGroupMessageId:
+      creditRequest.messageId,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      GMR_STATES.HANDOFF,
+
+    botReply,
+  };
+}
+    
 const detectedMapUrl =
   extractGoogleMapsUrl(
     message
   );
+    
 
 const classification =
   detectedMapUrl
@@ -7265,7 +8306,167 @@ if (
     continue;
   }
 
+// =========================================================
+// EXISTING CUSTOMER BATCH CREDIT APPROVAL
+//
+// ถ้าเป็น Batch ลูกค้าเก่า
+// ให้จัดการทั้งชุดตรงนี้แล้ว continue
+// ไม่ปล่อยลง Credit Flow แบบ Job เดียวด้านล่าง
+// =========================================================
 
+const isExistingBatchCredit =
+  creditConversation
+    .handoff_reason ===
+  "EXISTING_BATCH_CREDIT_APPROVAL_PENDING";
+
+
+if (isExistingBatchCredit) {
+
+  const batchCreditJobs =
+    await getWaitingCreditApprovalJobsByCustomerId(
+      creditCustomer.id
+    );
+
+
+  // ========================================
+  // Safety
+  // ========================================
+
+  if (
+    batchCreditJobs.length === 0
+  ) {
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "⚠️ ไม่พบงานใน Batch ที่กำลังรออนุมัติเครดิตครับ"
+    );
+
+    continue;
+  }
+
+
+  // ========================================
+  // ไม่อนุมัติ → Reject ทั้ง Batch
+  // ========================================
+
+  if (
+    normalizedGroupText ===
+      "ไม่อนุมัติ"
+  ) {
+
+    for (
+      const job of
+        batchCreditJobs
+    ) {
+
+      await updateJob(
+        job.id,
+        {
+          status:
+            "credit_rejected",
+        }
+      );
+    }
+
+
+    await updateConversationState({
+      customerId:
+        creditCustomer.id,
+
+      state:
+        GMR_STATES.HANDOFF,
+
+      handoff:
+        true,
+
+      handoffReason:
+        "EXISTING_BATCH_CREDIT_REJECTED",
+    });
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+
+      `❌ ไม่อนุมัติเครดิต Batch นี้ครับ\nจำนวน ${batchCreditJobs.length} รีวิว\nยังไม่มีงานใดถูกเริ่ม`
+    );
+
+
+    continue;
+  }
+
+
+  // ========================================
+  // อนุมัติ → เริ่มทั้ง Batch
+  // ========================================
+
+  try {
+
+    const batchStartResult =
+      await startApprovedExistingCustomerBatch({
+        customer:
+          creditCustomer,
+
+        conversation:
+          creditConversation,
+
+        jobs:
+          batchCreditJobs,
+      });
+
+
+    // แจ้งลูกค้าเพียงครั้งเดียว
+    await sendMessageToCustomer({
+      platform:
+        creditCustomer.platform ||
+        "line",
+
+      platformUserId:
+        creditCustomer
+          .platform_user_id,
+
+      text:
+        batchStartResult.botReply,
+    });
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+
+      `✅ อนุมัติเครดิตแล้ว\nเริ่มงานทั้งหมด ${batchStartResult.startedJobs.length} รีวิว และส่งเข้า Google Sheet เรียบร้อยครับ`
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      "START EXISTING CUSTOMER BATCH FAILED:",
+      {
+        customerId:
+          creditCustomer.id,
+
+        jobIds:
+          batchCreditJobs.map(
+            (job) =>
+              job.id
+          ),
+
+        error:
+          error.message,
+      }
+    );
+
+
+    await replyLineTextMessage(
+      event.replyToken,
+
+      "❌ เริ่ม Existing Customer Batch ไม่สำเร็จ ระบบยังต้องตรวจสอบก่อน กรุณาอย่ากดอนุมัติซ้ำจนกว่าจะตรวจสอบสถานะงานครับ"
+    );
+  }
+
+
+  continue;
+}
+  
   // ========================================
   // ไม่อนุมัติ
   // ========================================
