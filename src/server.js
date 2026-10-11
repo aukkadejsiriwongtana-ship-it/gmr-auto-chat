@@ -8895,13 +8895,18 @@ app.get("/test-google-sheet-update", async (req, res) => {
 
 // =========================================================
 // GOOGLE SHEET CONTROL
-// M = Bot Control: AUTO / HANDOFF
-// N = Manual Action: MARK_PAID
+//
+// M = Bot Control
+//     AUTO / HANDOFF
+//
+// N = Manual Action
+//     CONFIRM_REMOVED
+//     REVIEW_STILL_VISIBLE
+//     MARK_PAID
 // =========================================================
 
 app.post("/sheet-control", async (req, res) => {
   try {
-
     const {
       secret,
       jobId,
@@ -8910,10 +8915,9 @@ app.post("/sheet-control", async (req, res) => {
     } = req.body || {};
 
 
-    // -----------------------------------------------------
+    // =====================================================
     // AUTH
-    // ใช้ secret เดียวกับ Google Apps Script
-    // -----------------------------------------------------
+    // =====================================================
 
     const SHEET_CONTROL_SECRET =
       process.env.SHEET_CONTROL_SECRET;
@@ -8981,29 +8985,29 @@ app.post("/sheet-control", async (req, res) => {
 
 
     const normalizedValue =
-  String(value || "")
-    .trim()
-    .toUpperCase();
+      String(value || "")
+        .trim()
+        .toUpperCase();
 
 
-const compactValue =
-  normalizedValue.replace(
-    /[\s_-]+/g,
-    ""
-  );
+    const compactValue =
+      normalizedValue.replace(
+        /[\s_-]+/g,
+        ""
+      );
 
 
-console.log(
-  "SHEET CONTROL VALUE:",
-  {
-    rawValue:
-      value,
+    console.log(
+      "SHEET CONTROL VALUE:",
+      {
+        rawValue:
+          value,
 
-    normalizedValue,
+        normalizedValue,
 
-    compactValue,
-  }
-);
+        compactValue,
+      }
+    );
 
 
     // =====================================================
@@ -9019,9 +9023,10 @@ console.log(
       // ---------------------------------------------------
 
       if (
-  compactValue ===
-    "HANDOFF"
-) {
+        compactValue ===
+        "HANDOFF"
+      ) {
+
         await updateConversationState({
           customerId:
             customer.id,
@@ -9054,12 +9059,16 @@ console.log(
 
         return res.status(200).json({
           ok: true,
+
           action:
             "bot_control",
+
           value:
             "HANDOFF",
+
           customerId:
             customer.id,
+
           jobId:
             job.id,
         });
@@ -9071,9 +9080,9 @@ console.log(
       // ---------------------------------------------------
 
       if (
-  compactValue ===
-    "AUTO"
-) {
+        compactValue ===
+        "AUTO"
+      ) {
 
         let resumeState =
           GMR_STATES.WAITING_MAP;
@@ -9111,6 +9120,7 @@ console.log(
             previousState !==
               GMR_STATES.HANDOFF
           ) {
+
             resumeState =
               previousState;
           }
@@ -9148,14 +9158,19 @@ console.log(
 
         return res.status(200).json({
           ok: true,
+
           action:
             "bot_control",
+
           value:
             "AUTO",
+
           customerId:
             customer.id,
+
           jobId:
             job.id,
+
           resumeState,
         });
       }
@@ -9177,9 +9192,337 @@ console.log(
       action === "manual_action"
     ) {
 
-      // ---------------------------------------------------
+      // ===================================================
+      // CONFIRM REMOVED
+      //
+      // พนักงานตรวจ Google แล้ว:
+      // Review หายจริง
+      //
+      // → waiting_payment
+      // → Conversation = REMOVED_WAITING_PAYMENT
+      // → Update Google Sheet
+      // → ส่งข้อความเก็บเงินหาลูกค้า
+      // ===================================================
+
+      if (
+        normalizedValue ===
+        "CONFIRM_REMOVED"
+      ) {
+
+        // กันการกดยืนยันผิด Job
+        if (
+          Number(
+            job.review_missing_count ||
+            0
+          ) < 1
+        ) {
+
+          return res
+            .status(400)
+            .json({
+              ok: false,
+
+              error:
+                "This job is not awaiting removal confirmation",
+            });
+        }
+
+
+        const confirmedAt =
+          new Date()
+            .toISOString();
+
+
+        const removedAt =
+          job.review_removed_detected_at ||
+          confirmedAt;
+
+
+        const template =
+          await getTemplate(
+            "removed_payment",
+            customer.language || "th"
+          );
+
+
+        if (!template) {
+          throw new Error(
+            "removed_payment template not found"
+          );
+        }
+
+
+        const botReply =
+          template.content;
+
+
+        // -----------------------------------------------
+        // 1. Update Job
+        // -----------------------------------------------
+
+        await updateJob(
+          job.id,
+          {
+            status:
+              "waiting_payment",
+
+            removed_at:
+              removedAt,
+
+            review_missing_count:
+              1,
+
+            review_removed_detected_at:
+              removedAt,
+          }
+        );
+
+
+        // -----------------------------------------------
+        // 2. Update Conversation
+        // -----------------------------------------------
+
+        await updateConversationState({
+          customerId:
+            customer.id,
+
+          state:
+            GMR_STATES
+              .REMOVED_WAITING_PAYMENT,
+
+          handoff:
+            false,
+
+          handoffReason:
+            null,
+        });
+
+
+        // -----------------------------------------------
+        // 3. Update Google Sheet
+        // -----------------------------------------------
+
+        try {
+
+          await updateJobInGoogleSheet({
+            jobId:
+              job.id,
+
+            status:
+              "waiting_payment",
+
+            removedAt,
+
+            paidAt:
+              "",
+          });
+
+        } catch (error) {
+
+          console.error(
+            "CONFIRM REMOVED SHEET UPDATE FAILED:",
+            {
+              jobId:
+                job.id,
+
+              error:
+                error.message,
+            }
+          );
+        }
+
+
+        // -----------------------------------------------
+        // 4. Notify Customer
+        // -----------------------------------------------
+
+        await sendMessageToCustomer({
+          platform:
+            customer.platform,
+
+          platformUserId:
+            customer.platform_user_id,
+
+          text:
+            botReply,
+        });
+
+
+        // -----------------------------------------------
+        // 5. Save outbound message
+        // -----------------------------------------------
+
+        await saveMessage({
+          customerId:
+            customer.id,
+
+          platform:
+            customer.platform,
+
+          direction:
+            "outbound",
+
+          messageType:
+            "text",
+
+          messageText:
+            botReply,
+        });
+
+
+        await updateLastBotMessage(
+          customer.id,
+          botReply
+        );
+
+
+        console.log(
+          "SHEET CONFIRM REMOVED:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              customer.id,
+
+            removedAt,
+          }
+        );
+
+
+        return res
+          .status(200)
+          .json({
+            ok:
+              true,
+
+            action:
+              "manual_action",
+
+            value:
+              "CONFIRM_REMOVED",
+
+            customerId:
+              customer.id,
+
+            jobId:
+              job.id,
+
+            status:
+              "waiting_payment",
+
+            removedAt,
+
+            customerNotified:
+              true,
+          });
+      }
+
+
+      // ===================================================
+      // REVIEW STILL VISIBLE
+      //
+      // พนักงานเปิด Google แล้ว:
+      // Review ยังอยู่
+      //
+      // → Reset detection
+      // → processing
+      // → Monitor ตรวจต่อในรอบถัดไป
+      // ===================================================
+
+      if (
+        normalizedValue ===
+        "REVIEW_STILL_VISIBLE"
+      ) {
+
+        await updateJob(
+          job.id,
+          {
+            status:
+              "processing",
+
+            review_missing_count:
+              0,
+
+            review_removed_detected_at:
+              null,
+
+            removed_at:
+              null,
+          }
+        );
+
+
+        try {
+
+          await updateJobInGoogleSheet({
+            jobId:
+              job.id,
+
+            status:
+              "processing",
+
+            removedAt:
+              "",
+
+            paidAt:
+              "",
+          });
+
+        } catch (error) {
+
+          console.error(
+            "REVIEW STILL VISIBLE SHEET UPDATE FAILED:",
+            {
+              jobId:
+                job.id,
+
+              error:
+                error.message,
+            }
+          );
+        }
+
+
+        console.log(
+          "SHEET REVIEW STILL VISIBLE:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              customer.id,
+          }
+        );
+
+
+        return res
+          .status(200)
+          .json({
+            ok:
+              true,
+
+            action:
+              "manual_action",
+
+            value:
+              "REVIEW_STILL_VISIBLE",
+
+            customerId:
+              customer.id,
+
+            jobId:
+              job.id,
+
+            status:
+              "processing",
+          });
+      }
+
+
+      // ===================================================
       // MARK PAID
-      // ---------------------------------------------------
+      // ===================================================
 
       if (
         normalizedValue ===
@@ -9187,7 +9530,8 @@ console.log(
       ) {
 
         const paidAt =
-          new Date().toISOString();
+          new Date()
+            .toISOString();
 
 
         await updateJob(
@@ -9207,7 +9551,8 @@ console.log(
             customer.id,
 
           state:
-            GMR_STATES.WAITING_MAP,
+            GMR_STATES
+              .WAITING_MAP,
 
           handoff:
             false,
@@ -9233,7 +9578,13 @@ console.log(
 
           console.error(
             "SHEET MANUAL PAID GOOGLE SHEET UPDATE FAILED:",
-            error
+            {
+              jobId:
+                job.id,
+
+              error:
+                error.message,
+            }
           );
         }
 
@@ -9252,23 +9603,32 @@ console.log(
         );
 
 
-        return res.status(200).json({
-          ok: true,
-          action:
-            "manual_action",
-          value:
-            "MARK_PAID",
-          customerId:
-            customer.id,
-          jobId:
-            job.id,
-          paidAt,
-        });
+        return res
+          .status(200)
+          .json({
+            ok:
+              true,
+
+            action:
+              "manual_action",
+
+            value:
+              "MARK_PAID",
+
+            customerId:
+              customer.id,
+
+            jobId:
+              job.id,
+
+            paidAt,
+          });
       }
 
 
       return res.status(400).json({
         ok: false,
+
         error:
           "Invalid manual_action value",
       });
@@ -9277,9 +9637,11 @@ console.log(
 
     return res.status(400).json({
       ok: false,
+
       error:
         "Invalid action",
     });
+
 
   } catch (error) {
 
@@ -9289,11 +9651,14 @@ console.log(
     );
 
 
-    return res.status(500).json({
-      ok: false,
-      error:
-        error.message,
-    });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+
+        error:
+          error.message,
+      });
   }
 });
 
@@ -9390,20 +9755,46 @@ app.get(
 
 // =========================================================
 // AUTO REVIEW REMOVAL MONITOR
-// ตรวจเฉพาะงาน status = processing
 //
-// Logic:
-// เจอ Review   -> คง processing
-// หาไม่เจอ     -> waiting_payment + แจ้งทีมทันที
+// VERSION:
+// HUMAN_CONFIRM_V3_20261011
 //
-// หมายเหตุ:
-// Network / Google / Provider error
-// จะไม่ถือว่า Review ถูกลบ
+// Flow:
+//
+// processing
+//     ↓
+// ตรวจ Review URL
+//
+// ยังพบ Review
+// → processing ต่อ
+//
+// หา Review ไม่เจอ
+// → review_missing_count = 1
+// → status ยัง processing
+// → แจ้ง LINE Group
+// → หยุดตรวจ Job นี้ซ้ำ
+// → รอ Human Confirm
+//
+// CONFIRM_REMOVED
+// → waiting_payment
+// → แจ้งลูกค้าเก็บเงิน
+//
+// REVIEW_STILL_VISIBLE
+// → reset missing_count
+// → processing
+// → กลับเข้า monitor
+//
+// Provider / Network Error
+// → CHECK_ERROR
+// → ไม่ถือว่า Review ถูกลบ
 // =========================================================
 
 app.post(
   "/check-processing-reviews",
   async (req, res) => {
+
+    const monitorVersion =
+      "HUMAN_CONFIRM_V3_20261011";
 
     try {
 
@@ -9414,17 +9805,18 @@ app.post(
 
 
       if (
-        !process.env
-          .REVIEW_MONITOR_SECRET ||
+        !process.env.REVIEW_MONITOR_SECRET ||
         monitorSecret !==
-          process.env
-            .REVIEW_MONITOR_SECRET
+          process.env.REVIEW_MONITOR_SECRET
       ) {
 
         return res
           .status(401)
           .json({
             ok: false,
+
+            monitorVersion,
+
             error:
               "Unauthorized",
           });
@@ -9441,6 +9833,8 @@ app.post(
       console.log(
         "REVIEW MONITOR START:",
         {
+          monitorVersion,
+
           jobCount:
             jobs.length,
         }
@@ -9458,7 +9852,48 @@ app.post(
           ).trim();
 
 
+        // ========================================
+        // ไม่มี Review URL
+        // ========================================
+
         if (!reviewUrl) {
+
+          results.push({
+            jobId:
+              job.id,
+
+            result:
+              "SKIPPED_NO_REVIEW_URL",
+          });
+
+
+          continue;
+        }
+
+
+        // ========================================
+        // เคยตรวจไม่เจอแล้ว
+        //
+        // ตอนนี้รอคนตรวจเอง
+        // ห้ามยิง Provider ซ้ำ
+        // ========================================
+
+        if (
+          Number(
+            job.review_missing_count ||
+            0
+          ) >= 1
+        ) {
+
+          results.push({
+            jobId:
+              job.id,
+
+            result:
+              "AWAITING_HUMAN_CONFIRM",
+          });
+
+
           continue;
         }
 
@@ -9497,6 +9932,8 @@ app.post(
           console.log(
             "REVIEW MONITOR LOOKUP:",
             {
+              monitorVersion,
+
               jobId:
                 job.id,
 
@@ -9507,16 +9944,20 @@ app.post(
             }
           );
 
+
         } catch (error) {
 
-          // ========================================
+          // ======================================
           // Provider / Network Error
+          //
           // ห้ามตีความว่า Review ถูกลบ
-          // ========================================
+          // ======================================
 
           console.error(
             "REVIEW MONITOR LOOKUP ERROR:",
             {
+              monitorVersion,
+
               jobId:
                 job.id,
 
@@ -9550,7 +9991,7 @@ app.post(
 
 
         // ========================================
-        // ยังเจอ Review
+        // Review ยังอยู่
         // ========================================
 
         if (found) {
@@ -9558,11 +9999,20 @@ app.post(
           await updateJob(
             job.id,
             {
+              status:
+                "processing",
+
               review_missing_count:
                 0,
 
               last_review_check_at:
                 checkedAt,
+
+              review_removed_detected_at:
+                null,
+
+              removed_at:
+                null,
             }
           );
 
@@ -9583,44 +10033,26 @@ app.post(
 
 
         // ========================================
-        // หา Review ไม่เจอ
+        // Review หาไม่เจอ
         //
-        // ไม่รอ Second Confirmation จากระบบแล้ว
-        // ให้ทีมเป็นผู้ตรวจยืนยันจาก LINE Group
+        // สำคัญ:
+        //
+        // - ยังไม่ waiting_payment
+        // - ยังไม่เปลี่ยน Conversation State
+        // - ยังไม่ทักลูกค้า
+        //
+        // ส่งให้คนตรวจเองก่อน
         // ========================================
 
-        const removedAt =
+        const detectedAt =
           checkedAt;
 
-
-        console.log(
-          "REVIEW NOT FOUND:",
-          {
-            jobId:
-              job.id,
-
-            reviewUrl,
-
-            reason:
-              lookupReason,
-
-            checkedAt,
-          }
-        );
-
-
-        // ========================================
-        // เปลี่ยน Job เป็น waiting_payment
-        // ========================================
 
         await updateJob(
           job.id,
           {
             status:
-              "waiting_payment",
-
-            removed_at:
-              removedAt,
+              "processing",
 
             review_missing_count:
               1,
@@ -9629,7 +10061,10 @@ app.post(
               checkedAt,
 
             review_removed_detected_at:
-              removedAt,
+              detectedAt,
+
+            removed_at:
+              null,
           }
         );
 
@@ -9641,30 +10076,9 @@ app.post(
 
 
         // ========================================
-        // เปลี่ยน Conversation State
-        // ========================================
-
-        if (customer) {
-
-          await updateConversationState({
-            customerId:
-              customer.id,
-
-            state:
-              GMR_STATES
-                .REMOVED_WAITING_PAYMENT,
-
-            handoff:
-              false,
-
-            handoffReason:
-              null,
-          });
-        }
-
-
-        // ========================================
-        // Update Google Sheet
+        // Google Sheet
+        //
+        // ยังคง processing
         // ========================================
 
         try {
@@ -9674,13 +10088,15 @@ app.post(
               job.id,
 
             status:
-              "waiting_payment",
+              "processing",
 
-            removedAt,
+            removedAt:
+              "",
 
             paidAt:
               "",
           });
+
 
         } catch (error) {
 
@@ -9698,9 +10114,9 @@ app.post(
 
 
         // ========================================
-        // แจ้ง LINE กลุ่มให้ทีมตรวจเอง
+        // แจ้ง LINE Group
         //
-        // ยังไม่ส่งข้อความหาลูกค้าอัตโนมัติ
+        // ยังไม่แจ้งลูกค้า
         // ========================================
 
         if (customer) {
@@ -9723,8 +10139,9 @@ app.post(
                 `Review URL: ${reviewUrl}`,
 
               reason:
-                "REVIEW_REMOVAL_DETECTED_READY_TO_COLLECT_PAYMENT",
+                "REVIEW_REMOVAL_DETECTED_AWAITING_HUMAN_CONFIRM",
             });
+
 
           } catch (error) {
 
@@ -9743,8 +10160,10 @@ app.post(
 
 
         console.log(
-          "REVIEW REMOVAL DETECTED:",
+          "REVIEW AWAITING HUMAN CONFIRM:",
           {
+            monitorVersion,
+
             jobId:
               job.id,
 
@@ -9754,7 +10173,7 @@ app.post(
             reason:
               lookupReason,
 
-            removedAt,
+            detectedAt,
           }
         );
 
@@ -9764,7 +10183,7 @@ app.post(
             job.id,
 
           result:
-            "REMOVED_DETECTED",
+            "AWAITING_HUMAN_CONFIRM",
 
           missingCount:
             1,
@@ -9772,7 +10191,7 @@ app.post(
           reason:
             lookupReason,
 
-          removedAt,
+          detectedAt,
         });
       }
 
@@ -9780,7 +10199,10 @@ app.post(
       return res
         .status(200)
         .json({
-          ok: true,
+          ok:
+            true,
+
+          monitorVersion,
 
           checked:
             jobs.length,
@@ -9788,18 +10210,27 @@ app.post(
           results,
         });
 
+
     } catch (error) {
 
       console.error(
         "REVIEW MONITOR ERROR:",
-        error
+        {
+          monitorVersion,
+
+          error:
+            error.message,
+        }
       );
 
 
       return res
         .status(500)
         .json({
-          ok: false,
+          ok:
+            false,
+
+          monitorVersion,
 
           error:
             error.message,
