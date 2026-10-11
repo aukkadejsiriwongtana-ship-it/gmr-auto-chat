@@ -735,13 +735,20 @@ async function getCustomerStage({
   // ========================================
 
   const preStartStatuses = [
-    "draft",
-    "waiting_price",
-    "waiting_confirm",
-    "waiting_phone",
-    "waiting_credit_approval",
-    "credit_rejected",
-  ];
+  "draft",
+
+  "waiting_price",
+  "waiting_confirm",
+  "waiting_phone",
+  "waiting_credit_approval",
+
+  // Existing Customer Batch
+  "existing_evidence_pending",
+  "existing_evidence_failed",
+  "existing_batch_draft",
+
+  "credit_rejected",
+];
 
   if (
     preStartStatuses.includes(
