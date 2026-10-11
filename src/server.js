@@ -66,8 +66,8 @@ updateJob,
 getPaymentByLineGroupMessageId,
   getJobById,
 updatePayment,
-  getPendingPriceJobs,
   getJobsForReviewMonitoring,
+  getPendingPriceJobs,
 } from "./repositories/gmrRepository.js";
 
 import {
@@ -9641,6 +9641,460 @@ app.post(
 
       console.error(
         "AUTO REVIEW MONITOR ERROR:",
+        error
+      );
+
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+
+          error:
+            error.message,
+        });
+    }
+  }
+);
+
+// =========================================================
+// AUTO REVIEW REMOVAL MONITOR
+// ตรวจเฉพาะงาน status = processing
+//
+// Logic:
+// เจอ Review      -> missing_count = 0
+// ไม่เจอครั้งที่ 1 -> missing_count = 1
+// ไม่เจอครั้งที่ 2 -> waiting_payment + แจ้งทีม
+// =========================================================
+
+app.post(
+  "/check-processing-reviews",
+  async (req, res) => {
+
+    try {
+
+      const monitorSecret =
+        req.headers[
+          "x-monitor-secret"
+        ];
+
+
+      if (
+        !process.env
+          .REVIEW_MONITOR_SECRET ||
+        monitorSecret !==
+          process.env
+            .REVIEW_MONITOR_SECRET
+      ) {
+
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Unauthorized",
+          });
+      }
+
+
+      const jobs =
+        await getJobsForReviewMonitoring();
+
+
+      const results = [];
+
+
+      console.log(
+        "REVIEW MONITOR START:",
+        {
+          jobCount:
+            jobs.length,
+        }
+      );
+
+
+      for (
+        const job of jobs
+      ) {
+
+        const reviewUrl =
+          String(
+            job.review_url ||
+            ""
+          ).trim();
+
+
+        if (!reviewUrl) {
+          continue;
+        }
+
+
+        let found =
+          null;
+
+        let lookupReason =
+          null;
+
+
+        // ========================================
+        // ตรวจ Review URL
+        // ========================================
+
+        try {
+
+          const lookup =
+            await getReviewFromDirectUrl(
+              reviewUrl
+            );
+
+
+          found =
+            Boolean(
+              lookup?.found &&
+              lookup?.review
+            );
+
+
+          lookupReason =
+            lookup?.reason ||
+            null;
+
+
+          console.log(
+            "REVIEW MONITOR LOOKUP:",
+            {
+              jobId:
+                job.id,
+
+              found,
+
+              reason:
+                lookupReason,
+
+              currentMissingCount:
+                Number(
+                  job.review_missing_count ||
+                  0
+                ),
+            }
+          );
+
+        } catch (error) {
+
+          // สำคัญ:
+          // Network / Google / Provider error
+          // ห้ามนับว่า Review ถูกลบ
+
+          console.error(
+            "REVIEW MONITOR LOOKUP ERROR:",
+            {
+              jobId:
+                job.id,
+
+              reviewUrl,
+
+              error:
+                error.message,
+            }
+          );
+
+
+          results.push({
+            jobId:
+              job.id,
+
+            result:
+              "CHECK_ERROR",
+
+            error:
+              error.message,
+          });
+
+
+          continue;
+        }
+
+
+        const checkedAt =
+          new Date()
+            .toISOString();
+
+
+        // ========================================
+        // ยังเจอ Review
+        // ========================================
+
+        if (found) {
+
+          await updateJob(
+            job.id,
+            {
+              review_missing_count:
+                0,
+
+              last_review_check_at:
+                checkedAt,
+            }
+          );
+
+
+          results.push({
+            jobId:
+              job.id,
+
+            result:
+              "STILL_VISIBLE",
+
+            checkedAt,
+          });
+
+
+          continue;
+        }
+
+
+        // ========================================
+        // หา Review ไม่เจอ
+        // ========================================
+
+        const missingCount =
+          Number(
+            job.review_missing_count ||
+            0
+          ) + 1;
+
+
+        // ========================================
+        // ไม่เจอรอบแรก
+        // ยังไม่ถือว่างานสำเร็จ
+        // ========================================
+
+        if (
+          missingCount < 2
+        ) {
+
+          await updateJob(
+            job.id,
+            {
+              review_missing_count:
+                missingCount,
+
+              last_review_check_at:
+                checkedAt,
+            }
+          );
+
+
+          console.log(
+            "REVIEW MISSING FIRST CHECK:",
+            {
+              jobId:
+                job.id,
+
+              missingCount,
+
+              reason:
+                lookupReason,
+            }
+          );
+
+
+          results.push({
+            jobId:
+              job.id,
+
+            result:
+              "MISSING_ONCE",
+
+            missingCount,
+
+            reason:
+              lookupReason,
+          });
+
+
+          continue;
+        }
+
+
+        // ========================================
+        // ไม่เจอ 2 รอบติดกัน
+        // ถือว่า Review น่าจะถูกนำออกแล้ว
+        // ========================================
+
+        const removedAt =
+          checkedAt;
+
+
+        await updateJob(
+          job.id,
+          {
+            status:
+              "waiting_payment",
+
+            removed_at:
+              removedAt,
+
+            review_missing_count:
+              missingCount,
+
+            last_review_check_at:
+              checkedAt,
+
+            review_removed_detected_at:
+              removedAt,
+          }
+        );
+
+
+        const customer =
+          await getCustomerById(
+            job.customer_id
+          );
+
+
+        if (customer) {
+
+          await updateConversationState({
+            customerId:
+              customer.id,
+
+            state:
+              GMR_STATES
+                .REMOVED_WAITING_PAYMENT,
+
+            handoff:
+              false,
+
+            handoffReason:
+              null,
+          });
+        }
+
+
+        // ========================================
+        // อัปเดต Google Sheet
+        // ========================================
+
+        try {
+
+          await updateJobInGoogleSheet({
+            jobId:
+              job.id,
+
+            status:
+              "waiting_payment",
+
+            removedAt,
+
+            paidAt:
+              "",
+          });
+
+        } catch (error) {
+
+          console.error(
+            "REVIEW MONITOR SHEET UPDATE FAILED:",
+            {
+              jobId:
+                job.id,
+
+              error:
+                error.message,
+            }
+          );
+        }
+
+
+        // ========================================
+        // แจ้งทีมก่อน
+        // ตอนนี้ยังไม่ทักลูกค้าเอง
+        // ========================================
+
+        if (customer) {
+
+          try {
+
+            const latestConversation =
+              await getConversationByCustomerId(
+                customer.id
+              );
+
+
+            await triggerHumanAttention({
+              customer,
+
+              conversation:
+                latestConversation,
+
+              message:
+                `Review URL: ${reviewUrl}`,
+
+              reason:
+                "REVIEW_REMOVAL_DETECTED_READY_TO_COLLECT_PAYMENT",
+            });
+
+          } catch (error) {
+
+            console.error(
+              "REVIEW MONITOR TEAM NOTIFY FAILED:",
+              {
+                jobId:
+                  job.id,
+
+                error:
+                  error.message,
+              }
+            );
+          }
+        }
+
+
+        console.log(
+          "REVIEW REMOVAL DETECTED:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              job.customer_id,
+
+            missingCount,
+
+            removedAt,
+          }
+        );
+
+
+        results.push({
+          jobId:
+            job.id,
+
+          result:
+            "REMOVED_DETECTED",
+
+          missingCount,
+
+          removedAt,
+        });
+      }
+
+
+      return res
+        .status(200)
+        .json({
+          ok: true,
+
+          checked:
+            jobs.length,
+
+          results,
+        });
+
+    } catch (error) {
+
+      console.error(
+        "REVIEW MONITOR ERROR:",
         error
       );
 
