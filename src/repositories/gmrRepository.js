@@ -1251,6 +1251,260 @@ export async function getJobById(
   return data;
 }
 
+// =========================================================
+// LEGACY CUSTOMERS
+// ลูกค้าเก่าก่อนเริ่มใช้ระบบใหม่
+// =========================================================
+
+export async function getLegacyCustomerById(
+  legacyCustomerId
+) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in getLegacyCustomerById"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .select("*")
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function getPendingLegacyCustomersByDisplayName(
+  displayName
+) {
+  const normalizedName =
+    String(
+      displayName || ""
+    ).trim();
+
+  if (!normalizedName) {
+    return [];
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .select("*")
+    .eq(
+      "match_status",
+      "pending"
+    )
+    .ilike(
+      "display_name",
+      normalizedName
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+export async function markLegacyCustomerMatched({
+  legacyCustomerId,
+  customerId,
+}) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in markLegacyCustomerMatched"
+    );
+  }
+
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in markLegacyCustomerMatched"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      matched_customer_id:
+        customerId,
+
+      match_status:
+        "matched",
+
+      matched_at:
+        new Date().toISOString(),
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+// =========================================================
+// LEGACY CUSTOMER MATCH REQUEST
+// =========================================================
+
+export async function setLegacyCustomerPendingMatch({
+  legacyCustomerId,
+  customerId,
+  lineGroupMessageId,
+}) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in setLegacyCustomerPendingMatch"
+    );
+  }
+
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in setLegacyCustomerPendingMatch"
+    );
+  }
+
+  if (!lineGroupMessageId) {
+    throw new Error(
+      "Missing lineGroupMessageId in setLegacyCustomerPendingMatch"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      pending_customer_id:
+        customerId,
+
+      line_group_message_id:
+        String(
+          lineGroupMessageId
+        ),
+
+      match_status:
+        "pending_confirmation",
+
+      match_requested_at:
+        new Date().toISOString(),
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+// =========================================================
+// หา Legacy Customer จาก LINE Group Message ID
+// ใช้ตอนทีม Reply "ยืนยัน"
+// =========================================================
+
+export async function getLegacyCustomerByLineGroupMessageId(
+  lineGroupMessageId
+) {
+  if (!lineGroupMessageId) {
+    return null;
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .select("*")
+    .eq(
+      "line_group_message_id",
+      String(
+        lineGroupMessageId
+      )
+    )
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+// =========================================================
+// ยกเลิก Legacy Match Request
+// ใช้กรณีทีมตอบว่า "ไม่ใช่"
+// =========================================================
+
+export async function rejectLegacyCustomerMatch(
+  legacyCustomerId
+) {
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      pending_customer_id:
+        null,
+
+      line_group_message_id:
+        null,
+
+      match_status:
+        "pending",
+
+      match_requested_at:
+        null,
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 
 export async function getCustomerById(
   customerId
