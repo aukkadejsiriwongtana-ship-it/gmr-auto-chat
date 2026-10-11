@@ -7077,13 +7077,35 @@ if (
 
 
     // สำเร็จ
-    if (priceResult.ok) {
-      await replyLineTextMessage(
-        event.replyToken,
-        `✅ แจ้งราคาลูกค้าแล้ว\nราคา ${priceResult.amount.toLocaleString("th-TH")} บาท/รีวิว`
-      );
-    }
+  if (
+  priceResult.ok
+) {
 
+  const priceText =
+    formatMoney(
+      priceResult.amount,
+      priceResult.currency
+    );
+
+
+  const groupReply =
+    priceResult.currency ===
+      "THB"
+      ? (
+          "✅ แจ้งราคาลูกค้าแล้ว\n" +
+          `ราคา ${priceText} บาท/รีวิว`
+        )
+      : (
+          "✅ แจ้งราคาลูกค้าแล้ว\n" +
+          `ราคา $${priceText} USD/รีวิว`
+        );
+
+
+  await replyLineTextMessage(
+    event.replyToken,
+    groupReply
+  );
+}
   } catch (error) {
     console.error(
       "LINE GROUP PRICE ERROR:",
@@ -9589,401 +9611,457 @@ app.post("/sheet-control", async (req, res) => {
       // → ส่งข้อความเก็บเงินหาลูกค้า
       // ===================================================
 
-            if (
-        normalizedValue ===
-        "CONFIRM_REMOVED"
-      ) {
-
-        // =================================================
-        // ต้องเป็น Job ที่ Monitor ตรวจไม่เจอแล้วเท่านั้น
-        // =================================================
-
-        if (
-          Number(
-            job.review_missing_count ||
-            0
-          ) < 1
-        ) {
-
-          return res
-            .status(400)
-            .json({
-              ok:
-                false,
-
-              error:
-                "This job is not awaiting removal confirmation",
-            });
-        }
-
-
-        const confirmedAt =
-          new Date()
-            .toISOString();
-
-
-        const removedAt =
-          job.review_removed_detected_at ||
-          confirmedAt;
-
-
-        // =================================================
-        // PAYMENT CURRENCY
-        //
-        // ใช้ currency ที่บันทึกไว้ตั้งแต่ตอน Sales ตั้งราคา
-        //
-        // รองรับ Job เก่าที่ยังไม่มี currency:
-        // ใช้ราคาต่อรีวิวตัดสินให้ชั่วคราว
-        // =================================================
-
-        const unitPrice =
-          Number(
-            job.price ||
-            0
-          );
-
-
-        const paymentCurrency =
-          String(
-            job.currency ||
-            (
-              unitPrice >= 2500
-                ? "THB"
-                : "USD"
-            )
-          )
-            .trim()
-            .toUpperCase();
-
-
-        if (
-          ![
-            "THB",
-            "USD"
-          ].includes(
-            paymentCurrency
-          )
-        ) {
-
-          throw new Error(
-            `Unsupported payment currency: ${paymentCurrency}`
-          );
-        }
-
-
-        const formattedPrice =
-          unitPrice.toLocaleString(
-            paymentCurrency === "USD"
-              ? "en-US"
-              : "th-TH"
-          );
-
-
-        // =================================================
-        // PAYMENT CONFIG
-        // =================================================
-
-        const thbPaymentQrUrl =
-          String(
-            process.env
-              .THB_PAYMENT_QR_URL ||
-            ""
-          ).trim();
-
-
-        const stripePaymentLink =
-          String(
-            process.env
-              .STRIPE_PAYMENT_LINK ||
-            ""
-          ).trim();
-
-
-        // =================================================
-        // PAYMENT MESSAGE
-        // =================================================
-
-        let botReply;
-
-
-        if (
-          paymentCurrency ===
-          "THB"
-        ) {
-
-          botReply =
-            getCustomerText(
-              customer,
-
-              "ดำเนินการเรียบร้อยแล้วครับ ✅\n\n" +
-              `ยอดชำระสำหรับรีวิวนี้ ${formattedPrice} บาท\n\n` +
-              "สามารถสแกน QR ด้านล่างเพื่อชำระได้เลยครับ\n\n" +
-              "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
-
-              "The review has been successfully processed. ✅\n\n" +
-              `Payment due for this review: THB ${formattedPrice}\n\n` +
-              "You can make payment using the QR code below.\n\n" +
-              "After payment, please send the payment slip in this chat."
-            );
-
-        } else {
-
           if (
-            !stripePaymentLink
-          ) {
+  normalizedValue ===
+  "CONFIRM_REMOVED"
+) {
 
-            throw new Error(
-              "STRIPE_PAYMENT_LINK is not configured"
-            );
-          }
+  if (
+    Number(
+      job.review_missing_count ||
+      0
+    ) < 1
+  ) {
 
+    return res
+      .status(400)
+      .json({
+        ok: false,
 
-          botReply =
-            getCustomerText(
-              customer,
-
-              "ดำเนินการเรียบร้อยแล้วครับ ✅\n\n" +
-              `ยอดชำระสำหรับรีวิวนี้ $${formattedPrice} USD\n\n` +
-              "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
-              `${stripePaymentLink}\n\n` +
-              "หลังชำระแล้วแจ้งกลับในแชทนี้ได้เลยครับ",
-
-              "The review has been successfully processed. ✅\n\n" +
-              `Payment due for this review: $${formattedPrice} USD\n\n` +
-              "Please complete payment using the link below:\n" +
-              `${stripePaymentLink}\n\n` +
-              "Once payment is complete, please let us know here."
-            );
-        }
+        error:
+          "This job is not awaiting removal confirmation",
+      });
+  }
 
 
-        // =================================================
-        // THB ต้องมี QR ก่อนเปลี่ยนสถานะ
-        // =================================================
-
-        if (
-          paymentCurrency ===
-            "THB" &&
-          !thbPaymentQrUrl
-        ) {
-
-          throw new Error(
-            "THB_PAYMENT_QR_URL is not configured"
-          );
-        }
+  const confirmedAt =
+    new Date()
+      .toISOString();
 
 
-        // =================================================
-        // 1. UPDATE JOB
-        // =================================================
+  const removedAt =
+    job.review_removed_detected_at ||
+    confirmedAt;
 
-        await updateJob(
+
+  const unitPrice =
+    Number(
+      job.price || 0
+    );
+
+
+  if (
+    !Number.isFinite(
+      unitPrice
+    ) ||
+    unitPrice <= 0
+  ) {
+
+    throw new Error(
+      "Job has invalid price"
+    );
+  }
+
+
+  const paymentCurrency =
+    getCurrencyFromUnitPrice({
+      price:
+        unitPrice,
+
+      currency:
+        job.currency,
+    });
+
+
+  // ========================================
+  // PAYMENT CONFIG
+  // ========================================
+
+  const thbPaymentQrUrl =
+    String(
+      process.env
+        .THB_PAYMENT_QR_URL ||
+      ""
+    ).trim();
+
+
+  const stripePaymentLink =
+    String(
+      process.env
+        .STRIPE_PAYMENT_LINK ||
+      ""
+    ).trim();
+
+
+  if (
+    paymentCurrency ===
+      "THB" &&
+    !thbPaymentQrUrl
+  ) {
+
+    throw new Error(
+      "THB_PAYMENT_QR_URL is not configured"
+    );
+  }
+
+
+  if (
+    paymentCurrency ===
+      "USD" &&
+    !stripePaymentLink
+  ) {
+
+    throw new Error(
+      "STRIPE_PAYMENT_LINK is not configured"
+    );
+  }
+
+
+  // ========================================
+  // 1. ยืนยัน CURRENT JOB ก่อน
+  // ========================================
+
+  await updateJob(
+    job.id,
+    {
+      status:
+        "waiting_payment",
+
+      removed_at:
+        removedAt,
+
+      review_missing_count:
+        1,
+
+      review_removed_detected_at:
+        removedAt,
+
+      currency:
+        paymentCurrency,
+    }
+  );
+
+
+  // ========================================
+  // 2. ดึงทุกงานของลูกค้าคนนี้
+  // ที่สำเร็จแล้วและยังไม่จ่าย
+  // ========================================
+
+  const waitingPaymentJobs =
+    await getWaitingPaymentJobsByCustomerId(
+      customer.id
+    );
+
+
+  // ========================================
+  // 3. สรุปเฉพาะสกุลเงินเดียวกัน
+  //
+  // ป้องกัน THB + USD ถูกบวกเข้าด้วยกัน
+  // ========================================
+
+  const paymentSummary =
+    buildPaymentBreakdown({
+      jobs:
+        waitingPaymentJobs,
+
+      currency:
+        paymentCurrency,
+
+      language:
+        customer.language ||
+        "th",
+    });
+
+
+  if (
+    paymentSummary.total <=
+    0
+  ) {
+
+    throw new Error(
+      "Payment total is invalid"
+    );
+  }
+
+
+  const formattedTotal =
+    formatMoney(
+      paymentSummary.total,
+      paymentCurrency
+    );
+
+
+  const breakdownText =
+    paymentSummary.lines
+      .join("\n");
+
+
+  // ========================================
+  // 4. สร้างข้อความเก็บเงิน
+  // ========================================
+
+  let botReply;
+
+
+  if (
+    paymentCurrency ===
+    "THB"
+  ) {
+
+    botReply =
+      getCustomerText(
+        customer,
+
+        "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+
+        `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+
+        "รายละเอียด:\n" +
+        `${breakdownText}\n\n` +
+
+        `ยอดที่ต้องชำระทั้งหมด: ${formattedTotal} บาท\n\n` +
+
+        "สามารถสแกน QR ด้านล่างเพื่อชำระได้เลยครับ\n\n" +
+
+        "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
+
+        "The completed reviews have been successfully processed. ✅\n\n" +
+
+        `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+
+        "Breakdown:\n" +
+        `${breakdownText}\n\n` +
+
+        `Total amount due: THB ${formattedTotal}\n\n` +
+
+        "Please use the QR code below to make payment, then send the payment slip in this chat."
+      );
+
+  } else {
+
+    botReply =
+      getCustomerText(
+        customer,
+
+        "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+
+        `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+
+        "รายละเอียด:\n" +
+        `${breakdownText}\n\n` +
+
+        `ยอดที่ต้องชำระทั้งหมด: $${formattedTotal} USD\n\n` +
+
+        "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
+        `${stripePaymentLink}`,
+
+        "The completed reviews have been successfully processed. ✅\n\n" +
+
+        `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+
+        "Breakdown:\n" +
+        `${breakdownText}\n\n` +
+
+        `Total amount due: $${formattedTotal} USD\n\n` +
+
+        "Please complete payment using the link below:\n" +
+        `${stripePaymentLink}`
+      );
+  }
+
+
+  // ========================================
+  // 5. CONVERSATION
+  // ========================================
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES
+        .REMOVED_WAITING_PAYMENT,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  // ========================================
+  // 6. GOOGLE SHEET - CURRENT JOB
+  // ========================================
+
+  try {
+
+    await updateJobInGoogleSheet({
+      jobId:
+        job.id,
+
+      status:
+        "waiting_payment",
+
+      removedAt,
+
+      paidAt:
+        "",
+    });
+
+  } catch (error) {
+
+    console.error(
+      "CONFIRM REMOVED SHEET UPDATE FAILED:",
+      {
+        jobId:
           job.id,
-          {
-            status:
-              "waiting_payment",
 
-            removed_at:
-              removedAt,
-
-            review_missing_count:
-              1,
-
-            review_removed_detected_at:
-              removedAt,
-
-            currency:
-              paymentCurrency,
-          }
-        );
-
-
-        // =================================================
-        // 2. UPDATE CONVERSATION
-        // =================================================
-
-        await updateConversationState({
-          customerId:
-            customer.id,
-
-          state:
-            GMR_STATES
-              .REMOVED_WAITING_PAYMENT,
-
-          handoff:
-            false,
-
-          handoffReason:
-            null,
-        });
-
-
-        // =================================================
-        // 3. UPDATE GOOGLE SHEET
-        // =================================================
-
-        try {
-
-          await updateJobInGoogleSheet({
-            jobId:
-              job.id,
-
-            status:
-              "waiting_payment",
-
-            removedAt,
-
-            paidAt:
-              "",
-          });
-
-
-        } catch (error) {
-
-          console.error(
-            "CONFIRM REMOVED SHEET UPDATE FAILED:",
-            {
-              jobId:
-                job.id,
-
-              error:
-                error.message,
-            }
-          );
-        }
-
-
-        // =================================================
-        // 4. SEND PAYMENT TEXT
-        // =================================================
-
-        await sendMessageToCustomer({
-          platform:
-            customer.platform,
-
-          platformUserId:
-            customer.platform_user_id,
-
-          text:
-            botReply,
-        });
-
-
-        // =================================================
-        // 5. THB → SEND QR IMAGE
-        //
-        // sendMessageToCustomer รองรับ imageUrl อยู่แล้ว
-        // =================================================
-
-        if (
-          paymentCurrency ===
-          "THB"
-        ) {
-
-          await sendMessageToCustomer({
-            platform:
-              customer.platform,
-
-            platformUserId:
-              customer.platform_user_id,
-
-            imageUrl:
-              thbPaymentQrUrl,
-          });
-        }
-
-
-        // =================================================
-        // 6. SAVE OUTBOUND TEXT
-        // =================================================
-
-        await saveMessage({
-          customerId:
-            customer.id,
-
-          platform:
-            customer.platform,
-
-          direction:
-            "outbound",
-
-          messageType:
-            "text",
-
-          messageText:
-            botReply,
-        });
-
-
-        await updateLastBotMessage(
-          customer.id,
-          botReply
-        );
-
-
-        console.log(
-          "SHEET CONFIRM REMOVED:",
-          {
-            jobId:
-              job.id,
-
-            customerId:
-              customer.id,
-
-            unitPrice,
-
-            paymentCurrency,
-
-            removedAt,
-
-            paymentMethod:
-              paymentCurrency ===
-                "THB"
-                ? "QR"
-                : "STRIPE",
-          }
-        );
-
-
-        return res
-          .status(200)
-          .json({
-            ok:
-              true,
-
-            action:
-              "manual_action",
-
-            value:
-              "CONFIRM_REMOVED",
-
-            customerId:
-              customer.id,
-
-            jobId:
-              job.id,
-
-            status:
-              "waiting_payment",
-
-            unitPrice,
-
-            currency:
-              paymentCurrency,
-
-            paymentMethod:
-              paymentCurrency ===
-                "THB"
-                ? "QR"
-                : "STRIPE",
-
-            removedAt,
-
-            customerNotified:
-              true,
-          });
+        error:
+          error.message,
       }
+    );
+  }
 
+
+  // ========================================
+  // 7. ส่งข้อความเก็บเงิน
+  // ========================================
+
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
+
+    platformUserId:
+      customer.platform_user_id,
+
+    text:
+      botReply,
+  });
+
+
+  // ========================================
+  // 8. THB → ส่ง QR
+  // ========================================
+
+  if (
+    paymentCurrency ===
+    "THB"
+  ) {
+
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
+
+      platformUserId:
+        customer.platform_user_id,
+
+      imageUrl:
+        thbPaymentQrUrl,
+    });
+  }
+
+
+  // ========================================
+  // 9. SAVE OUTBOUND
+  // ========================================
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      customer.platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  console.log(
+    "SHEET CONFIRM REMOVED:",
+    {
+      jobId:
+        job.id,
+
+      customerId:
+        customer.id,
+
+      unitPrice,
+
+      paymentCurrency,
+
+      waitingPaymentCount:
+        paymentSummary
+          .totalReviews,
+
+      paymentTotal:
+        paymentSummary.total,
+
+      removedAt,
+    }
+  );
+
+
+  return res
+    .status(200)
+    .json({
+      ok: true,
+
+      action:
+        "manual_action",
+
+      value:
+        "CONFIRM_REMOVED",
+
+      customerId:
+        customer.id,
+
+      jobId:
+        job.id,
+
+      status:
+        "waiting_payment",
+
+      unitPrice,
+
+      currency:
+        paymentCurrency,
+
+      waitingPaymentCount:
+        paymentSummary
+          .totalReviews,
+
+      paymentTotal:
+        paymentSummary.total,
+
+      paymentBreakdown:
+        paymentSummary.groups,
+
+      paymentMethod:
+        paymentCurrency ===
+          "THB"
+          ? "QR"
+          : "STRIPE",
+
+      removedAt,
+
+      customerNotified:
+        true,
+    });
+}
 
       // ===================================================
       // REVIEW STILL VISIBLE
