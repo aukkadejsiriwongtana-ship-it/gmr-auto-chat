@@ -77,6 +77,7 @@ getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
 getLegacyCustomerByLineGroupMessageId,
 rejectLegacyCustomerMatch,
+markLegacyCustomerMatched,
 
 } from "./repositories/gmrRepository.js";
 
@@ -8663,6 +8664,463 @@ app.post("/line/webhook", async (req, res) => {
     .trim()
     .toLowerCase();
 
+// =========================================================
+// LEGACY CUSTOMER MATCH APPROVAL
+//
+// ทีมต้อง Reply ข้อความ Legacy Match เท่านั้น
+//
+// ยืนยันลูกค้าเก่า
+// → สร้างประวัติ Job + Payment ที่เคยจ่ายจริง
+// → Match LINE customer กับ Legacy customer
+//
+// ไม่ใช่
+// → ยกเลิก Candidate
+// → ลูกค้ากลับเข้า Flow ปกติ
+// =========================================================
+
+if (
+  quotedMessageId &&
+  [
+    "ยืนยันลูกค้าเก่า",
+    "ไม่ใช่",
+  ].includes(
+    normalizedGroupText
+  )
+) {
+
+  const legacyCustomer =
+    await getLegacyCustomerByLineGroupMessageId(
+      quotedMessageId
+    );
+
+
+  // ข้อความนี้ไม่ใช่ Legacy Match
+  // ปล่อยให้ Handler อื่นทำงานต่อ
+  if (legacyCustomer) {
+
+    const customerId =
+      legacyCustomer
+        .pending_customer_id;
+
+
+    if (!customerId) {
+
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ Legacy Customer นี้ไม่มี pending_customer_id กรุณาตรวจสอบข้อมูลก่อนครับ"
+      );
+
+      continue;
+    }
+
+
+    const matchedCustomer =
+      await getCustomerById(
+        customerId
+      );
+
+
+    if (!matchedCustomer) {
+
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ไม่พบ Customer ที่กำลังรอ Match ครับ"
+      );
+
+      continue;
+    }
+
+
+    // ========================================
+    // ทีมตอบ "ไม่ใช่"
+    // ========================================
+
+    if (
+      normalizedGroupText ===
+      "ไม่ใช่"
+    ) {
+
+      await rejectLegacyCustomerMatch(
+        legacyCustomer.id
+      );
+
+
+      await updateConversationState({
+        customerId:
+          matchedCustomer.id,
+
+        state:
+          GMR_STATES.WAITING_MAP,
+
+        handoff:
+          false,
+
+        handoffReason:
+          null,
+      });
+
+
+      await replyLineTextMessage(
+        event.replyToken,
+        "❌ ยกเลิกการจับคู่ Legacy Customer แล้ว ลูกค้าจะถูกดำเนินการเป็นลูกค้าปกติครับ"
+      );
+
+
+      console.log(
+        "LEGACY CUSTOMER MATCH REJECTED:",
+        {
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          customerId:
+            matchedCustomer.id,
+        }
+      );
+
+
+      continue;
+    }
+
+
+    // ========================================
+    // ทีมตอบ "ยืนยันลูกค้าเก่า"
+    // ========================================
+
+    try {
+
+      const verifiedAt =
+        new Date().toISOString();
+
+
+      const importedJobs = [];
+
+
+      // ========================================
+      // NEW REVIEW HISTORY
+      // ========================================
+
+      const newReviewRate =
+        Number(
+          legacyCustomer
+            .new_review_rate ||
+          0
+        );
+
+
+      if (
+        Number.isFinite(
+          newReviewRate
+        ) &&
+        newReviewRate > 0
+      ) {
+
+        const newCurrency =
+          String(
+            legacyCustomer
+              .new_review_currency ||
+            "THB"
+          ).toUpperCase();
+
+
+        const historicalNewJob =
+          await createJob({
+            customerId:
+              matchedCustomer.id,
+
+            businessName:
+              legacyCustomer
+                .business_name ||
+              null,
+
+            reviewCase:
+              "legacy_import_new",
+
+            status:
+              "paid",
+          });
+
+
+        await updateJob(
+          historicalNewJob.id,
+          {
+            price:
+              newReviewRate,
+
+            currency:
+              newCurrency,
+          }
+        );
+
+
+        await saveReviewCandidate({
+          customerId:
+            matchedCustomer.id,
+
+          jobId:
+            historicalNewJob.id,
+
+          businessName:
+            legacyCustomer
+              .business_name ||
+            null,
+
+          reviewerName:
+            "LEGACY_IMPORT",
+
+          reviewText:
+            "Imported historical NEW review rate",
+
+          isRecent:
+            true,
+
+          isVisible:
+            null,
+
+          hasText:
+            null,
+        });
+
+
+        await createPayment({
+          jobId:
+            historicalNewJob.id,
+
+          amount:
+            newReviewRate,
+
+          paymentMethod:
+            "LEGACY_IMPORT",
+
+          slipReceived:
+            false,
+
+          paymentVerified:
+            true,
+
+          verifiedAt,
+        });
+
+
+        importedJobs.push(
+          historicalNewJob.id
+        );
+      }
+
+
+      // ========================================
+      // OLD REVIEW HISTORY
+      // ========================================
+
+      const oldReviewRate =
+        Number(
+          legacyCustomer
+            .old_review_rate ||
+          0
+        );
+
+
+      if (
+        Number.isFinite(
+          oldReviewRate
+        ) &&
+        oldReviewRate > 0
+      ) {
+
+        const oldCurrency =
+          String(
+            legacyCustomer
+              .old_review_currency ||
+            "THB"
+          ).toUpperCase();
+
+
+        const historicalOldJob =
+          await createJob({
+            customerId:
+              matchedCustomer.id,
+
+            businessName:
+              legacyCustomer
+                .business_name ||
+              null,
+
+            reviewCase:
+              "legacy_import_old",
+
+            status:
+              "paid",
+          });
+
+
+        await updateJob(
+          historicalOldJob.id,
+          {
+            price:
+              oldReviewRate,
+
+            currency:
+              oldCurrency,
+          }
+        );
+
+
+        await saveReviewCandidate({
+          customerId:
+            matchedCustomer.id,
+
+          jobId:
+            historicalOldJob.id,
+
+          businessName:
+            legacyCustomer
+              .business_name ||
+            null,
+
+          reviewerName:
+            "LEGACY_IMPORT",
+
+          reviewText:
+            "Imported historical OLD review rate",
+
+          isRecent:
+            false,
+
+          isVisible:
+            null,
+
+          hasText:
+            null,
+        });
+
+
+        await createPayment({
+          jobId:
+            historicalOldJob.id,
+
+          amount:
+            oldReviewRate,
+
+          paymentMethod:
+            "LEGACY_IMPORT",
+
+          slipReceived:
+            false,
+
+          paymentVerified:
+            true,
+
+          verifiedAt,
+        });
+
+
+        importedJobs.push(
+          historicalOldJob.id
+        );
+      }
+
+
+      // ========================================
+      // ต้องมีอย่างน้อย 1 ราคา
+      // ถึงจะถือว่า Import Payment History สำเร็จ
+      // ========================================
+
+      if (
+        importedJobs.length === 0
+      ) {
+        throw new Error(
+          "Legacy customer has no valid historical rate"
+        );
+      }
+
+
+      // ========================================
+      // Legacy → Matched
+      // ========================================
+
+      await markLegacyCustomerMatched({
+        legacyCustomerId:
+          legacyCustomer.id,
+
+        customerId:
+          matchedCustomer.id,
+      });
+
+
+      // ========================================
+      // ปลด HANDOFF
+      // พร้อมรับ Review ใหม่
+      // ========================================
+
+      await updateConversationState({
+        customerId:
+          matchedCustomer.id,
+
+        state:
+          GMR_STATES.WAITING_MAP,
+
+        handoff:
+          false,
+
+        handoffReason:
+          null,
+      });
+
+
+      await replyLineTextMessage(
+        event.replyToken,
+
+        `✅ ยืนยันลูกค้าเก่าเรียบร้อยแล้ว\nLegacy: ${
+          legacyCustomer.display_name ||
+          "-"
+        }\nLINE: ${
+          matchedCustomer.display_name ||
+          "-"
+        }\nนำเข้าประวัติราคา ${importedJobs.length} ประเภทเรียบร้อย`
+      );
+
+
+      console.log(
+        "LEGACY CUSTOMER MATCH APPROVED:",
+        {
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          customerId:
+            matchedCustomer.id,
+
+          importedJobs,
+        }
+      );
+
+
+    } catch (error) {
+
+      console.error(
+        "LEGACY CUSTOMER MATCH APPROVAL FAILED:",
+        {
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          customerId:
+            matchedCustomer.id,
+
+          error:
+            error.message,
+        }
+      );
+
+
+      await replyLineTextMessage(
+        event.replyToken,
+        `❌ Import ลูกค้าเก่าไม่สำเร็จ: ${error.message}\nกรุณายังไม่กดยืนยันซ้ำจนกว่าจะตรวจสอบข้อมูลครับ`
+      );
+    }
+
+
+    continue;
+  }
+}
+    
 // ========================================
 // CREDIT APPROVAL
 // ลูกค้าใหม่ + งาน > 3,000 บาท
