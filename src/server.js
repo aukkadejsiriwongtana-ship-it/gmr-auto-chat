@@ -3541,6 +3541,141 @@ for (
       botReply
     );
 
+    // ========================================
+    // ส่งข้อความให้ลูกค้าทันที
+    // ========================================
+
+    try {
+
+      await sendMessageToCustomer({
+        platform,
+        platformUserId,
+
+        text:
+          botReply,
+      });
+
+    } catch (error) {
+
+      console.error(
+        "RECENT REVIEW TEXT SEND FAILED:",
+        error
+      );
+    }
+
+
+    // ========================================
+    // SCREENSHOT BACKGROUND TASK
+    //
+    // สร้างและส่งรูปหลังข้อความ
+    // แต่ไม่ block response หลัก
+    // ========================================
+
+    void (
+      async () => {
+
+        for (
+          let index = 0;
+          index <
+            recentOneStarReviews.length;
+          index += 1
+        ) {
+
+          const review =
+            recentOneStarReviews[index];
+
+
+          try {
+
+            if (!review.reviewUrl) {
+              continue;
+            }
+
+
+            const evidenceBuffer =
+              await createReviewScreenshot({
+                reviewUrl:
+                  review.reviewUrl,
+              });
+
+
+            const evidenceUpload =
+              await uploadReviewEvidence({
+                buffer:
+                  evidenceBuffer,
+
+                customerId:
+                  customer.id,
+
+                jobId:
+                  latestJob.id,
+
+                reviewId:
+                  review.reviewId ||
+                  null,
+
+                index:
+                  index + 1,
+              });
+
+
+            const evidenceImageUrl =
+              await createReviewEvidenceSignedUrl(
+                evidenceUpload.filePath
+              );
+
+
+            await sendMessageToCustomer({
+              platform,
+              platformUserId,
+
+              imageUrl:
+                evidenceImageUrl,
+            });
+
+
+            console.log(
+              "REVIEW SCREENSHOT SENT ASYNC:",
+              {
+                jobId:
+                  latestJob.id,
+
+                reviewerName:
+                  review.reviewerName,
+
+                reviewUrl:
+                  review.reviewUrl,
+
+                evidenceImagePath:
+                  evidenceUpload.filePath,
+              }
+            );
+
+          } catch (error) {
+
+            console.error(
+              "ASYNC REVIEW SCREENSHOT FAILED:",
+              {
+                jobId:
+                  latestJob.id,
+
+                reviewerName:
+                  review.reviewerName,
+
+                error:
+                  error.message,
+              }
+            );
+          }
+        }
+
+      }
+    )();
+
+
+    // ========================================
+    // ค่อย return หลังจาก kick off screenshot task
+    // ========================================
 
     return {
       ok: true,
@@ -3564,140 +3699,11 @@ for (
         "recent_review",
 
       recentCount:
-       recentOneStarReviews.length,
+        recentOneStarReviews.length,
 
       botReply,
     };
   }
-
-// ========================================
-// ส่งข้อความให้ลูกค้าทันที
-// ก่อนเริ่มสร้าง Screenshot
-// ========================================
-
-try {
-
-  await sendMessageToCustomer({
-    platform,
-    platformUserId,
-    text:
-      botReply,
-  });
-
-} catch (error) {
-
-  console.error(
-    "RECENT REVIEW TEXT SEND FAILED:",
-    error
-  );
-}
-
-    // ========================================
-// SCREENSHOT BACKGROUND TASK
-// ไม่ block การตอบลูกค้า
-// ========================================
-
-void (
-  async () => {
-
-    for (
-      let index = 0;
-      index <
-        recentOneStarReviews.length;
-      index += 1
-    ) {
-
-      const review =
-        recentOneStarReviews[index];
-
-
-      try {
-
-        if (!review.reviewUrl) {
-          continue;
-        }
-
-
-        const evidenceBuffer =
-          await createReviewScreenshot({
-            reviewUrl:
-              review.reviewUrl,
-          });
-
-
-        const evidenceUpload =
-          await uploadReviewEvidence({
-            buffer:
-              evidenceBuffer,
-
-            customerId:
-              customer.id,
-
-            jobId:
-              latestJob.id,
-
-            reviewId:
-              review.reviewId ||
-              null,
-
-            index:
-              index + 1,
-          });
-
-
-        const evidenceImageUrl =
-          await createReviewEvidenceSignedUrl(
-            evidenceUpload.filePath
-          );
-
-
-        await sendMessageToCustomer({
-          platform,
-          platformUserId,
-
-          imageUrl:
-            evidenceImageUrl,
-        });
-
-
-        console.log(
-          "REVIEW SCREENSHOT SENT ASYNC:",
-          {
-            jobId:
-              latestJob.id,
-
-            reviewerName:
-              review.reviewerName,
-
-            reviewUrl:
-              review.reviewUrl,
-
-            evidenceImagePath:
-              evidenceUpload.filePath,
-          }
-        );
-
-      } catch (error) {
-
-        console.error(
-          "ASYNC REVIEW SCREENSHOT FAILED:",
-          {
-            jobId:
-              latestJob.id,
-
-            reviewerName:
-              review.reviewerName,
-
-            error:
-              error.message,
-          }
-        );
-      }
-    }
-
-  }
-)();
-    
 
   // -----------------------------------------------------
   // 4. ไม่มีรีวิวใหม่
