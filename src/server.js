@@ -8982,11 +8982,14 @@ app.post("/sheet-control", async (req, res) => {
     const normalizedValue =
   String(value || "")
     .trim()
-    .toUpperCase()
-    .replace(
-      /[\s_-]+/g,
-      ""
-    );
+    .toUpperCase();
+
+
+const compactValue =
+  normalizedValue.replace(
+    /[\s_-]+/g,
+    ""
+  );
 
 
 console.log(
@@ -8996,6 +8999,8 @@ console.log(
       value,
 
     normalizedValue,
+
+    compactValue,
   }
 );
 
@@ -9013,10 +9018,9 @@ console.log(
       // ---------------------------------------------------
 
       if (
-        normalizedValue ===
-        "HANDOFF"
-      ) {
-
+  compactValue ===
+    "HANDOFF"
+) {
         await updateConversationState({
           customerId:
             customer.id,
@@ -9066,9 +9070,9 @@ console.log(
       // ---------------------------------------------------
 
       if (
-        normalizedValue ===
-        "AUTO"
-      ) {
+  compactValue ===
+    "AUTO"
+) {
 
         let resumeState =
           GMR_STATES.WAITING_MAP;
