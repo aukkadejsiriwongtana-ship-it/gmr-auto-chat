@@ -9130,6 +9130,11 @@ app.get("/test-mark-removed", async (req, res) => {
       });
     }
 
+
+    // ========================================
+    // CUSTOMER
+    // ========================================
+
     const customer =
       await getCustomerByPlatformUserId(
         platform,
@@ -9143,6 +9148,11 @@ app.get("/test-mark-removed", async (req, res) => {
       });
     }
 
+
+    // ========================================
+    // CONVERSATION
+    // ========================================
+
     const conversation =
       await getConversationByCustomerId(
         customer.id
@@ -9153,6 +9163,11 @@ app.get("/test-mark-removed", async (req, res) => {
         "Conversation not found"
       );
     }
+
+
+    // ========================================
+    // LATEST JOB
+    // ========================================
 
     const latestJob =
       await getLatestJobByCustomerId(
@@ -9165,115 +9180,394 @@ app.get("/test-mark-removed", async (req, res) => {
       );
     }
 
-    const removedAt =
-      new Date().toISOString();
 
-    const updatedJob =
-      await updateJob(
-        latestJob.id,
-        {
-          status: "removed",
-          removed_at: removedAt,
-        }
+    const unitPrice =
+      Number(
+        latestJob.price || 0
       );
 
-    const template =
-      await getTemplate(
-        "removed_payment",
-        customer.language || "th"
-      );
-
-    if (!template) {
+    if (
+      !Number.isFinite(unitPrice) ||
+      unitPrice <= 0
+    ) {
       throw new Error(
-        "removed_payment template not found"
+        "Job has invalid price"
       );
     }
 
-    const botReply =
-      template.content;
 
-    const nextState =
-      transitionState(
-        conversation.state,
-        GMR_STATES.REMOVED_WAITING_PAYMENT
+    // ========================================
+    // CURRENCY
+    // ========================================
+
+    const paymentCurrency =
+      getCurrencyFromUnitPrice({
+        price:
+          unitPrice,
+
+        currency:
+          latestJob.currency,
+      });
+
+
+    // ========================================
+    // PAYMENT CONFIG
+    // ========================================
+
+    const thbPaymentQrUrl =
+      String(
+        process.env
+          .THB_PAYMENT_QR_URL ||
+        ""
+      ).trim();
+
+    const stripePaymentLink =
+      String(
+        process.env
+          .STRIPE_PAYMENT_LINK ||
+        ""
+      ).trim();
+
+
+    if (
+      paymentCurrency === "THB" &&
+      !thbPaymentQrUrl
+    ) {
+      throw new Error(
+        "THB_PAYMENT_QR_URL is not configured"
       );
+    }
 
-    await updateConversationState({
-      customerId: customer.id,
-      state: nextState,
-      handoff: false,
-      handoffReason: null,
-    });
+
+    if (
+      paymentCurrency === "USD" &&
+      !stripePaymentLink
+    ) {
+      throw new Error(
+        "STRIPE_PAYMENT_LINK is not configured"
+      );
+    }
+
+
+    // ========================================
+    // MARK CURRENT JOB REMOVED
+    // ========================================
+
+    const removedAt =
+      new Date().toISOString();
+
 
     await updateJob(
       latestJob.id,
       {
-        status: "waiting_payment",
+        status:
+          "waiting_payment",
+
+        removed_at:
+          removedAt,
+
+        review_removed_detected_at:
+          removedAt,
+
+        review_missing_count:
+          1,
+
+        currency:
+          paymentCurrency,
       }
     );
 
-    try {
-  await updateJobInGoogleSheet({
-    jobId: latestJob.id,
-    status: "waiting_payment",
-    removedAt,
-    paidAt: "",
-  });
-} catch (error) {
-  console.error(
-    "GOOGLE SHEET UPDATE FAILED:",
-    error
-  );
-}
 
-try {
-  await sendMessageToCustomer({
-    platform,
-    platformUserId,
-    text: botReply,
-  });
-} catch (error) {
-  console.error(
-    "CUSTOMER NOTIFY FAILED:",
-    error
-  );
-}
-    
-    await saveMessage({
-      customerId: customer.id,
-      platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
+    // ========================================
+    // GET ALL WAITING PAYMENT JOBS
+    // ของลูกค้าคนเดียวกัน
+    // ========================================
+
+    const waitingPaymentJobs =
+      await getWaitingPaymentJobsByCustomerId(
+        customer.id
+      );
+
+
+    // ========================================
+    // PAYMENT SUMMARY
+    // ========================================
+
+    const paymentSummary =
+      buildPaymentBreakdown({
+        jobs:
+          waitingPaymentJobs,
+
+        currency:
+          paymentCurrency,
+
+        language:
+          customer.language ||
+          "th",
+      });
+
+
+    if (
+      paymentSummary.total <= 0
+    ) {
+      throw new Error(
+        "Payment total is invalid"
+      );
+    }
+
+
+    const formattedTotal =
+      formatMoney(
+        paymentSummary.total,
+        paymentCurrency
+      );
+
+
+    const breakdownText =
+      paymentSummary.lines
+        .join("\n");
+
+
+    // ========================================
+    // PAYMENT MESSAGE
+    // ========================================
+
+    let botReply;
+
+
+    if (
+      paymentCurrency === "THB"
+    ) {
+
+      botReply =
+        getCustomerText(
+          customer,
+
+          "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+
+          `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+
+          "รายละเอียด:\n" +
+          `${breakdownText}\n\n` +
+
+          `ยอดที่ต้องชำระทั้งหมด: ${formattedTotal} บาท\n\n` +
+
+          "สามารถสแกน QR ด้านล่างเพื่อชำระได้เลยครับ\n\n" +
+
+          "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
+
+          "The completed reviews have been successfully processed. ✅\n\n" +
+
+          `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+
+          "Breakdown:\n" +
+          `${breakdownText}\n\n` +
+
+          `Total amount due: THB ${formattedTotal}\n\n` +
+
+          "Please use the QR code below to make payment, then send the payment slip in this chat."
+        );
+
+    } else {
+
+      botReply =
+        getCustomerText(
+          customer,
+
+          "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+
+          `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+
+          "รายละเอียด:\n" +
+          `${breakdownText}\n\n` +
+
+          `ยอดที่ต้องชำระทั้งหมด: $${formattedTotal} USD\n\n` +
+
+          "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
+          `${stripePaymentLink}`,
+
+          "The completed reviews have been successfully processed. ✅\n\n" +
+
+          `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+
+          "Breakdown:\n" +
+          `${breakdownText}\n\n` +
+
+          `Total amount due: $${formattedTotal} USD\n\n` +
+
+          "Please complete payment using the link below:\n" +
+          `${stripePaymentLink}`
+        );
+    }
+
+
+    // ========================================
+    // UPDATE CONVERSATION
+    // ========================================
+
+    await updateConversationState({
+      customerId:
+        customer.id,
+
+      state:
+        GMR_STATES
+          .REMOVED_WAITING_PAYMENT,
+
+      handoff:
+        false,
+
+      handoffReason:
+        null,
     });
+
+
+    // ========================================
+    // UPDATE GOOGLE SHEET
+    // ========================================
+
+    try {
+      await updateJobInGoogleSheet({
+        jobId:
+          latestJob.id,
+
+        status:
+          "waiting_payment",
+
+        removedAt,
+
+        paidAt:
+          "",
+      });
+
+    } catch (error) {
+
+      console.error(
+        "TEST MARK REMOVED SHEET UPDATE FAILED:",
+        error
+      );
+    }
+
+
+    // ========================================
+    // SEND PAYMENT MESSAGE
+    // ========================================
+
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
+
+      platformUserId:
+        customer.platform_user_id,
+
+      text:
+        botReply,
+    });
+
+
+    // ========================================
+    // THB → SEND QR IMAGE
+    // ========================================
+
+    if (
+      paymentCurrency === "THB"
+    ) {
+
+      await sendMessageToCustomer({
+        platform:
+          customer.platform,
+
+        platformUserId:
+          customer.platform_user_id,
+
+        imageUrl:
+          thbPaymentQrUrl,
+      });
+    }
+
+
+    // ========================================
+    // SAVE OUTBOUND
+    // ========================================
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        customer.platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        botReply,
+    });
+
 
     await updateLastBotMessage(
       customer.id,
       botReply
     );
 
-    return res.status(200).json({
-      ok: true,
-      customerId: customer.id,
-      jobId: updatedJob.id,
-      stateBefore: conversation.state,
-      stateAfter: nextState,
-      removedAt,
-      botReply,
-    });
+
+    // ========================================
+    // RESULT
+    // ========================================
+
+    return res
+      .status(200)
+      .json({
+        ok: true,
+
+        customerId:
+          customer.id,
+
+        jobId:
+          latestJob.id,
+
+        stateAfter:
+          GMR_STATES
+            .REMOVED_WAITING_PAYMENT,
+
+        paymentCurrency,
+
+        totalReviews:
+          paymentSummary.totalReviews,
+
+        total:
+          paymentSummary.total,
+
+        removedAt,
+
+        qrSent:
+          paymentCurrency === "THB",
+
+        botReply,
+      });
+
 
   } catch (error) {
+
     console.error(
       "TEST MARK REMOVED ERROR:",
       error
     );
 
-    return res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
+
+    return res
+      .status(500)
+      .json({
+        ok: false,
+
+        error:
+          error.message,
+      });
   }
 });
+
 
 app.get("/test-google-sheet-update", async (req, res) => {
   try {
