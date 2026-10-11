@@ -744,12 +744,14 @@ async function getCustomerStage({
   const preStartStatuses = [
   "draft",
 
+  const preStartStatuses = [
+  "draft",
   "waiting_price",
   "waiting_confirm",
   "waiting_phone",
   "waiting_credit_approval",
 
-  // Existing Customer Batch
+  // Existing customer flow
   "existing_evidence_pending",
   "existing_evidence_failed",
   "existing_batch_draft",
@@ -4569,8 +4571,10 @@ When finished, reply "Confirm all" to confirm the full batch before we begin.`
         canonicalReviewUrl,
 
       reviewCase:
-        "direct_review",
-
+  isExistingCustomer
+    ? "existing_missing_rate"
+    : "direct_review",
+      
       reviewVisible:
         true,
 
@@ -4617,14 +4621,13 @@ directRating,
       directReview.reviewId,
 
     isRecent:
-      (
-        getReviewAgeDays(
-          directReview
-        ) !== null &&
-        getReviewAgeDays(
-          directReview
-        ) <= 14
-      ),
+  getReviewAgeDays(
+    directReview
+  ) === null
+    ? null
+    : getReviewAgeDays(
+        directReview
+      ) <= 14,
 
     isVisible:
       true,
@@ -8368,7 +8371,511 @@ async function processLineGroupPrice({
           `For this review, the price is $${formattedAmount} USD per review.`
         );
 
+// =========================================================
+// EXISTING CUSTOMER - MISSING HISTORICAL RATE
+//
+// ลูกค้าเก่าที่ไม่มีราคาเดิมของ Review ประเภทนี้
+// Sales เป็นคนกำหนดราคาให้ครั้งแรก
+//
+// หลังได้ราคา:
+// 1. สร้าง Evidence
+// 2. ส่งรูปให้ลูกค้า
+// 3. เข้า Existing Batch
+// 4. ไม่เข้า WAITING_CONFIRM / WAITING_PHONE
+// =========================================================
 
+if (
+  job.review_case ===
+    "existing_missing_rate"
+) {
+
+  console.log(
+    "EXISTING CUSTOMER MISSING RATE PRICE RECEIVED:",
+    {
+      jobId:
+        job.id,
+
+      customerId:
+        customer.id,
+
+      unitPrice,
+
+      currency,
+    }
+  );
+
+
+  // ========================================
+  // 1. ต้องมี Review URL
+  // ========================================
+
+  if (!job.review_url) {
+
+    await updateJob(
+      job.id,
+      {
+        price:
+          unitPrice,
+
+        currency,
+
+        status:
+          "existing_evidence_failed",
+      }
+    );
+
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        `Missing review_url for existing customer price job ${job.id}`,
+
+      reason:
+        "EXISTING_CUSTOMER_MISSING_RATE_NO_REVIEW_URL",
+    });
+
+
+    return {
+      ok: false,
+      handled: true,
+
+      reason:
+        "EXISTING_CUSTOMER_REVIEW_URL_MISSING",
+
+      jobId:
+        job.id,
+    };
+  }
+
+
+  // ========================================
+  // 2. หา Review ที่ผูกกับ Job
+  // ========================================
+
+  const jobReviews =
+    await getReviewsByJobId(
+      job.id
+    );
+
+
+  let review =
+    null;
+
+
+  const selectedReview =
+    (jobReviews || []).find(
+      (item) =>
+        item
+          ?.selected_by_customer ===
+        true
+    );
+
+
+  if (selectedReview) {
+    review =
+      selectedReview;
+
+  } else if (
+    (jobReviews || []).length ===
+    1
+  ) {
+    review =
+      jobReviews[0];
+  }
+
+
+  if (!review) {
+
+    await updateJob(
+      job.id,
+      {
+        price:
+          unitPrice,
+
+        currency,
+
+        status:
+          "existing_evidence_failed",
+      }
+    );
+
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        `Cannot determine review for existing customer price job ${job.id}`,
+
+      reason:
+        "EXISTING_CUSTOMER_MISSING_RATE_REVIEW_AMBIGUOUS",
+    });
+
+
+    return {
+      ok: false,
+      handled: true,
+
+      reason:
+        "EXISTING_CUSTOMER_REVIEW_AMBIGUOUS",
+
+      jobId:
+        job.id,
+    };
+  }
+
+
+  // ========================================
+  // 3. สร้าง Evidence
+  // ========================================
+
+  let evidenceImagePath =
+    null;
+
+  let evidenceImageUrl =
+    null;
+
+
+  try {
+
+    const evidenceBuffer =
+      await createReviewScreenshot({
+        reviewUrl:
+          job.review_url,
+      });
+
+
+    const evidenceUpload =
+      await uploadReviewEvidence({
+        buffer:
+          evidenceBuffer,
+
+        customerId:
+          customer.id,
+
+        jobId:
+          job.id,
+
+        reviewId:
+          review.provider_review_id ||
+          review.id ||
+          null,
+
+        index:
+          1,
+      });
+
+
+    evidenceImagePath =
+      evidenceUpload.filePath;
+
+
+    evidenceImageUrl =
+      await createReviewEvidenceSignedUrl(
+        evidenceImagePath
+      );
+
+
+  } catch (error) {
+
+    console.error(
+      "EXISTING CUSTOMER MISSING RATE EVIDENCE FAILED:",
+      {
+        customerId:
+          customer.id,
+
+        jobId:
+          job.id,
+
+        reviewUrl:
+          job.review_url,
+
+        error:
+          error.message,
+      }
+    );
+  }
+
+
+  // ========================================
+  // 4. Evidence Fail → ห้ามเข้า Batch
+  // ========================================
+
+  if (
+    !evidenceImagePath ||
+    !evidenceImageUrl
+  ) {
+
+    await updateJob(
+      job.id,
+      {
+        price:
+          unitPrice,
+
+        currency,
+
+        status:
+          "existing_evidence_failed",
+      }
+    );
+
+
+    await triggerHumanAttention({
+      customer,
+      conversation,
+
+      message:
+        job.review_url,
+
+      reason:
+        "EXISTING_CUSTOMER_MISSING_RATE_EVIDENCE_FAILED",
+    });
+
+
+    return {
+      ok: false,
+      handled: true,
+
+      reason:
+        "EXISTING_CUSTOMER_EVIDENCE_FAILED",
+
+      jobId:
+        job.id,
+    };
+  }
+
+
+  // ========================================
+  // 5. บันทึกราคาจาก Sales
+  // และอนุญาตเข้า Batch
+  // ========================================
+
+  await updateJob(
+    job.id,
+    {
+      price:
+        unitPrice,
+
+      currency,
+
+      status:
+        "existing_batch_draft",
+    }
+  );
+
+
+  // เก็บ Quote ไว้เป็น Audit ว่า
+  // ราคานี้มาจาก Sales
+  await createQuote({
+    jobId:
+      job.id,
+
+    amount:
+      unitPrice,
+
+    currency,
+
+    quotedBy:
+      "line_group_sales_existing_customer",
+
+    quoteMessage:
+      salesMessage,
+
+    script3Sent:
+      true,
+  });
+
+
+  // ========================================
+  // 6. Conversation กลับ WAITING_MAP
+  //
+  // เพื่อรับ Review link เพิ่มได้
+  // และรองรับ "ยืนยันทั้งหมด"
+  // ========================================
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.WAITING_MAP,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  const batchJobs =
+    await getExistingCustomerOpenBatchJobs(
+      customer.id
+    );
+
+
+  const reviewTypeText =
+    review.is_recent === true
+      ? getCustomerText(
+          customer,
+          "รีวิวใหม่ (1–14 วัน)",
+          "New review (1–14 days)"
+        )
+      : review.is_recent === false
+        ? getCustomerText(
+            customer,
+            "รีวิวเก่า (มากกว่า 14 วัน)",
+            "Older review (over 14 days)"
+          )
+        : getCustomerText(
+            customer,
+            "ไม่สามารถระบุอายุรีวิวได้",
+            "Review age could not be determined"
+          );
+
+
+  const priceText =
+    currency === "THB"
+      ? `${formattedAmount} บาท/รีวิว`
+      : `$${formattedAmount} USD/review`;
+
+
+  // ========================================
+  // 7. ส่ง Evidence ก่อน
+  // ========================================
+
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
+
+    platformUserId:
+      customer.platform_user_id,
+
+    imageUrl:
+      evidenceImageUrl,
+  });
+
+
+  // ========================================
+  // 8. ส่งราคาและสถานะ Batch
+  // ========================================
+
+  const botReply =
+    getCustomerText(
+      customer,
+
+      `ตรวจสอบแล้ว สามารถดำเนินการได้ครับ ✅
+
+ประเภท: ${reviewTypeText}
+ราคา: ${priceText}
+
+ขณะนี้มีทั้งหมด ${batchJobs.length} รีวิวในรายการ
+
+สามารถส่งลิงก์รีวิวถัดไปมาได้เลยครับ
+เมื่อส่งครบแล้ว พิมพ์ “ยืนยันทั้งหมด” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
+
+      `Checked. We can proceed with this review. ✅
+
+Type: ${reviewTypeText}
+Price: ${priceText}
+
+There are currently ${batchJobs.length} review(s) in this batch.
+
+You may send the next review link.
+When finished, reply "Confirm all" to confirm the full batch before we begin.`
+    );
+
+
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
+
+    platformUserId:
+      customer.platform_user_id,
+
+    text:
+      botReply,
+  });
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      customer.platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+
+  console.log(
+    "EXISTING CUSTOMER MISSING RATE ADDED TO BATCH:",
+    {
+      customerId:
+        customer.id,
+
+      jobId:
+        job.id,
+
+      unitPrice,
+
+      currency,
+
+      batchSize:
+        batchJobs.length,
+    }
+  );
+
+
+  return {
+    ok: true,
+    handled: true,
+
+    customerId:
+      customer.id,
+
+    jobId:
+      job.id,
+
+    existingCustomerBatch:
+      true,
+
+    missingHistoricalRate:
+      true,
+
+    unitPrice,
+
+    currency,
+
+    batchSize:
+      batchJobs.length,
+
+    evidenceSent:
+      true,
+
+    stateAfter:
+      GMR_STATES.WAITING_MAP,
+
+    botReply,
+  };
+}
+  
   // ========================================
   // SAVE JOB
   // ========================================
