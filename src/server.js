@@ -287,6 +287,14 @@ import {
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+
+// ========================================
+// ลูกค้าที่กำลังตรวจ Google Map
+// ข้อความใหม่ระหว่างนี้จะถูก ignore
+// ========================================
+
+const mapProcessingUsers =
+  new Set();
 function getPlatformLabel(
   customer
 ) {
@@ -3160,11 +3168,40 @@ if (
         .join("\n\n");
 
 
-    if (reviewLines) {
-      botReply +=
-        `\n\n${reviewLines}`;
-    }
+   if (reviewLines) {
+  botReply +=
+    `\n\n${reviewLines}`;
+}
 
+
+// ========================================
+// ถ้ามีหลาย Review
+// บอกลูกค้าให้พิมพ์หมายเลขที่ต้องการ
+// ========================================
+
+if (
+  recentOneStarReviews.length > 1
+) {
+
+  const choices =
+    recentOneStarReviews
+      .map(
+        (_, index) =>
+          `"${index + 1}"`
+      )
+      .join(" ");
+
+
+  botReply +=
+    getCustomerText(
+      customer,
+      `\n\nกรุณาพิมพ์หมายเลขรีวิวที่ต้องการดำเนินการ เช่น ${choices} ครับ`,
+      `\n\nPlease reply with the review number you would like to proceed with, for example ${choices}.`
+    );
+}
+
+
+  
 // =====================================================
 // เก็บ Review ลง DB ก่อน
 // ไม่รอ Screenshot
@@ -6741,6 +6778,30 @@ if (
     event.message.text || "";
 }
 
+// ========================================
+// IGNORE MESSAGE WHILE MAP IS PROCESSING
+// ถ้า Bot กำลังตรวจ Map ของลูกค้าคนนี้อยู่
+// ไม่ตอบ / ไม่ส่งเข้ากลุ่ม / ไม่เปลี่ยน State
+// ========================================
+
+if (
+  mapProcessingUsers.has(
+    platformUserId
+  )
+) {
+
+  console.log(
+    "MESSAGE IGNORED DURING MAP PROCESSING:",
+    {
+      platformUserId,
+      message,
+      messageType,
+    }
+  );
+
+  continue;
+}
+      
  // ========================================
 // FAST MAP ACK
 // ลูกค้าส่ง Google Maps link
@@ -6757,7 +6818,12 @@ if (
 
   if (detectedMapUrl) {
 
-    try {
+  // เริ่ม lock ลูกค้าคนนี้
+  mapProcessingUsers.add(
+    platformUserId
+  );
+
+  try {
       const existingCustomer =
         await getCustomerByPlatformUserId(
           "line",
@@ -8505,50 +8571,84 @@ continue;
       // ส่งเข้า State Machine เดิม
       // ========================================
 
-     const result =
-  await processTestMessage({
-    platform: "line",
+    let result = null;
 
-    platformUserId,
+try {
 
-    displayName:
-      lineDisplayName,
-
-    message,
-
-    messageType,
-  });
-
-      console.log(
-        "LINE FLOW RESULT:",
-        result
-      );
-
-
-      // ========================================
-      // ตอบลูกค้าถ้ามี botReply
-      // ========================================
-
-     if (
-  result?.botReply
-) {
-  try {
-
-    await sendMessageToCustomer({
+  result =
+    await processTestMessage({
       platform:
         "line",
 
       platformUserId,
 
-      text:
-        result.botReply,
+      displayName:
+        lineDisplayName,
+
+      message,
+
+      messageType,
     });
 
-  } catch (error) {
 
-    console.error(
-      "LINE PUSH RESULT FAILED:",
-      error
+  console.log(
+    "LINE FLOW RESULT:",
+    result
+  );
+
+
+  // ========================================
+  // ตอบลูกค้าถ้ามี botReply
+  // ========================================
+
+  if (
+    result?.botReply
+  ) {
+
+    try {
+
+      await sendMessageToCustomer({
+        platform:
+          "line",
+
+        platformUserId,
+
+        text:
+          result.botReply,
+      });
+
+    } catch (error) {
+
+      console.error(
+        "LINE PUSH RESULT FAILED:",
+        error
+      );
+    }
+  }
+
+} finally {
+
+  // ========================================
+  // ตรวจ Map เสร็จแล้ว
+  // ปลด lock เพื่อรับข้อความใหม่
+  // ========================================
+
+  if (
+    mapProcessingUsers.has(
+      platformUserId
+    )
+  ) {
+
+    mapProcessingUsers.delete(
+      platformUserId
+    );
+
+
+    console.log(
+      "MAP PROCESSING UNLOCKED:",
+      {
+        platformUserId,
+      }
     );
   }
 }
@@ -8788,6 +8888,391 @@ app.get("/test-google-sheet-update", async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: error.message,
+    });
+  }
+});
+
+// =========================================================
+// GOOGLE SHEET CONTROL
+// M = Bot Control: AUTO / HANDOFF
+// N = Manual Action: MARK_PAID
+// =========================================================
+
+app.post("/sheet-control", async (req, res) => {
+  try {
+
+    const {
+      secret,
+      jobId,
+      action,
+      value,
+    } = req.body || {};
+
+
+    // -----------------------------------------------------
+    // AUTH
+    // ใช้ secret เดียวกับ Google Apps Script
+    // -----------------------------------------------------
+
+    const SHEET_CONTROL_SECRET =
+      process.env.SHEET_CONTROL_SECRET;
+
+
+    if (
+      !SHEET_CONTROL_SECRET ||
+      secret !== SHEET_CONTROL_SECRET
+    ) {
+      return res.status(401).json({
+        ok: false,
+        error: "Unauthorized",
+      });
+    }
+
+
+    if (!jobId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing jobId",
+      });
+    }
+
+
+    const job =
+      await getJobById(
+        jobId
+      );
+
+
+    if (!job) {
+      return res.status(404).json({
+        ok: false,
+        error: "Job not found",
+      });
+    }
+
+
+    const customer =
+      await getCustomerById(
+        job.customer_id
+      );
+
+
+    if (!customer) {
+      return res.status(404).json({
+        ok: false,
+        error: "Customer not found",
+      });
+    }
+
+
+    const conversation =
+      await getConversationByCustomerId(
+        customer.id
+      );
+
+
+    if (!conversation) {
+      return res.status(404).json({
+        ok: false,
+        error: "Conversation not found",
+      });
+    }
+
+
+    const normalizedValue =
+      String(value || "")
+        .trim()
+        .toUpperCase();
+
+
+    // =====================================================
+    // BOT CONTROL
+    // =====================================================
+
+    if (
+      action === "bot_control"
+    ) {
+
+      // ---------------------------------------------------
+      // HANDOFF
+      // ---------------------------------------------------
+
+      if (
+        normalizedValue ===
+        "HANDOFF"
+      ) {
+
+        await updateConversationState({
+          customerId:
+            customer.id,
+
+          state:
+            GMR_STATES.HANDOFF,
+
+          handoff:
+            true,
+
+          handoffReason:
+            `SHEET_MANUAL_HANDOFF_FROM_${conversation.state}`,
+        });
+
+
+        console.log(
+          "SHEET HANDOFF ENABLED:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              customer.id,
+
+            previousState:
+              conversation.state,
+          }
+        );
+
+
+        return res.status(200).json({
+          ok: true,
+          action:
+            "bot_control",
+          value:
+            "HANDOFF",
+          customerId:
+            customer.id,
+          jobId:
+            job.id,
+        });
+      }
+
+
+      // ---------------------------------------------------
+      // AUTO
+      // ---------------------------------------------------
+
+      if (
+        normalizedValue ===
+        "AUTO"
+      ) {
+
+        let resumeState =
+          GMR_STATES.WAITING_MAP;
+
+
+        const handoffReason =
+          String(
+            conversation.handoff_reason ||
+            ""
+          );
+
+
+        const prefix =
+          "SHEET_MANUAL_HANDOFF_FROM_";
+
+
+        if (
+          handoffReason.startsWith(
+            prefix
+          )
+        ) {
+
+          const previousState =
+            handoffReason.slice(
+              prefix.length
+            );
+
+
+          if (
+            Object.values(
+              GMR_STATES
+            ).includes(
+              previousState
+            ) &&
+            previousState !==
+              GMR_STATES.HANDOFF
+          ) {
+            resumeState =
+              previousState;
+          }
+        }
+
+
+        await updateConversationState({
+          customerId:
+            customer.id,
+
+          state:
+            resumeState,
+
+          handoff:
+            false,
+
+          handoffReason:
+            null,
+        });
+
+
+        console.log(
+          "SHEET HANDOFF DISABLED:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              customer.id,
+
+            resumeState,
+          }
+        );
+
+
+        return res.status(200).json({
+          ok: true,
+          action:
+            "bot_control",
+          value:
+            "AUTO",
+          customerId:
+            customer.id,
+          jobId:
+            job.id,
+          resumeState,
+        });
+      }
+
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Invalid bot_control value",
+      });
+    }
+
+
+    // =====================================================
+    // MANUAL ACTION
+    // =====================================================
+
+    if (
+      action === "manual_action"
+    ) {
+
+      // ---------------------------------------------------
+      // MARK PAID
+      // ---------------------------------------------------
+
+      if (
+        normalizedValue ===
+        "MARK_PAID"
+      ) {
+
+        const paidAt =
+          new Date().toISOString();
+
+
+        await updateJob(
+          job.id,
+          {
+            status:
+              "paid",
+
+            paid_at:
+              paidAt,
+          }
+        );
+
+
+        await updateConversationState({
+          customerId:
+            customer.id,
+
+          state:
+            GMR_STATES.WAITING_MAP,
+
+          handoff:
+            false,
+
+          handoffReason:
+            null,
+        });
+
+
+        try {
+
+          await updateJobInGoogleSheet({
+            jobId:
+              job.id,
+
+            status:
+              "paid",
+
+            paidAt,
+          });
+
+        } catch (error) {
+
+          console.error(
+            "SHEET MANUAL PAID GOOGLE SHEET UPDATE FAILED:",
+            error
+          );
+        }
+
+
+        console.log(
+          "SHEET MANUAL MARK PAID:",
+          {
+            jobId:
+              job.id,
+
+            customerId:
+              customer.id,
+
+            paidAt,
+          }
+        );
+
+
+        return res.status(200).json({
+          ok: true,
+          action:
+            "manual_action",
+          value:
+            "MARK_PAID",
+          customerId:
+            customer.id,
+          jobId:
+            job.id,
+          paidAt,
+        });
+      }
+
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Invalid manual_action value",
+      });
+    }
+
+
+    return res.status(400).json({
+      ok: false,
+      error:
+        "Invalid action",
+    });
+
+  } catch (error) {
+
+    console.error(
+      "SHEET CONTROL ERROR:",
+      error
+    );
+
+
+    return res.status(500).json({
+      ok: false,
+      error:
+        error.message,
     });
   }
 });
