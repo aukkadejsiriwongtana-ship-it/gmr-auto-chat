@@ -183,6 +183,39 @@ function isThailandPlace(place) {
   return false;
 }
 
+// =========================================================
+// CUSTOMER TYPE
+//
+// NEW_CUSTOMER
+// = ยังไม่เคยมีประวัติชำระเงินสำเร็จ
+//
+// EXISTING_CUSTOMER
+// = เคยชำระเงินสำเร็จแล้วอย่างน้อย 1 ครั้ง
+//
+// หมายเหตุ:
+// ห้ามใช้แค่ว่าเคยมี customer record หรือเคยคุยมาก่อน
+// ต้องอิง payment history เท่านั้น
+// =========================================================
+
+async function getCustomerType(
+  customerId
+) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in getCustomerType"
+    );
+  }
+
+  const hasPaymentHistory =
+    await hasPaymentByCustomerId(
+      customerId
+    );
+
+  return hasPaymentHistory
+    ? "EXISTING_CUSTOMER"
+    : "NEW_CUSTOMER";
+}
+
 function getCustomerText(
   customer,
   thaiText,
@@ -10116,7 +10149,7 @@ app.post("/sheet-control", async (req, res) => {
       getCustomerText(
         customer,
 
-        "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+        "รีวิวถูกนำออกเรียบร้อยครับ ✅\n\n" +
 
         `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
