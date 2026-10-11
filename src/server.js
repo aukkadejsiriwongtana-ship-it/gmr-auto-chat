@@ -971,6 +971,8 @@ return {
 async function sendLegacyCustomerMatchRequest({
   customer,
   legacyCustomer,
+  message = null,
+  messageType = "text",
 }) {
   const token =
     process.env.LINE_CHANNEL_ACCESS_TOKEN;
@@ -1175,16 +1177,21 @@ async function sendLegacyCustomerMatchRequest({
   // ========================================
 
   await setLegacyCustomerPendingMatch({
-    legacyCustomerId:
-      legacyCustomer.id,
+  legacyCustomerId:
+    legacyCustomer.id,
 
-    customerId:
-      customer.id,
+  customerId:
+    customer.id,
 
-    lineGroupMessageId:
-      messageId,
-  });
+  lineGroupMessageId:
+    messageId,
 
+  pendingMessageText:
+    message,
+
+  pendingMessageType:
+    messageType,
+});
 
   return {
     messageId,
@@ -2479,11 +2486,17 @@ if (
 
     try {
 
-      const matchRequest =
-        await sendLegacyCustomerMatchRequest({
-          customer,
-          legacyCustomer,
-        });
+     const matchRequest =
+  await sendLegacyCustomerMatchRequest({
+    customer,
+    legacyCustomer,
+
+    message:
+      message || null,
+
+    messageType:
+      messageType || "text",
+  });
 
 
       await updateConversationState({
