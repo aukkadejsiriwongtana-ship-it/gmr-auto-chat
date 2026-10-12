@@ -1135,6 +1135,173 @@ export async function syncCustomerMapsForExistingCustomer(
 }
 
 // =========================================================
+// BACKFILL MAPS FOR ALL EXISTING CUSTOMERS
+//
+// ใช้ครั้งแรกตอนเปิดระบบ Reactivation Monitor
+//
+// Existing Customer:
+// ต้องมี payment_verified = true
+//
+// จากนั้น:
+// - หา customer ที่เคยจ่ายเงินจริงทั้งหมด
+// - sync Map ที่เคยส่งงานมาเข้า gmr_customer_maps
+// =========================================================
+
+export async function backfillExistingCustomerMaps() {
+  // -----------------------------------------
+  // 1. ดึง verified payments ทั้งหมด
+  // -----------------------------------------
+
+  const {
+    data: payments,
+    error: paymentsError,
+  } = await supabase
+    .from("gmr_payments")
+    .select("job_id")
+    .eq(
+      "payment_verified",
+      true
+    )
+    .not(
+      "job_id",
+      "is",
+      null
+    );
+
+  if (paymentsError) {
+    throw paymentsError;
+  }
+
+  if (
+    !payments ||
+    payments.length === 0
+  ) {
+    return {
+      ok: true,
+      customers: 0,
+      maps: 0,
+      results: [],
+    };
+  }
+
+  // -----------------------------------------
+  // 2. กัน job_id ซ้ำ
+  // -----------------------------------------
+
+  const jobIds =
+    [
+      ...new Set(
+        payments
+          .map(
+            (payment) =>
+              payment.job_id
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+  if (jobIds.length === 0) {
+    return {
+      ok: true,
+      customers: 0,
+      maps: 0,
+      results: [],
+    };
+  }
+
+  // -----------------------------------------
+  // 3. หา customer_id จาก jobs
+  // -----------------------------------------
+
+  const {
+    data: paidJobs,
+    error: jobsError,
+  } = await supabase
+    .from("gmr_jobs")
+    .select(
+      "id, customer_id"
+    )
+    .in(
+      "id",
+      jobIds
+    );
+
+  if (jobsError) {
+    throw jobsError;
+  }
+
+  const customerIds =
+    [
+      ...new Set(
+        (paidJobs || [])
+          .map(
+            (job) =>
+              job.customer_id
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+  // -----------------------------------------
+  // 4. Sync Map ของลูกค้าแต่ละคน
+  // -----------------------------------------
+
+  const results = [];
+
+  let totalMaps = 0;
+
+  for (
+    const customerId of
+    customerIds
+  ) {
+    try {
+      const result =
+        await syncCustomerMapsForExistingCustomer(
+          customerId
+        );
+
+      totalMaps +=
+        Number(
+          result?.count || 0
+        );
+
+      results.push({
+        customerId,
+        ok: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "BACKFILL CUSTOMER MAP ERROR:",
+        {
+          customerId,
+          error:
+            error?.message ||
+            String(error),
+        }
+      );
+
+      results.push({
+        customerId,
+        ok: false,
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    customers:
+      customerIds.length,
+    maps:
+      totalMaps,
+    results,
+  };
+}
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
