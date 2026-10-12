@@ -964,6 +964,177 @@ export async function hasPaymentByCustomerId(
 }
 
 // =========================================================
+// SYNC CUSTOMER MAPS FOR EXISTING CUSTOMER
+//
+// Existing customer = มี payment_verified = true อย่างน้อย 1 งาน
+//
+// เมื่อเป็นลูกค้าเก่าแล้ว:
+// - เอา Map ทุกอันที่ customer คนนี้เคยส่งเข้าระบบ
+// - เก็บไว้ใน gmr_customer_maps
+// - กัน Map ซ้ำด้วย customer_id + place_id
+//
+// ใช้สำหรับ Reactivation Monitor ทุก 3 วัน
+// =========================================================
+
+export async function syncCustomerMapsForExistingCustomer(
+  customerId
+) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in syncCustomerMapsForExistingCustomer"
+    );
+  }
+
+  // -----------------------------------------
+  // 1. ต้องเป็น Existing Customer ก่อน
+  // -----------------------------------------
+
+  const isExisting =
+    await hasPaymentByCustomerId(
+      customerId
+    );
+
+  if (!isExisting) {
+    return {
+      synced: false,
+      reason: "not_existing_customer",
+      count: 0,
+    };
+  }
+
+  // -----------------------------------------
+  // 2. ดึง Map ทุกอันที่ customer เคยส่ง
+  // -----------------------------------------
+
+  const {
+    data: jobs,
+    error: jobsError,
+  } = await supabase
+    .from("gmr_jobs")
+    .select(
+      "customer_id, business_name, place_id, map_url"
+    )
+    .eq(
+      "customer_id",
+      customerId
+    )
+    .not(
+      "place_id",
+      "is",
+      null
+    );
+
+  if (jobsError) {
+    throw jobsError;
+  }
+
+  if (
+    !jobs ||
+    jobs.length === 0
+  ) {
+    return {
+      synced: true,
+      reason: "no_maps",
+      count: 0,
+    };
+  }
+
+  // -----------------------------------------
+  // 3. กัน place_id ซ้ำใน jobs ก่อน upsert
+  // -----------------------------------------
+
+  const mapByPlaceId =
+    new Map();
+
+  for (const job of jobs) {
+    const placeId =
+      String(
+        job?.place_id || ""
+      ).trim();
+
+    if (!placeId) {
+      continue;
+    }
+
+    mapByPlaceId.set(
+      placeId,
+      {
+        customer_id:
+          customerId,
+
+        business_name:
+          job.business_name ||
+          null,
+
+        place_id:
+          placeId,
+
+        map_url:
+          job.map_url ||
+          null,
+
+        is_active:
+          true,
+
+        updated_at:
+          new Date()
+            .toISOString(),
+      }
+    );
+  }
+
+  const maps =
+    Array.from(
+      mapByPlaceId.values()
+    );
+
+  if (maps.length === 0) {
+    return {
+      synced: true,
+      reason: "no_valid_maps",
+      count: 0,
+    };
+  }
+
+  // -----------------------------------------
+  // 4. Upsert
+  // -----------------------------------------
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_customer_maps"
+    )
+    .upsert(
+      maps,
+      {
+        onConflict:
+          "customer_id,place_id",
+
+        ignoreDuplicates:
+          false,
+      }
+    )
+    .select();
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    synced: true,
+    reason: "ok",
+    count:
+      data?.length ||
+      maps.length,
+    maps:
+      data || [],
+  };
+}
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
