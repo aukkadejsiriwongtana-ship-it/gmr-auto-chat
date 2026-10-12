@@ -4725,9 +4725,9 @@ if (
 // =========================================================
 
 const confirmAllWords = [
-  "ยืนยันทั้งหมด",
-  "ยืนยันทั้งหมดครับ",
-  "ยืนยันทั้งหมดค่ะ",
+  "ยืนยัน",
+  "ยืนยันครับ",
+  "ยืนยันค่ะ",
 
   "ยืนยันรายการทั้งหมด",
   "ตกลงทั้งหมด",
@@ -4988,7 +4988,7 @@ if (
       getCustomerText(
         customer,
 
-        "ระบบยังยืนยันรายการไม่สำเร็จครับ กรุณารอสักครู่แล้วพิมพ์ “ยืนยันทั้งหมด” อีกครั้งได้เลยครับ",
+        "ระบบยังยืนยันรายการไม่สำเร็จครับ กรุณารอสักครู่แล้วพิมพ์ “ยืนยัน” อีกครั้งได้เลยครับ",
 
         'The batch could not be confirmed yet. Please wait a moment and reply "Confirm all" again.'
       );
@@ -6178,7 +6178,7 @@ departmentId:
 ขณะนี้มีทั้งหมด ${batchJobs.length} รีวิวในรายการ
 
 สามารถส่งลิงก์รีวิวถัดไปมาได้เลยครับ
-เมื่อส่งครบแล้ว พิมพ์ “ยืนยันทั้งหมด” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
+เมื่อส่งครบแล้ว พิมพ์ “ยืนยัน” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
 
           `Checked. We can proceed with this review. ✅
 
@@ -6400,7 +6400,7 @@ directRating,
 const botReply =
   getCustomerText(
     customer,
-    "เช็คแล้วดำเนินการได้ครับ",
+    "เช็คแล้ว รีวิวนี้สามารถดำเนินการได้ครับ",
     "Checked. We can proceed with this review."
   );
 
@@ -7225,7 +7225,7 @@ const imageReviews =
  const botReply =
   getCustomerText(
     customer,
-    "เช็คแล้วดำเนินการได้ครับ",
+    "เช็คแล้ว รีวิวนี้สามารถดำเนินการได้ครับ",
     "Checked. We can proceed with this review."
   );
 
@@ -10548,7 +10548,7 @@ if (
   // 6. Conversation กลับ WAITING_MAP
   //
   // เพื่อรับ Review link เพิ่มได้
-  // และรองรับ "ยืนยันทั้งหมด"
+  // และรองรับ "ยืนยัน"
   // ========================================
 
   await updateConversationState({
@@ -10630,7 +10630,7 @@ if (
 ขณะนี้มีทั้งหมด ${batchJobs.length} รีวิวในรายการ
 
 สามารถส่งลิงก์รีวิวถัดไปมาได้เลยครับ
-เมื่อส่งครบแล้ว พิมพ์ “ยืนยันทั้งหมด” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
+เมื่อส่งครบแล้ว พิมพ์ “ยืนยัน” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
 
       `Checked. We can proceed with this review. ✅
 
@@ -15363,7 +15363,7 @@ app.get("/test-mark-removed", async (req, res) => {
         getCustomerText(
           customer,
 
-          "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+          "รีวิวที่ให้ดำเนินการ ออกแล้วนะครับ ✅\n\n" +
 
           `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
@@ -15376,7 +15376,7 @@ app.get("/test-mark-removed", async (req, res) => {
 
           "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
 
-          "The completed reviews have been successfully processed. ✅\n\n" +
+          "The assigned reviews have been successfully processed. ✅\n\n" +
 
           `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
 
@@ -15394,7 +15394,7 @@ app.get("/test-mark-removed", async (req, res) => {
         getCustomerText(
           customer,
 
-          "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+          "รีวิวที่ให้ดำเนินการ ออกแล้วนะครับ ✅\n\n" +
 
           `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
@@ -15406,7 +15406,7 @@ app.get("/test-mark-removed", async (req, res) => {
           "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
           `${stripePaymentLink}`,
 
-          "The completed reviews have been successfully processed. ✅\n\n" +
+          "The assigned reviews have been successfully processed. ✅\n\n" +
 
           `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
 
@@ -16167,7 +16167,7 @@ app.post("/sheet-control", async (req, res) => {
       getCustomerText(
         customer,
 
-        "รีวิวที่ดำเนินการสำเร็จเรียบร้อยแล้วครับ ✅\n\n" +
+        "รีวิวที่ให้ดำเนินการ ออกแล้วนะครับ ✅\n\n" +
 
         `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
@@ -16179,7 +16179,7 @@ app.post("/sheet-control", async (req, res) => {
         "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
         `${stripePaymentLink}`,
 
-        "The completed reviews have been successfully processed. ✅\n\n" +
+        "The assigned reviews have been successfully processed. ✅\n\n" +
 
         `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
 
