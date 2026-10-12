@@ -1091,41 +1091,41 @@ export async function syncCustomerMapsForExistingCustomer(
   // ถ้าไม่มี place_id แต่มี review_url
   // เก็บไว้ด้วย key review_url ชั่วคราว
   if (reviewUrl) {
-    const fallbackKey =
-      `review:${reviewUrl}`;
+  const fallbackKey =
+    `review:${reviewUrl}`;
 
-    mapByPlaceId.set(
-  fallbackKey,
-  {
-    customer_id:
-      customerId,
+  mapByPlaceId.set(
+    fallbackKey,
+    {
+      customer_id:
+        customerId,
 
-    business_name:
-      job.business_name ||
-      null,
+      business_name:
+        job.business_name ||
+        null,
 
-    place_id:
-      null,
+      place_id:
+        null,
 
-    map_url:
-      mapUrl ||
-      null,
+      map_url:
+        mapUrl ||
+        null,
 
-     source_review_url:
-      reviewUrl || null,
+      source_review_url:
+        reviewUrl,
 
-    map_key:
-      `place:${placeId}`,
+      map_key:
+        fallbackKey,
 
-    is_active:
-      true,
+      is_active:
+        true,
 
-    updated_at:
-      new Date()
-        .toISOString(),
-  }
-);
-  }
+      updated_at:
+        new Date()
+          .toISOString(),
+    }
+  );
+}
 }
 
   const maps =
