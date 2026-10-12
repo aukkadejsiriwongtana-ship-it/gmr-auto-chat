@@ -1446,6 +1446,112 @@ export async function updateResolvedCustomerMap({
 }
 
 // =========================================================
+// GET CUSTOMER MAPS DUE FOR REACTIVATION CHECK
+//
+// ตรวจ:
+// - active เท่านั้น
+// - ต้องมี place_id แล้ว
+// - ยังไม่เคยตรวจ
+//   หรือ
+// - ตรวจล่าสุดเกิน 3 วันแล้ว
+// =========================================================
+
+export async function getCustomerMapsDueForReactivationCheck() {
+  const cutoff =
+    new Date(
+      Date.now() -
+      3 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_customer_maps")
+    .select("*")
+    .eq(
+      "is_active",
+      true
+    )
+    .not(
+      "place_id",
+      "is",
+      null
+    )
+    .or(
+      `last_checked_at.is.null,last_checked_at.lte.${cutoff}`
+    )
+    .order(
+      "last_checked_at",
+      {
+        ascending: true,
+        nullsFirst: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+// =========================================================
+// MARK CUSTOMER MAP CHECKED
+// =========================================================
+
+export async function markCustomerMapChecked({
+  customerMapId,
+  checkedAt = null,
+  lastReviewSeenAt = null,
+}) {
+  if (!customerMapId) {
+    throw new Error(
+      "Missing customerMapId in markCustomerMapChecked"
+    );
+  }
+
+  const now =
+    checkedAt ||
+    new Date().toISOString();
+
+  const updateData = {
+    last_checked_at:
+      now,
+
+    updated_at:
+      now,
+  };
+
+  if (lastReviewSeenAt) {
+    updateData.last_review_seen_at =
+      lastReviewSeenAt;
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_customer_maps")
+    .update(
+      updateData
+    )
+    .eq(
+      "id",
+      customerMapId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}ไป
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
