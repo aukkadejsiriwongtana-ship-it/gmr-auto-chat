@@ -183,6 +183,259 @@ export async function updateCustomerLanguage(
 }
 
 // =========================================================
+// LANGUAGE LOCK
+// =========================================================
+
+export async function lockCustomerLanguageToThai(
+  customerId
+) {
+  const { data, error } =
+    await supabase
+      .from("gmr_customers")
+      .update({
+        language: "th",
+        language_locked: true,
+      })
+      .eq(
+        "id",
+        customerId
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+// =========================================================
+// FAQ
+// =========================================================
+
+export async function getActiveFaqs() {
+  const { data, error } =
+    await supabase
+      .from("gmr_faqs")
+      .select("*")
+      .eq(
+        "is_active",
+        true
+      )
+      .order(
+        "priority",
+        {
+          ascending: true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+export async function registerFaqHit({
+  customerId,
+  faqKey,
+}) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in registerFaqHit"
+    );
+  }
+
+  if (!faqKey) {
+    throw new Error(
+      "Missing faqKey in registerFaqHit"
+    );
+  }
+
+  const { data: existing, error: findError } =
+    await supabase
+      .from("gmr_faq_hits")
+      .select("*")
+      .eq(
+        "customer_id",
+        customerId
+      )
+      .eq(
+        "faq_key",
+        faqKey
+      )
+      .maybeSingle();
+
+  if (findError) {
+    throw findError;
+  }
+
+  if (!existing) {
+    const { data, error } =
+      await supabase
+        .from("gmr_faq_hits")
+        .insert({
+          customer_id:
+            customerId,
+
+          faq_key:
+            faqKey,
+
+          hit_count:
+            1,
+
+          first_asked_at:
+            new Date().toISOString(),
+
+          last_asked_at:
+            new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return data;
+  }
+
+
+  const { data, error } =
+    await supabase
+      .from("gmr_faq_hits")
+      .update({
+        hit_count:
+          Number(
+            existing.hit_count || 0
+          ) + 1,
+
+        last_asked_at:
+          new Date().toISOString(),
+      })
+      .eq(
+        "id",
+        existing.id
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+// =========================================================
+// BOT CONTROL
+// =========================================================
+
+export async function getBotControl() {
+  const { data, error } =
+    await supabase
+      .from(
+        "gmr_system_settings"
+      )
+      .select(
+        "setting_value"
+      )
+      .eq(
+        "setting_key",
+        "bot_control"
+      )
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  const value =
+    data?.setting_value ||
+    {};
+
+  return {
+    enabled:
+      value.enabled !== false,
+
+    pausedAt:
+      value.paused_at ||
+      null,
+
+    resumedAt:
+      value.resumed_at ||
+      null,
+  };
+}
+
+
+export async function setBotControl(
+  enabled
+) {
+  const now =
+    new Date().toISOString();
+
+  const current =
+    await getBotControl();
+
+  const settingValue =
+    enabled
+      ? {
+          enabled: true,
+
+          paused_at:
+            current.pausedAt,
+
+          resumed_at:
+            now,
+        }
+      : {
+          enabled: false,
+
+          paused_at:
+            now,
+
+          resumed_at:
+            current.resumedAt,
+        };
+
+
+  const { data, error } =
+    await supabase
+      .from(
+        "gmr_system_settings"
+      )
+      .upsert(
+        {
+          setting_key:
+            "bot_control",
+
+          setting_value:
+            settingValue,
+
+          updated_at:
+            now,
+        },
+        {
+          onConflict:
+            "setting_key",
+        }
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+// =========================================================
 // CONVERSATION / STATE
 // =========================================================
 
