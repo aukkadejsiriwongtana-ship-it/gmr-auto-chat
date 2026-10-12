@@ -112,7 +112,6 @@ import {
 
 import {
   searchPlaceByText,
-  getReviewFromDirectUrl,
 } from "./services/googleMapsService.js";
 function detectCustomerLanguage(
   message,
