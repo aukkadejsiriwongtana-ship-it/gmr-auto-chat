@@ -1095,30 +1095,36 @@ export async function syncCustomerMapsForExistingCustomer(
       `review:${reviewUrl}`;
 
     mapByPlaceId.set(
-      fallbackKey,
-      {
-        customer_id:
-          customerId,
+  fallbackKey,
+  {
+    customer_id:
+      customerId,
 
-        business_name:
-          job.business_name ||
-          null,
+    business_name:
+      job.business_name ||
+      null,
 
-        place_id:
-          null,
+    place_id:
+      null,
 
-        map_url:
-          mapUrl ||
-          null,
+    map_url:
+      mapUrl ||
+      null,
 
-        is_active:
-          true,
+     source_review_url:
+      reviewUrl || null,
 
-        updated_at:
-          new Date()
-            .toISOString(),
-      }
-    );
+    map_key:
+      `place:${placeId}`,
+
+    is_active:
+      true,
+
+    updated_at:
+      new Date()
+        .toISOString(),
+  }
+);
   }
 }
 
@@ -1146,16 +1152,16 @@ export async function syncCustomerMapsForExistingCustomer(
     .from(
       "gmr_customer_maps"
     )
-    .upsert(
-      maps,
-      {
-        onConflict:
-          "customer_id,place_id",
+   .upsert(
+  maps,
+  {
+    onConflict:
+      "customer_id,map_key",
 
-        ignoreDuplicates:
-          false,
-      }
-    )
+    ignoreDuplicates:
+      false,
+  }
+)
     .select();
 
   if (error) {
