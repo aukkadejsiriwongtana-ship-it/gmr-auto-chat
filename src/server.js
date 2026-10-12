@@ -5061,10 +5061,85 @@ const classification =
     .trim();
 
      
-  const places =
+  let places;
+
+try {
+  places =
     await searchPlaceByText(
       mapUrl
     );
+
+} catch (error) {
+  console.error(
+    "MAP URL SEARCH TEMPORARILY FAILED:",
+    {
+      customerId:
+        customer.id,
+
+      mapUrl,
+
+      error:
+        error.message,
+
+      code:
+        error?.code ||
+        null,
+
+      status:
+        error?.status ||
+        null,
+    }
+  );
+
+  const botReply =
+    getCustomerText(
+      customer,
+      "ระบบ Google Map ตอบกลับชั่วคราวไม่ได้ครับ รบกวนส่งลิงก์เดิมอีกครั้งในอีกสักครู่นะครับ",
+      "Google Maps is temporarily unavailable. Please send the same link again in a moment."
+    );
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    inputType:
+      classification.type,
+
+    botReply,
+
+    temporaryMapError:
+      true,
+  };
+}
 
 
   if (!places.length) {
