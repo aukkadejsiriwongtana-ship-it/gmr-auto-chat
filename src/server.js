@@ -85,6 +85,7 @@ claimDepartmentDispatch,
 completeDepartmentDispatch,
 markDispatchStuckAlerted,
 
+createLegacyCustomerFromSheet,
 getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
 getLegacyCustomerByLineGroupMessageId,
@@ -15623,6 +15624,265 @@ app.get("/test-google-sheet-update", async (req, res) => {
     });
   }
 });
+
+// =========================================================
+// IMPORT LEGACY CUSTOMERS FROM GOOGLE SHEET
+// =========================================================
+
+app.post(
+  "/import-legacy-customers",
+  async (req, res) => {
+    try {
+      const {
+        secret,
+        customers,
+      } = req.body || {};
+
+
+      const SHEET_CONTROL_SECRET =
+        process.env.SHEET_CONTROL_SECRET;
+
+
+      // ================================================
+      // AUTH
+      // ================================================
+
+      if (
+        !SHEET_CONTROL_SECRET ||
+        secret !== SHEET_CONTROL_SECRET
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: "Unauthorized",
+        });
+      }
+
+
+      // ================================================
+      // VALIDATE
+      // ================================================
+
+      if (
+        !Array.isArray(customers) ||
+        customers.length === 0
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "customers must be a non-empty array",
+        });
+      }
+
+
+      if (customers.length > 500) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Maximum 500 customers per import",
+        });
+      }
+
+
+      const results = [];
+
+
+      // ================================================
+      // IMPORT EACH CUSTOMER
+      // ================================================
+
+      for (
+        let i = 0;
+        i < customers.length;
+        i++
+      ) {
+        const item =
+          customers[i] || {};
+
+
+        try {
+          const result =
+            await createLegacyCustomerFromSheet({
+              platform:
+                item.platform,
+
+              platformAccount:
+                item.platformAccount,
+
+              displayName:
+                item.displayName,
+
+              businessName:
+                item.businessName,
+
+              phone:
+                item.phone,
+
+              email:
+                item.email,
+
+              newReviewRate:
+                item.newReviewRate,
+
+              newReviewCurrency:
+                item.newReviewCurrency,
+
+              oldReviewRate:
+                item.oldReviewRate,
+
+              oldReviewCurrency:
+                item.oldReviewCurrency,
+
+              hasVerifiedPayment:
+                item.hasVerifiedPayment,
+
+              note:
+                item.note,
+            });
+
+
+          results.push({
+            row:
+              i + 2,
+
+            ok:
+              true,
+
+            created:
+              result.created,
+
+            duplicate:
+              result.duplicate,
+
+            legacyCustomerId:
+              result.customer?.id || null,
+
+            displayName:
+              result.customer
+                ?.display_name ||
+              item.displayName ||
+              null,
+          });
+
+
+        } catch (error) {
+
+          console.error(
+            "LEGACY CUSTOMER IMPORT ROW ERROR:",
+            {
+              row:
+                i + 2,
+
+              displayName:
+                item.displayName,
+
+              error:
+                error.message,
+            }
+          );
+
+
+          results.push({
+            row:
+              i + 2,
+
+            ok:
+              false,
+
+            created:
+              false,
+
+            duplicate:
+              false,
+
+            displayName:
+              item.displayName || null,
+
+            error:
+              error.message,
+          });
+        }
+      }
+
+
+      // ================================================
+      // SUMMARY
+      // ================================================
+
+      const createdCount =
+        results.filter(
+          (item) =>
+            item.created === true
+        ).length;
+
+
+      const duplicateCount =
+        results.filter(
+          (item) =>
+            item.duplicate === true
+        ).length;
+
+
+      const failedCount =
+        results.filter(
+          (item) =>
+            item.ok === false
+        ).length;
+
+
+      console.log(
+        "LEGACY CUSTOMERS IMPORT COMPLETE:",
+        {
+          total:
+            results.length,
+
+          created:
+            createdCount,
+
+          duplicates:
+            duplicateCount,
+
+          failed:
+            failedCount,
+        }
+      );
+
+
+      return res.status(200).json({
+        ok:
+          failedCount === 0,
+
+        total:
+          results.length,
+
+        created:
+          createdCount,
+
+        duplicates:
+          duplicateCount,
+
+        failed:
+          failedCount,
+
+        results,
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "IMPORT LEGACY CUSTOMERS ERROR:",
+        error
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error.message,
+      });
+    }
+  }
+);
 
 // =========================================================
 // GOOGLE SHEET CONTROL
