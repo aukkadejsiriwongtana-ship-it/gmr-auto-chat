@@ -2084,42 +2084,6 @@ export async function getPendingLegacyCustomersByDisplayName(
 
   return data || [];
 }
-  const normalizedName =
-    String(
-      displayName || ""
-    ).trim();
-
-  if (!normalizedName) {
-    return [];
-  }
-
-  const {
-    data,
-    error,
-  } = await supabase
-    .from("gmr_legacy_customers")
-    .select("*")
-    .eq(
-      "match_status",
-      "pending"
-    )
-    .ilike(
-      "display_name",
-      normalizedName
-    )
-    .order(
-      "created_at",
-      {
-        ascending: true,
-      }
-    );
-
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
-}
 
 // =========================================================
 // CLAIM LEGACY CUSTOMER IMPORT
