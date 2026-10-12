@@ -5105,7 +5105,7 @@ const detectedMapUrl =
   );
     
 
-const classification =
+let classification =
   detectedMapUrl
     ? {
         type:
@@ -5120,6 +5120,102 @@ const classification =
           message || "",
       });
 
+
+// =========================================================
+// GOOGLE MAP SHORT LINK PREFLIGHT
+//
+// maps.app.goo.gl อาจเป็น
+// 1. Business Map URL
+// 2. Direct Review URL
+//
+// ให้ลองตรวจว่าเป็น Direct Review ก่อน
+// ถ้าใช่ → ส่งเข้า REVIEW_URL flow เดิม
+// ถ้าไม่ใช่ → คงเป็น MAP_URL ตามเดิม
+// =========================================================
+
+if (
+  classification.type ===
+    INPUT_TYPES.MAP_URL &&
+  detectedMapUrl
+) {
+  try {
+    const directReviewPreflight =
+      await getReviewFromDirectUrl(
+        detectedMapUrl
+      );
+
+    if (
+      directReviewPreflight?.found &&
+      directReviewPreflight?.review
+    ) {
+      classification = {
+        type:
+          INPUT_TYPES.REVIEW_URL,
+
+        confidence:
+          1,
+      };
+
+      console.log(
+        "MAP SHORT LINK DETECTED AS DIRECT REVIEW:",
+        {
+          customerId:
+            customer.id,
+
+          reviewUrl:
+            detectedMapUrl,
+
+          reviewerName:
+            directReviewPreflight
+              .review
+              ?.reviewerName ||
+            null,
+
+          rating:
+            directReviewPreflight
+              .review
+              ?.rating ||
+            null,
+        }
+      );
+
+    } else {
+      console.log(
+        "MAP SHORT LINK IS NOT DIRECT REVIEW:",
+        {
+          customerId:
+            customer.id,
+
+          mapUrl:
+            detectedMapUrl,
+
+          reason:
+            directReviewPreflight
+              ?.reason ||
+            null,
+        }
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      "DIRECT REVIEW PREFLIGHT FAILED:",
+      {
+        customerId:
+          customer.id,
+
+        mapUrl:
+          detectedMapUrl,
+
+        error:
+          error.message,
+      }
+    );
+
+    // ไม่ block flow
+    // ปล่อยให้ MAP_URL flow เดิมทำงานต่อ
+  }
+}
 
     // -----------------------------------------------------
     // MAP URL
