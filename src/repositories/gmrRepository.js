@@ -2470,3 +2470,49 @@ export async function completeDepartmentDispatch({
     }
   );
 }
+
+export async function markDispatchStuckAlerted({
+  dispatchRoundId,
+  alertedAt = null,
+}) {
+  if (!dispatchRoundId) {
+    throw new Error(
+      "markDispatchStuckAlerted requires dispatchRoundId"
+    );
+  }
+
+
+  const params = {
+    p_round_id:
+      dispatchRoundId,
+
+    p_alerted_at:
+      alertedAt ||
+      new Date().toISOString(),
+  };
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabase.rpc(
+      "mark_dispatch_stuck_alerted",
+      params
+    );
+
+
+  if (error) {
+    throw error;
+  }
+
+
+  return (
+    data || {
+      ok: false,
+      updated: false,
+      reason:
+        "empty_mark_stuck_alert_response",
+    }
+  );
+}
