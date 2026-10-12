@@ -430,6 +430,7 @@ export async function createJob({
 
   departmentId = null,
   monitoredMapId = null,
+  legacySourceId = null,
 
   status = "draft",
 }) {
@@ -447,31 +448,9 @@ export async function createJob({
 
       department_id: departmentId,
       monitored_map_id: monitoredMapId,
+      legacy_source_id: legacySourceId,
 
       status,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    throw error;
-  }
-
-  return data;
-}
-  const { data, error } = await supabase
-    .from("gmr_jobs")
-    .insert({
-      customer_id: customerId,
-      business_name: businessName,
-      place_id: placeId,
-      map_url: mapUrl,
-      review_url: reviewUrl,
-      review_case: reviewCase,
-      review_visible: reviewVisible,
-      review_has_text: reviewHasText,
-status,
-legacy_source_id: legacySourceId,
     })
     .select()
     .single();
