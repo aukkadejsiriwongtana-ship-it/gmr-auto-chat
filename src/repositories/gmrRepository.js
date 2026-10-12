@@ -2379,3 +2379,94 @@ export async function updateDepartmentLastDispatchedAt(
 
   return data;
 }
+
+// =========================================================
+// ATOMIC DEPARTMENT DISPATCH
+// =========================================================
+
+export async function claimDepartmentDispatch({
+  departmentId,
+  claimedAt = null,
+}) {
+  if (!departmentId) {
+    throw new Error(
+      "Missing departmentId in claimDepartmentDispatch"
+    );
+  }
+
+  const params = {
+    p_department_id:
+      departmentId,
+
+    p_claimed_at:
+      claimedAt ||
+      new Date().toISOString(),
+  };
+
+  const {
+    data,
+    error,
+  } = await supabase.rpc(
+    "claim_department_dispatch",
+    params
+  );
+
+  if (error) {
+    throw error;
+  }
+
+  return (
+    data || {
+      ok: false,
+      claimed: false,
+      reason:
+        "empty_claim_response",
+    }
+  );
+}
+
+
+// =========================================================
+// COMPLETE DEPARTMENT DISPATCH
+// เรียกหลัง LINE ส่งสำเร็จแล้วเท่านั้น
+// =========================================================
+
+export async function completeDepartmentDispatch({
+  dispatchRoundId,
+  dispatchedAt = null,
+}) {
+  if (!dispatchRoundId) {
+    throw new Error(
+      "Missing dispatchRoundId in completeDepartmentDispatch"
+    );
+  }
+
+  const params = {
+    p_round_id:
+      dispatchRoundId,
+
+    p_dispatched_at:
+      dispatchedAt ||
+      new Date().toISOString(),
+  };
+
+  const {
+    data,
+    error,
+  } = await supabase.rpc(
+    "complete_department_dispatch",
+    params
+  );
+
+  if (error) {
+    throw error;
+  }
+
+  return (
+    data || {
+      ok: false,
+      reason:
+        "empty_complete_response",
+    }
+  );
+}
