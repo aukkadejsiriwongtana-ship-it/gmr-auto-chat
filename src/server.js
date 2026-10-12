@@ -12335,6 +12335,98 @@ if (
 }
 
 // ========================================
+// BOT PAUSE GATE
+// รับข้อความเข้า + บันทึกไว้
+// แต่ไม่ตอบ / ไม่เดิน Flow / ไม่วิเคราะห์รูป
+// ========================================
+
+const botControl =
+  await getBotControl();
+
+if (
+  botControl.enabled !== true
+) {
+  try {
+    const existingCustomer =
+      await getCustomerByPlatformUserId(
+        "line",
+        platformUserId
+      );
+
+    const pausedLanguage =
+      existingCustomer?.language ||
+      detectCustomerLanguage(
+        message,
+        "th"
+      );
+
+    const pausedCustomer =
+      await getOrCreateCustomer({
+        platform:
+          "line",
+
+        platformUserId,
+
+        displayName:
+          lineDisplayName,
+
+        language:
+          pausedLanguage,
+      });
+
+    await saveMessage({
+      customerId:
+        pausedCustomer.id,
+
+      platform:
+        "line",
+
+      direction:
+        "inbound",
+
+      messageType,
+
+      messageText:
+        message || null,
+    });
+
+    if (message) {
+      await updateLastUserMessage(
+        pausedCustomer.id,
+        message
+      );
+    }
+
+    console.log(
+      "BOT PAUSED - MESSAGE SAVED WITHOUT PROCESSING:",
+      {
+        customerId:
+          pausedCustomer.id,
+
+        platformUserId,
+
+        messageType,
+
+        message:
+          message || null,
+
+        pausedAt:
+          botControl.pausedAt ||
+          null,
+      }
+    );
+
+  } catch (error) {
+    console.error(
+      "BOT PAUSED MESSAGE SAVE FAILED:",
+      error
+    );
+  }
+
+  continue;
+}
+      
+// ========================================
 // IGNORE MESSAGE WHILE MAP IS PROCESSING
 // ถ้า Bot กำลังตรวจ Map ของลูกค้าคนนี้อยู่
 // ไม่ตอบ / ไม่ส่งเข้ากลุ่ม / ไม่เปลี่ยน State
