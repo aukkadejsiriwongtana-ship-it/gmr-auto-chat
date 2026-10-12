@@ -78,6 +78,7 @@ getDepartmentForReviewAge,
 getActiveDepartments,
 claimDepartmentDispatch,
 completeDepartmentDispatch,
+markDispatchStuckAlerted,
 
 getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
@@ -1107,11 +1108,13 @@ async function runDepartmentDispatch() {
 
 
     if (
-      Number.isFinite(
-        stuckMinutes
-      ) &&
-      stuckMinutes >= 15
-    ) {
+  Number.isFinite(
+    stuckMinutes
+  ) &&
+  stuckMinutes >= 15 &&
+  !claimResult
+    ?.stuck_alerted_at
+) {
       try {
         await sendDispatchStuckAlertToMainGroup({
           department,
@@ -1127,6 +1130,15 @@ async function runDepartmentDispatch() {
           stuckMinutes,
         });
 
+await markDispatchStuckAlerted({
+  dispatchRoundId:
+    claimResult
+      .dispatch_round_id,
+
+  alertedAt:
+    new Date().toISOString(),
+});
+        
       } catch (alertError) {
         console.error(
           "DISPATCH STUCK ALERT ERROR:",
