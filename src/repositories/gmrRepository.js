@@ -1769,6 +1769,197 @@ export async function getLegacyCustomerById(
   return data;
 }
 
+// =========================================================
+// CREATE LEGACY CUSTOMER FROM SHEET
+// =========================================================
+
+export async function createLegacyCustomerFromSheet({
+  platform = null,
+  platformAccount = null,
+  displayName,
+  businessName = null,
+  phone = null,
+  email = null,
+
+  newReviewRate = null,
+  newReviewCurrency = "THB",
+
+  oldReviewRate = null,
+  oldReviewCurrency = "THB",
+
+  hasVerifiedPayment = false,
+  note = null,
+}) {
+  const normalizedDisplayName =
+    String(displayName || "").trim();
+
+  if (!normalizedDisplayName) {
+    throw new Error(
+      "Missing displayName in createLegacyCustomerFromSheet"
+    );
+  }
+
+
+  // -------------------------------------------------------
+  // กันกด Import ซ้ำ
+  // -------------------------------------------------------
+
+  let existingQuery =
+    supabase
+      .from("gmr_legacy_customers")
+      .select("*")
+      .ilike(
+        "display_name",
+        normalizedDisplayName
+      );
+
+
+  if (phone) {
+    existingQuery =
+      existingQuery.eq(
+        "phone",
+        String(phone).trim()
+      );
+  }
+
+
+  if (businessName) {
+    existingQuery =
+      existingQuery.ilike(
+        "business_name",
+        String(businessName).trim()
+      );
+  }
+
+
+  const {
+    data: existingRows,
+    error: existingError,
+  } = await existingQuery
+    .order(
+      "created_at",
+      {
+        ascending: false,
+      }
+    )
+    .limit(1);
+
+
+  if (existingError) {
+    throw existingError;
+  }
+
+
+  if (
+    Array.isArray(existingRows) &&
+    existingRows.length > 0
+  ) {
+    return {
+      created: false,
+      duplicate: true,
+      customer:
+        existingRows[0],
+    };
+  }
+
+
+  // -------------------------------------------------------
+  // CREATE
+  // -------------------------------------------------------
+
+  const {
+    data,
+    error,
+  } =
+    await supabase
+      .from("gmr_legacy_customers")
+      .insert({
+        platform:
+          platform
+            ? String(platform)
+                .trim()
+                .toLowerCase()
+            : null,
+
+        platform_account:
+          platformAccount
+            ? String(platformAccount)
+                .trim()
+            : null,
+
+        display_name:
+          normalizedDisplayName,
+
+        business_name:
+          businessName
+            ? String(businessName).trim()
+            : null,
+
+        phone:
+          phone
+            ? String(phone).trim()
+            : null,
+
+        email:
+          email
+            ? String(email).trim()
+            : null,
+
+        new_review_rate:
+          newReviewRate === null ||
+          newReviewRate === undefined ||
+          newReviewRate === ""
+            ? null
+            : Number(newReviewRate),
+
+        new_review_currency:
+          String(
+            newReviewCurrency || "THB"
+          )
+            .trim()
+            .toUpperCase(),
+
+        old_review_rate:
+          oldReviewRate === null ||
+          oldReviewRate === undefined ||
+          oldReviewRate === ""
+            ? null
+            : Number(oldReviewRate),
+
+        old_review_currency:
+          String(
+            oldReviewCurrency || "THB"
+          )
+            .trim()
+            .toUpperCase(),
+
+        has_verified_payment:
+          hasVerifiedPayment === true,
+
+        note:
+          note
+            ? String(note).trim()
+            : null,
+
+        match_status:
+          "pending",
+      })
+      .select()
+      .single();
+
+
+  if (error) {
+    throw error;
+  }
+
+
+  return {
+    created: true,
+    duplicate: false,
+    customer:
+      data,
+  };
+}
 
 export async function getPendingLegacyCustomersByDisplayName(
   displayName
