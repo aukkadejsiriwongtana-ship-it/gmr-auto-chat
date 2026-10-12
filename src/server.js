@@ -1900,9 +1900,8 @@ async function startApprovedJob({
     );
 
 
-  const startedAt =
-    new Date().toISOString();
-
+ const queuedAt =
+  new Date().toISOString();
 
   await updateConversationState({
     customerId:
@@ -1920,66 +1919,25 @@ async function startApprovedJob({
 
 
   const updatedJob =
-    await updateJob(
-      job.id,
-      {
-        status:
-          "processing",
-
-        started_at:
-          startedAt,
-      }
-    );
-
-
-  try {
-    await appendJobToGoogleSheet({
-      jobId:
-        updatedJob.id,
-
-      customerId:
-        customer.id,
-
-      customerName:
-        customer.display_name ||
-        "",
-
-      platform,
-
-      phone:
-        phone || "",
-
-      businessName:
-        updatedJob.business_name ||
-        "",
-
-      reviewUrl:
-        updatedJob.review_url ||
-        "",
-
-      price:
-        updatedJob.price ||
-        "",
-
+  await updateJob(
+    job.id,
+    {
       status:
-        updatedJob.status ||
-        "processing",
+        "queued",
 
-      startedAt,
+      queued_at:
+        queuedAt,
 
-      removedAt:
-        "",
+      started_at:
+        null,
 
-      paidAt:
-        "",
-    });
+      dispatched_at:
+        null,
+    }
+  );
 
-  } catch (error) {
-    console.error(
-      "GOOGLE SHEET NOTIFY FAILED:",
-      error
-    );
-  }
+
+
 
 
   await saveMessage({
@@ -2006,10 +1964,10 @@ async function startApprovedJob({
 
 
   return {
-    updatedJob,
-    botReply,
-    startedAt,
-  };
+  updatedJob,
+  botReply,
+  queuedAt,
+};
 }
 
 function getGlobalFaqReply(
