@@ -1776,6 +1776,7 @@ export async function getLegacyCustomerById(
 export async function createLegacyCustomerFromSheet({
   platform = null,
   platformAccount = null,
+  legacyCustomerId = null,
   displayName,
   businessName = null,
   phone = null,
@@ -1790,6 +1791,7 @@ export async function createLegacyCustomerFromSheet({
   hasVerifiedPayment = false,
   note = null,
 }) {
+  
   const normalizedDisplayName =
     String(displayName || "").trim();
 
@@ -1799,7 +1801,48 @@ export async function createLegacyCustomerFromSheet({
     );
   }
 
+// -------------------------------------------------------
+// ถ้ามี legacy_customer_id แล้ว
+// ใช้ ID เป็นตัวอ้างอิงหลัก
+// ไม่สร้าง record ใหม่
+// -------------------------------------------------------
 
+const normalizedLegacyCustomerId =
+  String(
+    legacyCustomerId || ""
+  ).trim();
+
+if (normalizedLegacyCustomerId) {
+  const {
+    data: existingById,
+    error: existingByIdError,
+  } =
+    await supabase
+      .from("gmr_legacy_customers")
+      .select("*")
+      .eq(
+        "id",
+        normalizedLegacyCustomerId
+      )
+      .maybeSingle();
+
+  if (existingByIdError) {
+    throw existingByIdError;
+  }
+
+  if (!existingById) {
+    throw new Error(
+      `Legacy customer not found: ${normalizedLegacyCustomerId}`
+    );
+  }
+
+  return {
+    created: false,
+    duplicate: true,
+    customer:
+      existingById,
+  };
+}
   // -------------------------------------------------------
   // กันกด Import ซ้ำ
   // -------------------------------------------------------
