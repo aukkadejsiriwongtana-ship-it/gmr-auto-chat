@@ -13929,22 +13929,111 @@ if (
     continue;
   }
 
-  const latestJob =
-    await getLatestJobByCustomerId(
-      customer.id
+  const waitingPaymentJobs =
+  await getWaitingPaymentJobsByCustomerId(
+    customer.id
+  );
+
+if (
+  !Array.isArray(
+    waitingPaymentJobs
+  ) ||
+  waitingPaymentJobs.length === 0
+) {
+  console.log(
+    "PAYMENT SLIP - NO WAITING PAYMENT JOB FOUND",
+    {
+      customerId:
+        customer.id,
+    }
+  );
+
+  const botReply =
+    getCustomerText(
+      customer,
+      "ยังไม่พบงานที่กำลังรอชำระเงินครับ หากเพิ่งได้รับแจ้งยอด รบกวนส่งข้อความมาอีกครั้งหรือติดต่อทีมงานได้เลยครับ",
+      "I couldn't find any job currently waiting for payment. If you just received a payment request, please send a message again or contact our team."
     );
 
-  if (!latestJob) {
-    console.log(
-      "PAYMENT SLIP - NO JOB FOUND",
-      {
-        customerId:
-          customer.id,
-      }
-    );
+  await sendMessageToCustomer({
+    platform:
+      customer.platform,
 
-    continue;
-  }
+    platformUserId:
+      customer.platform_user_id,
+
+    text:
+      botReply,
+  });
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      customer.platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  continue;
+}
+
+// ========================================
+// PAYMENT JOB SELECTION
+//
+// 1 waiting job
+// → auto payment verification ได้
+//
+// มากกว่า 1 waiting job
+// → ยอดที่ลูกค้าได้รับอาจเป็นยอดรวม
+// → ห้ามเดาว่าเป็น Job ไหน
+// → ส่งให้ทีมตรวจ
+// ========================================
+
+const hasMultipleWaitingPaymentJobs =
+  waitingPaymentJobs.length > 1;
+
+const paymentJob =
+  waitingPaymentJobs[0];
+
+
+if (
+  hasMultipleWaitingPaymentJobs
+) {
+  console.log(
+    "MULTIPLE WAITING PAYMENT JOBS - HUMAN REVIEW REQUIRED:",
+    {
+      customerId:
+        customer.id,
+
+      waitingPaymentCount:
+        waitingPaymentJobs.length,
+
+      waitingPaymentJobIds:
+        waitingPaymentJobs.map(
+          (job) =>
+            job.id
+        ),
+
+      slipAmount:
+        imageClassification.amount ||
+        null,
+    }
+  );
+}
 
 let paymentSlipUpload =
   null;
@@ -13966,7 +14055,7 @@ if (
           customer.id,
 
         jobId:
-          latestJob.id,
+          paymentJob.id,
 
         messageId,
       });
@@ -13975,7 +14064,7 @@ if (
       "PAYMENT SLIP UPLOADED:",
       {
         jobId:
-          latestJob.id,
+          paymentJob.id,
 
         filePath:
           paymentSlipUpload.filePath,
@@ -13988,27 +14077,32 @@ if (
     );
   }
 }
-  
-  const paymentVerification =
+
+
+const paymentVerification =
   verifyPaymentSlip({
     classification:
       imageClassification,
 
     expectedAmount:
-      latestJob.price,
+      paymentJob.price,
 
     minimumTransactionDate:
-      latestJob.removed_at || null,
+      paymentJob.removed_at ||
+      null,
   });
 
-  const transactionReference =
+
+const transactionReference =
   imageClassification.reference
     ? String(
         imageClassification.reference
       ).trim()
     : null;
 
-let referenceAlreadyUsed = false;
+
+let referenceAlreadyUsed =
+  false;
 
 if (transactionReference) {
   referenceAlreadyUsed =
@@ -14017,14 +14111,18 @@ if (transactionReference) {
     );
 }
 
-  // -----------------------------------------
+
+// -----------------------------------------
 // DUPLICATE PAYMENT SLIP
-// แจ้งลูกค้าทันที และหยุด flow
 // -----------------------------------------
 
 if (referenceAlreadyUsed) {
   const duplicateSlipReply =
-    "ตรวจพบว่าสลิปนี้เคยถูกใช้ยืนยันการชำระแล้วครับ รบกวนส่งสลิปรายการใหม่อีกครั้งครับ";
+    getCustomerText(
+      customer,
+      "ตรวจพบว่าสลิปนี้เคยถูกใช้ยืนยันการชำระแล้วครับ รบกวนส่งสลิปรายการใหม่อีกครั้งครับ",
+      "This payment slip has already been used. Please send a new payment slip."
+    );
 
   try {
     await sendMessageToCustomer({
@@ -14074,7 +14172,7 @@ if (referenceAlreadyUsed) {
         customer.id,
 
       jobId:
-        latestJob.id,
+        paymentJob.id,
 
       transactionReference,
     }
@@ -14083,10 +14181,9 @@ if (referenceAlreadyUsed) {
   continue;
 }
 
-  // -----------------------------------------
+
+// -----------------------------------------
 // CUSTOMER-CORRECTABLE PAYMENT ERRORS
-// วันที่เก่า / ชื่อผู้รับไม่ตรง
-// แจ้งลูกค้าทันที และไม่ส่งเข้ากลุ่ม
 // -----------------------------------------
 
 const verificationReasons =
@@ -14095,6 +14192,7 @@ const verificationReasons =
   )
     ? paymentVerification.reasons
     : [];
+
 
 const recipientNameMismatch =
   verificationReasons.includes(
@@ -14118,17 +14216,30 @@ if (
     paymentDateTooOld
   ) {
     invalidSlipReply =
-      "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+      getCustomerText(
+        customer,
+        "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
+        "The recipient information and transaction date on this payment slip do not match this job. Please check and send the correct payment slip."
+      );
+
   } else if (
     recipientNameMismatch
   ) {
     invalidSlipReply =
-      "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+      getCustomerText(
+        customer,
+        "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
+        "The recipient information on this payment slip does not match the required account. Please check and send the correct payment slip."
+      );
+
   } else {
     invalidSlipReply =
-      "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ";
+      getCustomerText(
+        customer,
+        "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
+        "The transaction date on this payment slip does not match this job. Please send the payment slip for this job."
+      );
   }
-
 
   try {
     await sendMessageToCustomer({
@@ -14171,7 +14282,6 @@ if (
     );
   }
 
-
   console.log(
     "PAYMENT SLIP REJECTED BEFORE REVIEW:",
     {
@@ -14179,7 +14289,7 @@ if (
         customer.id,
 
       jobId:
-        latestJob.id,
+        paymentJob.id,
 
       reasons:
         verificationReasons,
@@ -14189,12 +14299,15 @@ if (
   continue;
 }
 
+
 // -----------------------------------------
 // REFERENCE CHECK
 // -----------------------------------------
 
 if (!transactionReference) {
-  paymentVerification.verified = false;
+  paymentVerification.verified =
+    false;
+
   paymentVerification.status =
     "NEEDS_REVIEW";
 
@@ -14204,13 +14317,15 @@ if (!transactionReference) {
 
   paymentVerification.checks.referenceUnique =
     false;
+
 } else {
   paymentVerification.checks.referenceUnique =
     true;
 }
 
-  // -----------------------------------------
-// SAVE VERIFIED PAYMENT
+
+// -----------------------------------------
+// JOB MUST BE WAITING PAYMENT
 // -----------------------------------------
 
 const paymentAllowed =
@@ -14218,11 +14333,14 @@ const paymentAllowed =
     "waiting_payment",
     "removed_waiting_payment",
   ].includes(
-    latestJob.status
+    paymentJob.status
   );
 
+
 if (!paymentAllowed) {
-  paymentVerification.verified = false;
+  paymentVerification.verified =
+    false;
+
   paymentVerification.status =
     "NEEDS_REVIEW";
 
@@ -14238,23 +14356,31 @@ if (!paymentAllowed) {
 
   paymentVerification.checks.jobWaitingPayment =
     false;
+
 } else {
   paymentVerification.checks.jobWaitingPayment =
     true;
 }
 
 
-if (paymentVerification.verified) {
+// -----------------------------------------
+// AUTO VERIFIED PAYMENT
+// -----------------------------------------
+
+if (
+  paymentVerification.verified &&
+  !hasMultipleWaitingPaymentJobs
+) {
   const verifiedAt =
     new Date().toISOString();
 
   const payment =
     await createPayment({
       jobId:
-        latestJob.id,
+        paymentJob.id,
 
       amount:
-        latestJob.price,
+        paymentJob.price,
 
       paymentMethod:
         process.env.PAYMENT_RECIPIENT_TYPE ||
@@ -14271,8 +14397,7 @@ if (paymentVerification.verified) {
 
       verifiedAt,
 
-      transactionReference:
-        transactionReference,
+      transactionReference,
 
       transactionDate:
         imageClassification.transactionDate ||
@@ -14297,113 +14422,118 @@ if (paymentVerification.verified) {
     });
 
 
-  
-await updateJob(
-  latestJob.id,
-  {
-    status:
-      "paid",
+  await updateJob(
+    paymentJob.id,
+    {
+      status:
+        "paid",
 
-    paid_at:
-      verifiedAt,
-  }
-);
-
-
-try {
-  await updateJobInGoogleSheet({
-    jobId:
-      latestJob.id,
-
-    status:
-      "paid",
-
-    paidAt:
-      verifiedAt,
-  });
-} catch (error) {
-  console.error(
-    "AUTO PAYMENT SHEET UPDATE FAILED:",
-    error
-  );
-}
-
-
-const customerReply =
-  "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
-
-
-try {
-  await sendMessageToCustomer({
-    platform:
-      customer.platform,
-
-    platformUserId:
-      customer.platform_user_id,
-
-    text:
-      customerReply,
-  });
-
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform:
-      customer.platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      customerReply,
-  });
-
-  await updateLastBotMessage(
-    customer.id,
-    customerReply
+      paid_at:
+        verifiedAt,
+    }
   );
 
-} catch (error) {
-  console.error(
-    "AUTO PAYMENT CUSTOMER REPLY FAILED:",
-    error
-  );
-}
 
-
-// งานนี้จบแล้ว
-// เตรียมรับงานใหม่จากลูกค้าคนเดิมได้ทันที
-await updateConversationState({
-  customerId:
-    customer.id,
-
-  state:
-    GMR_STATES.WAITING_MAP,
-
-  handoff:
-    false,
-
-  handoffReason:
-    null,
-});
-
-if (paymentSlipUpload?.filePath) {
   try {
-    await deletePaymentSlip(
-      paymentSlipUpload.filePath
-    );
+    await updateJobInGoogleSheet({
+      jobId:
+        paymentJob.id,
+
+      status:
+        "paid",
+
+      paidAt:
+        verifiedAt,
+    });
+
   } catch (error) {
     console.error(
-      "AUTO PAYMENT SLIP DELETE FAILED:",
+      "AUTO PAYMENT SHEET UPDATE FAILED:",
       error
     );
   }
-}
-  
+
+
+  const customerReply =
+    getCustomerText(
+      customer,
+      "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ",
+      "Thank you. Your payment has been received successfully. If you have another review you'd like us to handle, please send it anytime."
+    );
+
+
+  try {
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
+
+      platformUserId:
+        customer.platform_user_id,
+
+      text:
+        customerReply,
+    });
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        customer.platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        customerReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      customerReply
+    );
+
+  } catch (error) {
+    console.error(
+      "AUTO PAYMENT CUSTOMER REPLY FAILED:",
+      error
+    );
+  }
+
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.WAITING_MAP,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+
+  if (paymentSlipUpload?.filePath) {
+    try {
+      await deletePaymentSlip(
+        paymentSlipUpload.filePath
+      );
+
+    } catch (error) {
+      console.error(
+        "AUTO PAYMENT SLIP DELETE FAILED:",
+        error
+      );
+    }
+  }
+
+
   console.log(
     "PAYMENT SAVED:",
     {
@@ -14411,7 +14541,7 @@ if (paymentSlipUpload?.filePath) {
         payment.id,
 
       jobId:
-        latestJob.id,
+        paymentJob.id,
 
       verified:
         true,
@@ -14419,6 +14549,31 @@ if (paymentSlipUpload?.filePath) {
   );
 }
 
+
+// -----------------------------------------
+// NEEDS HUMAN REVIEW
+// -----------------------------------------
+
+if (
+  hasMultipleWaitingPaymentJobs
+) {
+  paymentVerification.verified =
+    false;
+
+  paymentVerification.status =
+    "NEEDS_REVIEW";
+
+  if (
+    !paymentVerification.reasons.includes(
+      "MULTIPLE_WAITING_PAYMENT_JOBS"
+    )
+  ) {
+    paymentVerification.reasons.push(
+      "MULTIPLE_WAITING_PAYMENT_JOBS"
+    );
+  }
+}
+  
 if (
   !paymentVerification.verified &&
   paymentVerification.status ===
@@ -14427,19 +14582,18 @@ if (
   const pendingPayment =
     await createPendingPayment({
       jobId:
-        latestJob.id,
+        paymentJob.id,
 
       amount:
         imageClassification.amount ||
-        latestJob.price ||
+        paymentJob.price ||
         0,
 
       paymentMethod:
         process.env.PAYMENT_RECIPIENT_TYPE ||
         "KTC_BILLER",
 
-      transactionReference:
-        transactionReference,
+      transactionReference,
 
       transactionDate:
         imageClassification.transactionDate ||
@@ -14467,71 +14621,73 @@ if (
         [],
 
       slipFilePath:
-  paymentSlipUpload?.filePath ||
-  null,
+        paymentSlipUpload?.filePath ||
+        null,
     });
 
-const lineGroupResult =
-  await sendPaymentReviewToLineGroup({
-    paymentId:
+
+  const lineGroupResult =
+    await sendPaymentReviewToLineGroup({
+      paymentId:
+        pendingPayment.id,
+
+      jobId:
+        paymentJob.id,
+
+      slipImageUrl:
+        paymentSlipUpload?.signedUrl ||
+        null,
+
+      customerName:
+        lineDisplayName ||
+        customer.display_name ||
+        "",
+
+      businessName:
+        paymentJob.business_name ||
+        "",
+
+      amount:
+        imageClassification.amount ||
+        paymentJob.price ||
+        0,
+
+      transactionDate:
+        imageClassification.transactionDate ||
+        null,
+
+      transactionTime:
+        imageClassification.transactionTime ||
+        null,
+
+      recipientName:
+        imageClassification.recipientName ||
+        imageClassification.recipientBankOrBiller ||
+        null,
+
+      recipientCardLast4:
+        imageClassification.recipientCardLast4 ||
+        null,
+
+      reasons:
+        paymentVerification.reasons ||
+        [],
+    });
+
+
+  if (
+    lineGroupResult?.messageId
+  ) {
+    await updatePayment(
       pendingPayment.id,
-
-    jobId:
-      latestJob.id,
-
-    slipImageUrl:
-  paymentSlipUpload?.signedUrl ||
-  null,
-
-customerName:
-  lineDisplayName ||
-  customer.display_name ||
-  "",
-
-    businessName:
-      latestJob.business_name ||
-      "",
-
-    amount:
-      imageClassification.amount ||
-      latestJob.price ||
-      0,
-
-    transactionDate:
-      imageClassification.transactionDate ||
-      null,
-
-    transactionTime:
-      imageClassification.transactionTime ||
-      null,
-
-    recipientName:
-      imageClassification.recipientName ||
-      imageClassification.recipientBankOrBiller ||
-      null,
-
-    recipientCardLast4:
-      imageClassification.recipientCardLast4 ||
-      null,
-
-    reasons:
-      paymentVerification.reasons ||
-      [],
-  });
+      {
+        line_group_message_id:
+          lineGroupResult.messageId,
+      }
+    );
+  }
 
 
-if (
-  lineGroupResult?.messageId
-) {
-  await updatePayment(
-    pendingPayment.id,
-    {
-      line_group_message_id:
-        lineGroupResult.messageId,
-    }
-  );
-}
-  
   console.log(
     "PAYMENT NEEDS REVIEW:",
     {
@@ -14539,25 +14695,25 @@ if (
         pendingPayment.id,
 
       jobId:
-        latestJob.id,
+        paymentJob.id,
     }
   );
 }
-  
-  console.log(
-    "PAYMENT VERIFICATION:",
-    {
-      customerId:
-        customer.id,
 
-      jobId:
-        latestJob.id,
 
-      result:
-        paymentVerification,
-    }
-  );
-}
+console.log(
+  "PAYMENT VERIFICATION:",
+  {
+    customerId:
+      customer.id,
+
+    jobId:
+      paymentJob.id,
+
+    result:
+      paymentVerification,
+  }
+);
 
 
 // ตอนนี้ยังไม่เปลี่ยน state / ไม่บันทึก payment
