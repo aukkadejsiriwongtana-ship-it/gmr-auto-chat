@@ -15739,30 +15739,44 @@ app.post(
                 item.note,
             });
 
+      results.push({
+  row:
+    i + 2,
 
-          results.push({
-            row:
-              i + 2,
+  ok:
+    true,
 
-            ok:
-              true,
+  created:
+    result.created,
 
-            created:
-              result.created,
+  duplicate:
+    result.duplicate,
 
-            duplicate:
-              result.duplicate,
+  legacyCustomerId:
+    result.customer?.id || null,
 
-            legacyCustomerId:
-              result.customer?.id || null,
+  displayName:
+    result.customer
+      ?.display_name ||
+    item.displayName ||
+    null,
 
-            displayName:
-              result.customer
-                ?.display_name ||
-              item.displayName ||
-              null,
-          });
+  matchStatus:
+    result.customer
+      ?.match_status ||
+    null,
 
+  matchedCustomerId:
+    result.customer
+      ?.matched_customer_id ||
+    null,
+
+  matchedAt:
+    result.customer
+      ?.matched_at ||
+    null,
+});
+          
 
         } catch (error) {
 
