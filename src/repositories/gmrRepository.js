@@ -2069,3 +2069,92 @@ export async function getJobsForReviewMonitoring() {
 
   return data || [];
 }
+
+// =========================================================
+// DEPARTMENT ROUTING BY REVIEW AGE
+//
+// ใช้ config จาก gmr_departments
+//
+// ตัวอย่าง:
+// T0 = 0-14 วัน
+// T2 = 15 วันขึ้นไป
+//
+// ถ้าอายุหาไม่ได้ → return null
+// ห้ามเดาแผนก
+// =========================================================
+
+export async function getDepartmentForReviewAge(
+  reviewAgeDays
+) {
+  if (
+    reviewAgeDays === null ||
+    reviewAgeDays === undefined
+  ) {
+    return null;
+  }
+
+  const age =
+    Number(reviewAgeDays);
+
+  if (
+    !Number.isFinite(age) ||
+    age < 0
+  ) {
+    return null;
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_departments")
+    .select("*")
+    .eq("is_active", true)
+    .order(
+      "min_review_age_days",
+      {
+        ascending: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  const departments =
+    data || [];
+
+  for (
+    const department of
+    departments
+  ) {
+    const minAge =
+      department
+        .min_review_age_days ===
+      null
+        ? -Infinity
+        : Number(
+            department
+              .min_review_age_days
+          );
+
+    const maxAge =
+      department
+        .max_review_age_days ===
+      null
+        ? Infinity
+        : Number(
+            department
+              .max_review_age_days
+          );
+
+    if (
+      age >= minAge &&
+      age <= maxAge
+    ) {
+      return department;
+    }
+  }
+
+  return null;
+}
