@@ -14751,7 +14751,9 @@ console.log(
 
 // ตอนนี้ยังไม่เปลี่ยน state / ไม่บันทึก payment
 continue;
-  } catch (error) {
+}
+
+} catch (error) {
     console.error(
       "LINE IMAGE DOWNLOAD FAILED:",
       error
