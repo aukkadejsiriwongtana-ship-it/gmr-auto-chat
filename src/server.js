@@ -15746,28 +15746,43 @@ app.post(
               reviewUrl
             );
 
-          if (
-            !directResult?.found ||
-            !directResult?.review
-          ) {
-            results.push({
-              customerMapId:
-                customerMap.id,
-              ok: false,
-              reason:
-                directResult?.reason ||
-                "review_not_found",
-            });
+         let businessName =
+  String(
+    directResult?.businessName ||
+    customerMap.business_name ||
+    ""
+  ).trim();
 
-            continue;
-          }
+if (
+  !directResult?.found ||
+  !directResult?.review
+) {
+  console.log(
+    "REVIEW RESOLVE FAILED, USING STORED BUSINESS NAME:",
+    {
+      customerMapId:
+        customerMap.id,
 
-          const businessName =
-            String(
-              directResult.businessName ||
-              customerMap.business_name ||
-              ""
-            ).trim();
+      reason:
+        directResult?.reason ||
+        "review_not_found",
+
+      businessName,
+    }
+  );
+}
+
+if (!businessName) {
+  results.push({
+    customerMapId:
+      customerMap.id,
+    ok: false,
+    reason:
+      "business_name_not_found",
+  });
+
+  continue;
+}
 
           if (!businessName) {
             results.push({
