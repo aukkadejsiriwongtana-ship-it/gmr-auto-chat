@@ -9699,6 +9699,26 @@ app.post("/line/webhook", async (req, res) => {
     if (
   event.source?.type === "group"
 ) {
+
+console.log(
+  "LINE GROUP DETECTED:",
+  {
+    groupId:
+      event.source?.groupId || null,
+
+    eventType:
+      event.type,
+
+    messageType:
+      event.message?.type || null,
+
+    text:
+      event.message?.type === "text"
+        ? event.message.text
+        : null,
+  }
+);
+      
   const LINE_GROUP_ID =
     process.env.LINE_GROUP_ID;
 
