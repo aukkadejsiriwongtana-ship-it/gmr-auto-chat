@@ -2967,10 +2967,10 @@ ${englishPaymentCondition}
 };
 }
 
-function getGlobalFaqReply(
+async function getGlobalFaqReply({
+  customer,
   message,
-  language = "th"
-) {
+}) {
   const text =
     String(message || "")
       .trim()
@@ -2980,186 +2980,120 @@ function getGlobalFaqReply(
     return null;
   }
 
-  const isEnglish =
-    language === "en";
-
-
-  // ========================================
-  // ระยะเวลาดำเนินการ
-  // ========================================
+  const faqs =
+    await getActiveFaqs();
 
   if (
-    text.includes("กี่วัน") ||
-    text.includes("ใช้เวลากี่วัน") ||
-    text.includes("นานไหม") ||
-    text.includes("นานมั้ย") ||
-    text.includes("ระยะเวลา") ||
-    text.includes("กี่ชั่วโมง") ||
-    text.includes("how long") ||
-    text.includes("how many days") ||
-    text.includes("processing time")
+    !Array.isArray(faqs) ||
+    faqs.length === 0
   ) {
-    return isEnglish
-      ? "The process usually takes around 1–14 days, depending on Google's review process."
-      : "ระยะเวลาดำเนินการประมาณ 1–14 วันครับ ขึ้นอยู่กับการตรวจสอบของระบบ Google";
+    return null;
   }
 
+  const language =
+    customer?.language === "en"
+      ? "en"
+      : "th";
 
-  // ========================================
-  // ชำระหลังลบได้ไหม
-  // ========================================
+  for (const faq of faqs) {
+    const keywords =
+      language === "en"
+        ? faq.keywords_en
+        : faq.keywords_th;
 
-  if (
-    text.includes("จ่ายหลัง") ||
-    text.includes("ชำระหลัง") ||
-    text.includes("ลบก่อนจ่าย") ||
-    text.includes("จ่ายทีหลัง") ||
-    text.includes("pay after") ||
-    text.includes("pay later") ||
-    text.includes("payment after")
-  ) {
-    return isEnglish
-      ? "Yes. Payment can be made after the review has been successfully removed and you have verified it on Google Maps."
-      : "ได้ครับ สามารถชำระหลังดำเนินการสำเร็จ และตรวจสอบหน้า Google Map แล้วได้ครับ";
+    const safeKeywords =
+      Array.isArray(keywords)
+        ? keywords
+        : [];
+
+    const matched =
+      safeKeywords.some(
+        (keyword) => {
+          const normalizedKeyword =
+            String(keyword || "")
+              .trim()
+              .toLowerCase();
+
+          if (!normalizedKeyword) {
+            return false;
+          }
+
+          return text.includes(
+            normalizedKeyword
+          );
+        }
+      );
+
+    if (!matched) {
+      continue;
+    }
+
+    const hit =
+      await registerFaqHit({
+        customerId:
+          customer.id,
+
+        faqKey:
+          faq.faq_key,
+      });
+
+    const isRepeat =
+      Number(
+        hit?.hit_count || 1
+      ) > 1;
+
+    let reply;
+
+    if (language === "en") {
+      reply =
+        isRepeat
+          ? (
+              faq.repeat_reply_en ||
+              faq.reply_en ||
+              faq.reply_th
+            )
+          : (
+              faq.reply_en ||
+              faq.reply_th
+            );
+    } else {
+      reply =
+        isRepeat
+          ? (
+              faq.repeat_reply_th ||
+              faq.reply_th
+            )
+          : faq.reply_th;
+    }
+
+    const finalReply =
+      String(reply || "").trim();
+
+    if (!finalReply) {
+      return null;
+    }
+
+    return {
+      faqKey:
+        faq.faq_key,
+
+      faqTitle:
+        faq.title,
+
+      reply:
+        finalReply,
+
+      repeat:
+        isRepeat,
+
+      hitCount:
+        Number(
+          hit?.hit_count || 1
+        ),
+    };
   }
-
-
-  // ========================================
-  // มีผลต่อ Google Map ไหม
-  // ========================================
-
-  if (
-    text.includes("มีผลกับแมพ") ||
-    text.includes("มีผลต่อแมพ") ||
-    text.includes("กระทบแมพ") ||
-    text.includes("กระทบ map") ||
-    text.includes("โดนแบน") ||
-    text.includes("มีปัญหากับ google") ||
-    text.includes("affect the map") ||
-    text.includes("affect my map") ||
-    text.includes("risk to my business") ||
-    text.includes("get banned")
-  ) {
-    return isEnglish
-      ? "It does not negatively affect your Google Maps listing. We submit the review for Google's assessment through the proper review process."
-      : "ไม่มีผลต่อ Google Map ครับ ทางเราดำเนินการโดยยื่นเรื่องให้ Google ตรวจสอบตามขั้นตอน";
-  }
-
-
-  // ========================================
-  // ราคาต่อกี่รีวิว
-  // ========================================
-
-  if (
-    text.includes("ราคาต่อกี่รีวิว") ||
-    text.includes("ต่อกี่รีวิว") ||
-    text.includes("ราคานี้กี่รีวิว") ||
-    text.includes("กี่รีวิวต่อราคา") ||
-    text.includes("per review") ||
-    text.includes("for one review")
-  ) {
-    return isEnglish
-      ? "The quoted price is per review."
-      : "ราคาที่แจ้งเป็นราคาต่อ 1 รีวิวครับ";
-  }
-
-
-  // ========================================
-  // รีวิวจะกลับมาไหม
-  // ========================================
-
-  if (
-    text.includes("กลับมาไหม") ||
-    text.includes("กลับมาอีกไหม") ||
-    text.includes("รีวิวกลับมา") ||
-    text.includes("ซ่อนรีวิว") ||
-    text.includes("แค่ซ่อน") ||
-    text.includes("come back") ||
-    text.includes("return later") ||
-    text.includes("temporary") ||
-    text.includes("hidden")
-  ) {
-    return isEnglish
-      ? "The review is submitted to Google for assessment and removal. It is not simply temporarily hidden."
-      : "เป็นการยื่นให้ระบบ Google ตรวจสอบและนำรีวิวออกครับ ไม่ใช่การซ่อนรีวิวชั่วคราว";
-  }
-
-
-  // ========================================
-  // ขอราคา
-  // ========================================
-
-  if (
-    text === "ราคา" ||
-    text.includes("ราคาเท่าไหร่") ||
-    text.includes("ราคาเท่าไร") ||
-    text.includes("ค่าบริการเท่าไหร่") ||
-    text.includes("ค่าบริการเท่าไร") ||
-    text.includes("how much") ||
-    text.includes("price") ||
-    text.includes("cost")
-  ) {
-    return isEnglish
-      ? "The price depends on the age and details of the review. Please send the Google Maps business name, map link, or review link so I can check it first."
-      : "ราคาจะขึ้นอยู่กับอายุและลักษณะของรีวิวครับ รบกวนส่งชื่อ Google Map หรือลิงก์รีวิวมาให้ตรวจสอบก่อนครับ";
-  }
-
-
-  // ========================================
-  // ขอส่วนลด
-  // ========================================
-
-  if (
-    text.includes("ลดได้ไหม") ||
-    text.includes("ลดได้มั้ย") ||
-    text.includes("ลดหน่อย") ||
-    text.includes("มีส่วนลดไหม") ||
-    text.includes("มีส่วนลดมั้ย") ||
-    text.includes("ขอส่วนลด") ||
-    text.includes("แพงไป") ||
-    text.includes("ลดราคา") ||
-    text.includes("discount") ||
-    text.includes("cheaper") ||
-    text.includes("lower price")
-  ) {
-    return isEnglish
-      ? (
-          "The quoted price is for removal from the system, not temporary hiding.\n\n" +
-          "Payment can be made after the process is completed.\n\n" +
-          'If you would like to proceed, reply "Confirm" to start. ✅'
-        )
-      : (
-          "ราคาที่แจ้งเป็นการนำออกจากระบบ ไม่ใช่การซ่อนนะครับ\n\n" +
-          "ชำระหลังดำเนินการเสร็จได้\n\n" +
-          "หากโอเค พิมพ์ “ยืนยัน” เริ่มงานได้เลย ✅"
-        );
-  }
-
 
   return null;
-}
-
-function shouldSuppressDuplicateBotReply({
-  conversation,
-  botReply,
-}) {
-  const previous =
-    String(
-      conversation?.last_bot_message ||
-      ""
-    ).trim();
-
-  const next =
-    String(
-      botReply ||
-      ""
-    ).trim();
-
-  if (!previous || !next) {
-    return false;
-  }
-
-  return previous === next;
 }
 
 async function sendGlobalFaqIfMatched({
@@ -3168,11 +3102,14 @@ async function sendGlobalFaqIfMatched({
   platform,
   message,
 }) {
-  const faqReply =
-  getGlobalFaqReply(
+  const faqMatch =
+  await getGlobalFaqReply({
+    customer,
     message,
-    customer?.language || "th"
-  );
+  });
+
+const faqReply =
+  faqMatch?.reply || null;
 
   if (!faqReply) {
     return {
@@ -3195,9 +3132,15 @@ async function sendGlobalFaqIfMatched({
   );
 
   return {
-    matched: true,
-    botReply: faqReply,
-  };
+  matched: true,
+  botReply: faqReply,
+  faqKey:
+    faqMatch.faqKey,
+  repeat:
+    faqMatch.repeat,
+  hitCount:
+    faqMatch.hitCount,
+};
 }
 
 app.use(
