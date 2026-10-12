@@ -1347,6 +1347,105 @@ export async function backfillExistingCustomerMaps() {
 }
 
 // =========================================================
+// GET CUSTOMER MAPS WAITING FOR RESOLVE
+// =========================================================
+
+export async function getCustomerMapsWaitingForResolve() {
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_customer_maps")
+    .select("*")
+    .eq(
+      "is_active",
+      true
+    )
+    .is(
+      "place_id",
+      null
+    )
+    .not(
+      "source_review_url",
+      "is",
+      null
+    )
+    .order(
+      "created_at",
+      {
+        ascending: true,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+// =========================================================
+// UPDATE RESOLVED CUSTOMER MAP
+// =========================================================
+
+export async function updateResolvedCustomerMap({
+  customerMapId,
+  businessName = null,
+  placeId,
+  mapUrl = null,
+}) {
+  if (!customerMapId) {
+    throw new Error(
+      "Missing customerMapId"
+    );
+  }
+
+  if (!placeId) {
+    throw new Error(
+      "Missing placeId"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_customer_maps")
+    .update({
+      business_name:
+        businessName ||
+        undefined,
+
+      place_id:
+        placeId,
+
+      map_url:
+        mapUrl ||
+        null,
+
+      map_key:
+        `place:${placeId}`,
+
+      updated_at:
+        new Date()
+          .toISOString(),
+    })
+    .eq(
+      "id",
+      customerMapId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
