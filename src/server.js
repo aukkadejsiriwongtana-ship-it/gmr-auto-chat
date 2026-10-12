@@ -95,7 +95,7 @@ claimLegacyCustomerImport,
 rollbackLegacyCustomerImport,
   getLegacyImportedJob,
 getVerifiedPaymentByJobId,
-
+backfillExistingCustomerMaps,
   
   
 } from "./repositories/gmrRepository.js";
@@ -15625,6 +15625,60 @@ app.get("/test-google-sheet-update", async (req, res) => {
     });
   }
 });
+
+// =========================================================
+// BACKFILL EXISTING CUSTOMER MAPS
+// =========================================================
+
+app.post(
+  "/backfill-existing-customer-maps",
+  async (req, res) => {
+    try {
+      const {
+        secret,
+      } = req.body || {};
+
+      const SHEET_CONTROL_SECRET =
+        process.env.SHEET_CONTROL_SECRET;
+
+      if (
+        !SHEET_CONTROL_SECRET ||
+        secret !== SHEET_CONTROL_SECRET
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: "Unauthorized",
+        });
+      }
+
+      const result =
+        await backfillExistingCustomerMaps();
+
+      console.log(
+        "BACKFILL EXISTING CUSTOMER MAPS:",
+        result
+      );
+
+      return res.json({
+        ok: true,
+        ...result,
+      });
+
+    } catch (error) {
+      console.error(
+        "BACKFILL EXISTING CUSTOMER MAPS ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+);
 
 // =========================================================
 // IMPORT LEGACY CUSTOMERS FROM GOOGLE SHEET
