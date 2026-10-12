@@ -1119,7 +1119,86 @@ async function runDepartmentDispatch() {
           }
         }
 
+// ========================================
+// 6.1 ลง Google Sheet ของแผนก
+// ========================================
 
+for (
+  const job of
+  dispatchedJobs
+) {
+  try {
+    await appendDispatchJobToGoogleSheet({
+      sheetName:
+        department.active_sheet_name,
+
+      dispatchRoundId:
+        dispatchRound.id,
+
+      sentAt:
+        dispatchedAt,
+
+      batchId:
+        job.batch_id ||
+        "",
+
+      jobId:
+        job.id,
+
+      customerName:
+        job.customer_name ||
+        "",
+
+      mapName:
+        job.business_name ||
+        "",
+
+      reviewUrl:
+        job.review_url ||
+        "",
+
+      reviewAge:
+        job.review_age_days ??
+        "",
+
+      startedAt:
+        job.started_at ||
+        dispatchedAt,
+
+      status:
+        job.status ||
+        "processing",
+
+      removedAt:
+        "",
+
+      cycleCompleted:
+        "",
+
+      elapsedTime:
+        "",
+    });
+  } catch (error) {
+    console.error(
+      "DISPATCH GOOGLE SHEET FAILED:",
+      {
+        jobId:
+          job.id,
+
+        departmentCode:
+          department.code,
+
+        sheetName:
+          department.active_sheet_name,
+
+        error:
+          error.message,
+      }
+    );
+  }
+}
+
+        
         // ========================================
         // 7. บันทึกเวลารอบล่าสุด
         // ========================================
