@@ -3162,6 +3162,350 @@ app.get("/", async (req, res) => {
 });
 
 // =========================================================
+// BOT CONTROL PAGE
+// =========================================================
+
+app.get(
+  "/bot-control",
+  async (req, res) => {
+    try {
+      const secret =
+        String(
+          req.query?.secret || ""
+        ).trim();
+
+      const expectedSecret =
+        String(
+          process.env
+            .BOT_CONTROL_SECRET ||
+          ""
+        ).trim();
+
+      if (!expectedSecret) {
+        return res
+          .status(500)
+          .send(
+            "BOT_CONTROL_SECRET not configured"
+          );
+      }
+
+      if (
+        !secret ||
+        secret !== expectedSecret
+      ) {
+        return res
+          .status(401)
+          .send("Unauthorized");
+      }
+
+      const control =
+        await getBotControl();
+
+      const isEnabled =
+        control.enabled === true;
+
+      const statusText =
+        isEnabled
+          ? "BOT ON"
+          : "BOT PAUSED";
+
+      const statusColor =
+        isEnabled
+          ? "#16a34a"
+          : "#dc2626";
+
+      const action =
+        isEnabled
+          ? "pause"
+          : "resume";
+
+      const buttonText =
+        isEnabled
+          ? "หยุด Bot ชั่วคราว"
+          : "เปิด Bot กลับมา";
+
+      const html = `
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  />
+
+  <title>GMR Bot Control</title>
+
+  <style>
+    body {
+      font-family:
+        Arial,
+        sans-serif;
+
+      background:
+        #f4f4f5;
+
+      margin:
+        0;
+
+      padding:
+        40px 20px;
+    }
+
+    .card {
+      max-width:
+        520px;
+
+      margin:
+        0 auto;
+
+      background:
+        white;
+
+      border-radius:
+        18px;
+
+      padding:
+        30px;
+
+      box-shadow:
+        0 10px 30px
+        rgba(0,0,0,0.08);
+
+      text-align:
+        center;
+    }
+
+    .status {
+      font-size:
+        30px;
+
+      font-weight:
+        700;
+
+      color:
+        ${statusColor};
+
+      margin-bottom:
+        12px;
+    }
+
+    .detail {
+      color:
+        #52525b;
+
+      margin-bottom:
+        28px;
+
+      line-height:
+        1.6;
+    }
+
+    button {
+      width:
+        100%;
+
+      border:
+        0;
+
+      border-radius:
+        12px;
+
+      padding:
+        16px;
+
+      font-size:
+        18px;
+
+      font-weight:
+        700;
+
+      cursor:
+        pointer;
+
+      background:
+        ${isEnabled
+          ? "#dc2626"
+          : "#16a34a"};
+
+      color:
+        white;
+    }
+
+    .note {
+      margin-top:
+        20px;
+
+      font-size:
+        14px;
+
+      color:
+        #71717a;
+
+      line-height:
+        1.5;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="card">
+
+    <div class="status">
+      ${statusText}
+    </div>
+
+    <div class="detail">
+      ${
+        isEnabled
+          ? "ระบบกำลังตอบลูกค้าตามปกติ"
+          : "ระบบหยุดตอบลูกค้าชั่วคราว"
+      }
+    </div>
+
+    <form
+      method="post"
+      action="/bot-control/change"
+    >
+
+      <input
+        type="hidden"
+        name="secret"
+        value="${secret}"
+      />
+
+      <input
+        type="hidden"
+        name="action"
+        value="${action}"
+      />
+
+      <button type="submit">
+        ${buttonText}
+      </button>
+
+    </form>
+
+    <div class="note">
+      ระหว่าง Pause:
+      ระบบจะไม่ตอบและไม่ดำเนิน Flow ลูกค้า
+      <br />
+      เมื่อเปิดกลับมา
+      ระบบจะตอบเฉพาะข้อความใหม่หลังจากเปิด
+    </div>
+
+  </div>
+
+</body>
+</html>
+`;
+
+      return res
+        .status(200)
+        .type("html")
+        .send(html);
+
+    } catch (error) {
+      console.error(
+        "BOT CONTROL PAGE ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          error.message
+        );
+    }
+  }
+);
+
+
+// =========================================================
+// BOT CONTROL CHANGE
+// =========================================================
+
+app.post(
+  "/bot-control/change",
+  express.urlencoded({
+    extended: false,
+  }),
+  async (req, res) => {
+    try {
+      const secret =
+        String(
+          req.body?.secret || ""
+        ).trim();
+
+      const action =
+        String(
+          req.body?.action || ""
+        )
+          .trim()
+          .toLowerCase();
+
+      const expectedSecret =
+        String(
+          process.env
+            .BOT_CONTROL_SECRET ||
+          ""
+        ).trim();
+
+      if (
+        !expectedSecret ||
+        !secret ||
+        secret !== expectedSecret
+      ) {
+        return res
+          .status(401)
+          .send("Unauthorized");
+      }
+
+      if (
+        ![
+          "pause",
+          "resume",
+        ].includes(
+          action
+        )
+      ) {
+        return res
+          .status(400)
+          .send(
+            "Invalid action"
+          );
+      }
+
+      const enabled =
+        action === "resume";
+
+      await setBotControl(
+        enabled
+      );
+
+      return res.redirect(
+        `/bot-control?secret=${encodeURIComponent(
+          secret
+        )}`
+      );
+
+    } catch (error) {
+      console.error(
+        "BOT CONTROL CHANGE ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          error.message
+        );
+    }
+  }
+);
+
+// =========================================================
 // DEPARTMENT DISPATCH ENDPOINT
 // ใช้สำหรับ Cron / Manual Trigger
 // =========================================================
@@ -3309,12 +3653,28 @@ const existingCustomer =
   );
 
 
-const detectedLanguage =
-  detectCustomerLanguage(
-    message,
-    existingCustomer?.language ||
-      "th"
+const messageHasThai =
+  /[\u0E00-\u0E7F]/.test(
+    String(message || "")
   );
+
+const thaiLocked =
+  existingCustomer?.language_locked === true;
+
+let detectedLanguage;
+
+if (thaiLocked) {
+  detectedLanguage = "th";
+} else if (messageHasThai) {
+  detectedLanguage = "th";
+} else {
+  detectedLanguage =
+    detectCustomerLanguage(
+      message,
+      existingCustomer?.language ||
+        "th"
+    );
+}
 
 
 let customer =
@@ -3327,17 +3687,26 @@ let customer =
   });
 
 
-if (
+if (messageHasThai) {
+  if (
+    customer.language !== "th" ||
+    customer.language_locked !== true
+  ) {
+    customer =
+      await lockCustomerLanguageToThai(
+        customer.id
+      );
+  }
+} else if (
+  customer.language_locked !== true &&
   customer.language !==
-  detectedLanguage
+    detectedLanguage
 ) {
-
   customer =
     await updateCustomerLanguage(
       customer.id,
       detectedLanguage
     );
-
 }
 
 
@@ -4749,6 +5118,7 @@ const thailandPlace =
 
 
 if (
+  customer.language_locked !== true &&
   !messageHasThai &&
   thailandPlace === false &&
   customer.language !== "en"
@@ -5918,6 +6288,7 @@ const thailandPlace =
 
 
 if (
+  customer.language_locked !== true &&
   !businessNameHasThai &&
   thailandPlace === false &&
   customer.language !== "en"
