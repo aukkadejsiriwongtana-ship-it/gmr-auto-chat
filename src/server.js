@@ -705,6 +705,508 @@ function getPlatformLabel(
   );
 }
 
+// =========================================================
+// DEPARTMENT DISPATCH → LINE GROUP
+// =========================================================
+
+async function sendDepartmentDispatchToLineGroup({
+  department,
+  jobs,
+  dispatchedAt,
+}) {
+  if (!department?.id) {
+    throw new Error(
+      "Missing department in sendDepartmentDispatchToLineGroup"
+    );
+  }
+
+  const groupId =
+    String(
+      department.line_group_id || ""
+    ).trim();
+
+  if (!groupId) {
+    throw new Error(
+      `Department ${department.code || department.id} has no line_group_id`
+    );
+  }
+
+  if (
+    !Array.isArray(jobs) ||
+    jobs.length === 0
+  ) {
+    throw new Error(
+      "No jobs supplied to sendDepartmentDispatchToLineGroup"
+    );
+  }
+
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  if (!token) {
+    throw new Error(
+      "Missing LINE_CHANNEL_ACCESS_TOKEN"
+    );
+  }
+
+
+  const sentAt =
+    dispatchedAt ||
+    new Date().toISOString();
+
+
+  const reviewLines =
+    jobs.map(
+      (
+        job,
+        index
+      ) => {
+        return (
+          `${index + 1}. ` +
+          `${job.review_url}`
+        );
+      }
+    );
+
+
+  const text = [
+    `📦 รอบแจกงาน ${department.code || "-"}`,
+    "",
+    `แผนก: ${department.name || department.code || "-"}`,
+    `จำนวน: ${jobs.length} รีวิว`,
+    `เวลา: ${sentAt}`,
+    "",
+    "รายการ:",
+    ...reviewLines,
+  ].join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw new Error(
+      `DEPARTMENT LINE PUSH FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+
+  console.log(
+    "DEPARTMENT DISPATCH LINE SENT:",
+    {
+      departmentId:
+        department.id,
+
+      departmentCode:
+        department.code,
+
+      groupId,
+
+      jobCount:
+        jobs.length,
+
+      dispatchedAt:
+        sentAt,
+    }
+  );
+
+
+  return {
+    sent:
+      true,
+
+    text,
+
+    dispatchedAt:
+      sentAt,
+  };
+}
+
+// =========================================================
+// RUN DEPARTMENT DISPATCH
+//
+// queued
+// → แยกตาม Department
+// → เช็กว่าถึงรอบหรือยัง
+// → ส่งรายการเข้า LINE Group
+// → สร้าง Dispatch Round
+// → processing
+// =========================================================
+
+let departmentDispatchRunning =
+  false;
+
+
+async function runDepartmentDispatch() {
+  if (departmentDispatchRunning) {
+    console.log(
+      "DEPARTMENT DISPATCH SKIPPED: already running"
+    );
+
+    return {
+      ok: true,
+      skipped: true,
+      reason: "already_running",
+    };
+  }
+
+
+  departmentDispatchRunning =
+    true;
+
+
+  try {
+    const now =
+      new Date();
+
+    const dispatchedAt =
+      now.toISOString();
+
+
+    const departments =
+      await getActiveDepartments();
+
+
+    const results = [];
+
+
+    for (
+      const department of
+      departments
+    ) {
+      try {
+        // ========================================
+        // 1. Department ต้องมี LINE Group
+        // ========================================
+
+        if (
+          !String(
+            department.line_group_id ||
+            ""
+          ).trim()
+        ) {
+          console.log(
+            "DEPARTMENT DISPATCH SKIPPED: no line_group_id",
+            {
+              departmentId:
+                department.id,
+
+              departmentCode:
+                department.code,
+            }
+          );
+
+          results.push({
+            departmentCode:
+              department.code,
+
+            dispatched:
+              false,
+
+            reason:
+              "missing_line_group_id",
+          });
+
+          continue;
+        }
+
+
+        // ========================================
+        // 2. เช็กว่าถึงรอบ Dispatch หรือยัง
+        // ========================================
+
+        const intervalHours =
+          Number(
+            department
+              .dispatch_interval_hours ||
+            4
+          );
+
+
+        const lastDispatchedAt =
+          department
+            .last_dispatched_at
+            ? new Date(
+                department
+                  .last_dispatched_at
+              )
+            : null;
+
+
+        if (lastDispatchedAt) {
+          const nextDispatchAt =
+            new Date(
+              lastDispatchedAt.getTime() +
+              intervalHours *
+                60 *
+                60 *
+                1000
+            );
+
+
+          if (
+            now.getTime() <
+            nextDispatchAt.getTime()
+          ) {
+            console.log(
+              "DEPARTMENT DISPATCH NOT DUE:",
+              {
+                departmentCode:
+                  department.code,
+
+                lastDispatchedAt:
+                  lastDispatchedAt
+                    .toISOString(),
+
+                nextDispatchAt:
+                  nextDispatchAt
+                    .toISOString(),
+              }
+            );
+
+            results.push({
+              departmentCode:
+                department.code,
+
+              dispatched:
+                false,
+
+              reason:
+                "not_due",
+
+              nextDispatchAt:
+                nextDispatchAt
+                  .toISOString(),
+            });
+
+            continue;
+          }
+        }
+
+
+        // ========================================
+        // 3. ดึง Job ที่รอแจก
+        // ========================================
+
+        const queuedJobs =
+          await getQueuedJobsByDepartmentId(
+            department.id
+          );
+
+
+        if (
+          queuedJobs.length === 0
+        ) {
+          console.log(
+            "DEPARTMENT DISPATCH: no queued jobs",
+            {
+              departmentCode:
+                department.code,
+            }
+          );
+
+          results.push({
+            departmentCode:
+              department.code,
+
+            dispatched:
+              false,
+
+            reason:
+              "no_jobs",
+          });
+
+          continue;
+        }
+
+
+        // ========================================
+        // 4. ส่งเข้า LINE Group ก่อน
+        //
+        // ถ้าส่งไม่สำเร็จ
+        // Job ต้องยังเป็น queued
+        // ========================================
+
+        await sendDepartmentDispatchToLineGroup({
+          department,
+
+          jobs:
+            queuedJobs,
+
+          dispatchedAt,
+        });
+
+
+        // ========================================
+        // 5. สร้าง Dispatch Round
+        // ========================================
+
+        const dispatchRound =
+          await createDispatchRound({
+            departmentId:
+              department.id,
+
+            startedAt:
+              dispatchedAt,
+
+            dispatchedCount:
+              queuedJobs.length,
+          });
+
+
+        // ========================================
+        // 6. queued → processing
+        // ========================================
+
+        const dispatchedJobs = [];
+
+
+        for (
+          const job of
+          queuedJobs
+        ) {
+          const updatedJob =
+            await markJobDispatched({
+              jobId:
+                job.id,
+
+              dispatchRoundId:
+                dispatchRound.id,
+
+              dispatchedAt,
+            });
+
+
+          if (updatedJob) {
+            dispatchedJobs.push(
+              updatedJob
+            );
+          }
+        }
+
+
+        // ========================================
+        // 7. บันทึกเวลารอบล่าสุด
+        // ========================================
+
+        await updateDepartmentLastDispatchedAt(
+          department.id,
+          dispatchedAt
+        );
+
+
+        console.log(
+          "DEPARTMENT DISPATCH COMPLETE:",
+          {
+            departmentCode:
+              department.code,
+
+            dispatchRoundId:
+              dispatchRound.id,
+
+            queuedCount:
+              queuedJobs.length,
+
+            dispatchedCount:
+              dispatchedJobs.length,
+          }
+        );
+
+
+        results.push({
+          departmentCode:
+            department.code,
+
+          dispatched:
+            true,
+
+          dispatchRoundId:
+            dispatchRound.id,
+
+          jobCount:
+            dispatchedJobs.length,
+        });
+
+
+      } catch (error) {
+        console.error(
+          "DEPARTMENT DISPATCH FAILED:",
+          {
+            departmentId:
+              department.id,
+
+            departmentCode:
+              department.code,
+
+            error:
+              error.message,
+          }
+        );
+
+
+        results.push({
+          departmentCode:
+            department.code,
+
+          dispatched:
+            false,
+
+          reason:
+            "error",
+
+          error:
+            error.message,
+        });
+      }
+    }
+
+
+    return {
+      ok: true,
+      dispatchedAt,
+      results,
+    };
+
+
+  } finally {
+    departmentDispatchRunning =
+      false;
+  }
+}
 
 async function getCustomerStage({
   customer,
@@ -2249,6 +2751,77 @@ app.get("/", async (req, res) => {
   });
 });
 
+// =========================================================
+// DEPARTMENT DISPATCH ENDPOINT
+// ใช้สำหรับ Cron / Manual Trigger
+// =========================================================
+
+app.post(
+  "/dispatch-departments",
+  async (req, res) => {
+    try {
+      const secret =
+        String(
+          req.body?.secret || ""
+        ).trim();
+
+      const expectedSecret =
+        String(
+          process.env
+            .DEPARTMENT_DISPATCH_SECRET ||
+          ""
+        ).trim();
+
+
+      if (!expectedSecret) {
+        console.error(
+          "DEPARTMENT DISPATCH SECRET MISSING"
+        );
+
+        return res.status(500).json({
+          ok: false,
+          error:
+            "DEPARTMENT_DISPATCH_SECRET not configured",
+        });
+      }
+
+
+      if (
+        !secret ||
+        secret !== expectedSecret
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error:
+            "Unauthorized",
+        });
+      }
+
+
+      const result =
+        await runDepartmentDispatch();
+
+
+      return res.status(200).json(
+        result
+      );
+
+
+    } catch (error) {
+      console.error(
+        "DEPARTMENT DISPATCH ENDPOINT ERROR:",
+        error
+      );
+
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error.message,
+      });
+    }
+  }
+);
 
 // =========================================================
 // SUPABASE TEST
