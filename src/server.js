@@ -104,6 +104,9 @@ markCustomerMapChecked,
 findExistingCustomerReview,
 findExistingReactivationAlert,
 createReactivationAlert,
+setReactivationAlertLineGroupMessage,
+getReactivationAlertByLineGroupMessageId,
+setReactivationAlertTeamDecision,
   
 } from "./repositories/gmrRepository.js";
 
@@ -1821,6 +1824,183 @@ return {
         error.message,
     };
   }
+}
+
+// =========================================================
+// REACTIVATION REVIEW → TEAM LINE GROUP
+//
+// พบรีวิว 1 ดาวใหม่ของลูกค้าเก่า
+// → ยังไม่ทักลูกค้า
+// → ส่งให้ทีมตรวจสอบก่อน
+// =========================================================
+
+async function sendReactivationAlertToLineGroup({
+  alert,
+  customerMap,
+}) {
+  if (!alert?.id) {
+    throw new Error(
+      "Missing alert in sendReactivationAlertToLineGroup"
+    );
+  }
+
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+  if (!token || !groupId) {
+    throw new Error(
+      "Missing LINE config for reactivation alert"
+    );
+  }
+
+  const customer =
+    await getCustomerById(
+      alert.customer_id
+    );
+
+  const customerName =
+    customer?.display_name ||
+    "-";
+
+  const businessName =
+    customerMap?.business_name ||
+    "-";
+
+  const reviewerName =
+    alert.reviewer_name ||
+    "-";
+
+  const reviewText =
+    String(
+      alert.review_text || ""
+    ).trim() ||
+    "(ไม่มีข้อความ)";
+
+  const reviewDate =
+    alert.review_date ||
+    "-";
+
+  const reviewUrl =
+    alert.review_url ||
+    "-";
+
+  const text = [
+    "🔎 พบรีวิว 1 ดาวใหม่",
+    "",
+    `ลูกค้า: ${customerName}`,
+    `ธุรกิจ: ${businessName}`,
+    `Reviewer: ${reviewerName}`,
+    `วันที่รีวิว: ${reviewDate}`,
+    "",
+    "ข้อความ:",
+    reviewText,
+    "",
+    `Review URL: ${reviewUrl}`,
+    "",
+    "⚠️ กรุณาตรวจสอบก่อนทักลูกค้า",
+    "ว่าลูกค้าเคยส่งรีวิวนี้มาให้ดำเนินการแล้วหรือไม่",
+    "",
+    "Reply ข้อความนี้:",
+    "ส่งลูกค้า",
+    "ข้าม",
+  ].join("\n");
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+  const responseText =
+    await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `REACTIVATION LINE PUSH FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+  let responseData = {};
+
+  if (responseText) {
+    try {
+      responseData =
+        JSON.parse(
+          responseText
+        );
+    } catch {
+      responseData = {};
+    }
+  }
+
+  const messageId =
+    responseData
+      ?.sentMessages
+      ?.[0]
+      ?.id ||
+    null;
+
+  if (!messageId) {
+    throw new Error(
+      "Reactivation LINE messageId missing"
+    );
+  }
+
+  await setReactivationAlertLineGroupMessage({
+    alertId:
+      alert.id,
+
+    lineGroupMessageId:
+      messageId,
+  });
+
+  console.log(
+    "REACTIVATION LINE ALERT SENT:",
+    {
+      alertId:
+        alert.id,
+
+      customerId:
+        alert.customer_id,
+
+      messageId,
+    }
+  );
+
+  return {
+    sent: true,
+    messageId,
+    text,
+  };
 }
 
 // =========================================================
