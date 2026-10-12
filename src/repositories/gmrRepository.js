@@ -2005,8 +2005,85 @@ if (normalizedLegacyCustomerId) {
 }
 
 export async function getPendingLegacyCustomersByDisplayName(
-  displayName
+  displayName,
+  platform = null,
+  platformAccount = null
 ) {
+  const normalizedName =
+    String(
+      displayName || ""
+    ).trim();
+
+  if (!normalizedName) {
+    return [];
+  }
+
+
+  let query =
+    supabase
+      .from("gmr_legacy_customers")
+      .select("*")
+      .eq(
+        "match_status",
+        "pending"
+      )
+      .ilike(
+        "display_name",
+        normalizedName
+      );
+
+
+  const normalizedPlatform =
+    String(
+      platform || ""
+    )
+      .trim()
+      .toLowerCase();
+
+
+  const normalizedPlatformAccount =
+    String(
+      platformAccount || ""
+    ).trim();
+
+
+  if (normalizedPlatform) {
+    query =
+      query.eq(
+        "platform",
+        normalizedPlatform
+      );
+  }
+
+
+  if (normalizedPlatformAccount) {
+    query =
+      query.eq(
+        "platform_account",
+        normalizedPlatformAccount
+      );
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await query.order(
+      "created_at",
+      {
+        ascending: true,
+      }
+    );
+
+
+  if (error) {
+    throw error;
+  }
+
+
+  return data || [];
+}
   const normalizedName =
     String(
       displayName || ""
