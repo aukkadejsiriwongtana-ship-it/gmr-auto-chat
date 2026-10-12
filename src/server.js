@@ -602,6 +602,75 @@ function extractGoogleMapsUrl(
     : null;
 }
 
+async function resolveGoogleShortUrl(
+  url
+) {
+  const inputUrl =
+    String(url || "").trim();
+
+  if (!inputUrl) {
+    return null;
+  }
+
+  try {
+    const response =
+      await fetch(
+        inputUrl,
+        {
+          method:
+            "GET",
+
+          redirect:
+            "follow",
+
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0",
+          },
+        }
+      );
+
+
+    const resolvedUrl =
+      String(
+        response.url ||
+        ""
+      ).trim();
+
+
+    if (resolvedUrl) {
+      console.log(
+        "GOOGLE SHORT URL HTTP RESOLVED:",
+        {
+          originalUrl:
+            inputUrl,
+
+          resolvedUrl,
+        }
+      );
+
+      return resolvedUrl;
+    }
+
+
+    return inputUrl;
+
+  } catch (error) {
+    console.error(
+      "GOOGLE SHORT URL HTTP RESOLVE FAILED:",
+      {
+        originalUrl:
+          inputUrl,
+
+        error:
+          error.message,
+      }
+    );
+
+    return null;
+  }
+}
+
 function isServiceInquiryMessage(
   message
 ) {
@@ -5128,10 +5197,13 @@ let classification =
 // 1. Business Map URL
 // 2. Direct Review URL
 //
-// ให้ลองตรวจว่าเป็น Direct Review ก่อน
-// ถ้าใช่ → ส่งเข้า REVIEW_URL flow เดิม
-// ถ้าไม่ใช่ → คงเป็น MAP_URL ตามเดิม
+// ต้อง resolve short URL ก่อน
+// แล้วค่อยตรวจ Direct Review
 // =========================================================
+
+let directReviewResolvedUrl =
+  null;
+
 
 if (
   classification.type ===
@@ -5139,15 +5211,45 @@ if (
   detectedMapUrl
 ) {
   try {
-    const directReviewPreflight =
-      await getReviewFromDirectUrl(
+    const resolvedShortUrl =
+      await resolveGoogleShortUrl(
         detectedMapUrl
       );
+
+
+    const reviewLookupUrl =
+      resolvedShortUrl ||
+      detectedMapUrl;
+
+
+    console.log(
+      "DIRECT REVIEW PREFLIGHT URL:",
+      {
+        originalUrl:
+          detectedMapUrl,
+
+        resolvedUrl:
+          resolvedShortUrl,
+
+        lookupUrl:
+          reviewLookupUrl,
+      }
+    );
+
+
+    const directReviewPreflight =
+      await getReviewFromDirectUrl(
+        reviewLookupUrl
+      );
+
 
     if (
       directReviewPreflight?.found &&
       directReviewPreflight?.review
     ) {
+      directReviewResolvedUrl =
+        reviewLookupUrl;
+
       classification = {
         type:
           INPUT_TYPES.REVIEW_URL,
@@ -5156,14 +5258,18 @@ if (
           1,
       };
 
+
       console.log(
         "MAP SHORT LINK DETECTED AS DIRECT REVIEW:",
         {
           customerId:
             customer.id,
 
-          reviewUrl:
+          originalUrl:
             detectedMapUrl,
+
+          resolvedUrl:
+            directReviewResolvedUrl,
 
           reviewerName:
             directReviewPreflight
@@ -5186,8 +5292,11 @@ if (
           customerId:
             customer.id,
 
-          mapUrl:
+          originalUrl:
             detectedMapUrl,
+
+          resolvedUrl:
+            resolvedShortUrl,
 
           reason:
             directReviewPreflight
@@ -5213,7 +5322,8 @@ if (
     );
 
     // ไม่ block flow
-    // ปล่อยให้ MAP_URL flow เดิมทำงานต่อ
+    // ถ้า Direct Review ตรวจไม่ได้
+    // ให้ MAP_URL flow เดิมทำงานต่อ
   }
 }
 
@@ -5503,9 +5613,9 @@ if (
   classification.type ===
   INPUT_TYPES.REVIEW_URL
 ) {
-  const reviewUrl =
-    String(message || "").trim();
-
+const reviewUrl =
+  directReviewResolvedUrl ||
+  String(message || "").trim();
   let directResult;
 
   try {
