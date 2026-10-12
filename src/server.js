@@ -855,6 +855,120 @@ async function sendDepartmentDispatchToLineGroup({
   };
 }
 
+async function sendDispatchStuckAlertToMainGroup({
+  department,
+  dispatchRoundId,
+  sendingStartedAt,
+  stuckMinutes,
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+
+  if (!token || !groupId) {
+    console.error(
+      "DISPATCH STUCK ALERT FAILED: missing LINE config"
+    );
+
+    return {
+      sent: false,
+      reason: "missing_line_config",
+    };
+  }
+
+
+  const text = [
+    "⚠️ พบงาน Dispatch ค้าง",
+    "",
+    `แผนก: ${
+      department?.code || "-"
+    }`,
+    `ชื่อแผนก: ${
+      department?.name || "-"
+    }`,
+    `Dispatch Round: ${
+      dispatchRoundId || "-"
+    }`,
+    `เริ่มค้างตั้งแต่: ${
+      sendingStartedAt || "-"
+    }`,
+    `ค้างประมาณ: ${
+      Math.floor(
+        Number(stuckMinutes || 0)
+      )
+    } นาที`,
+    "",
+    "ระบบจะไม่ส่งงานชุดนี้ซ้ำอัตโนมัติ",
+    "กรุณาตรวจสอบ LINE กลุ่มแผนกและสถานะงานก่อนดำเนินการต่อ",
+  ].join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method: "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+    throw new Error(
+      `DISPATCH STUCK ALERT LINE FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+
+  console.log(
+    "DISPATCH STUCK ALERT SENT:",
+    {
+      departmentCode:
+        department?.code,
+
+      dispatchRoundId,
+
+      sendingStartedAt,
+
+      stuckMinutes,
+    }
+  );
+
+
+  return {
+    sent: true,
+  };
+}
+
 // =========================================================
 // RUN DEPARTMENT DISPATCH
 //
@@ -959,28 +1073,108 @@ async function runDepartmentDispatch() {
         }
 
 
-        if (
-          claimResult?.claimed !== true
-        ) {
-          results.push({
+      if (
+  claimResult?.claimed !== true
+) {
+  const reason =
+    claimResult?.reason ||
+    "not_claimed";
+
+
+  if (
+    reason ===
+      "dispatch_already_sending" &&
+    claimResult
+      ?.sending_started_at
+  ) {
+    const sendingStartedAt =
+      new Date(
+        claimResult
+          .sending_started_at
+      );
+
+
+    const stuckMinutes =
+      (
+        Date.now() -
+        sendingStartedAt
+          .getTime()
+      ) /
+      (
+        60 *
+        1000
+      );
+
+
+    if (
+      Number.isFinite(
+        stuckMinutes
+      ) &&
+      stuckMinutes >= 15
+    ) {
+      try {
+        await sendDispatchStuckAlertToMainGroup({
+          department,
+
+          dispatchRoundId:
+            claimResult
+              .dispatch_round_id,
+
+          sendingStartedAt:
+            claimResult
+              .sending_started_at,
+
+          stuckMinutes,
+        });
+
+      } catch (alertError) {
+        console.error(
+          "DISPATCH STUCK ALERT ERROR:",
+          {
             departmentCode:
               department.code,
 
-            dispatched:
-              false,
-
-            reason:
-              claimResult?.reason ||
-              "not_claimed",
-
-            nextDispatchAt:
+            dispatchRoundId:
               claimResult
-                ?.next_dispatch_at ||
-              null,
-          });
+                .dispatch_round_id,
 
-          continue;
-        }
+            error:
+              alertError.message,
+          }
+        );
+      }
+    }
+  }
+
+
+  results.push({
+    departmentCode:
+      department.code,
+
+    dispatched:
+      false,
+
+    reason,
+
+    nextDispatchAt:
+      claimResult
+        ?.next_dispatch_at ||
+      null,
+
+    dispatchRoundId:
+      claimResult
+        ?.dispatch_round_id ||
+      null,
+
+    sendingStartedAt:
+      claimResult
+        ?.sending_started_at ||
+      null,
+  });
+
+
+  continue;
+}
 
 
         const dispatchRoundId =
