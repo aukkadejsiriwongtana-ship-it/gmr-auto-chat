@@ -12084,7 +12084,43 @@ if (
       continue;
     }
 
+const paymentReviewReasons =
+  Array.isArray(
+    pendingPayment.verification_reasons
+  )
+    ? pendingPayment.verification_reasons
+    : [];
 
+
+const isMultiJobPayment =
+  paymentReviewReasons.includes(
+    "MULTIPLE_WAITING_PAYMENT_JOBS"
+  );
+
+
+if (isMultiJobPayment) {
+  await replyLineTextMessage(
+    event.replyToken,
+    "⚠️ สลิปนี้เป็นยอดรวมหลายงาน ยังไม่สามารถกดยืนยันแบบงานเดียวได้ครับ กรุณาตรวจรายการทั้งหมดก่อน"
+  );
+
+  console.log(
+    "MULTI JOB PAYMENT MANUAL APPROVAL BLOCKED:",
+    {
+      paymentId:
+        pendingPayment.id,
+
+      anchorJobId:
+        paymentJob.id,
+
+      reasons:
+        paymentReviewReasons,
+    }
+  );
+
+  continue;
+}
+    
     const paymentCustomer =
       await getCustomerById(
         paymentJob.customer_id
