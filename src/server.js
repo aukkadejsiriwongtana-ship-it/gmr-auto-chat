@@ -1480,13 +1480,14 @@ async function getCustomerStage({
   // มีงานกำลังดำเนินการอยู่
   // ========================================
 
-  const activeJobStatuses = [
-    "processing",
-    "removed",
-    "waiting_payment",
-    "removed_waiting_payment",
-  ];
-
+ const activeJobStatuses = [
+  "queued",
+  "dispatching",
+  "processing",
+  "removed",
+  "waiting_payment",
+  "removed_waiting_payment",
+];
 
   if (
     conversation?.state ===
