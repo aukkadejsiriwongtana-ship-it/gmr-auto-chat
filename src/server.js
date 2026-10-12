@@ -96,6 +96,8 @@ rollbackLegacyCustomerImport,
   getLegacyImportedJob,
 getVerifiedPaymentByJobId,
 backfillExistingCustomerMaps,
+getCustomerMapsWaitingForResolve,
+updateResolvedCustomerMap,
   
   
 } from "./repositories/gmrRepository.js";
@@ -15667,6 +15669,246 @@ app.post(
     } catch (error) {
       console.error(
         "BACKFILL EXISTING CUSTOMER MAPS ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+);
+
+// =========================================================
+// RESOLVE EXISTING CUSTOMER MAPS
+//
+// source_review_url
+// → หา review/business
+// → search Google Place
+// → save place_id + map_url
+// =========================================================
+
+app.post(
+  "/resolve-existing-customer-maps",
+  async (req, res) => {
+    try {
+      const {
+        secret,
+      } = req.body || {};
+
+      const SHEET_CONTROL_SECRET =
+        process.env.SHEET_CONTROL_SECRET;
+
+      if (
+        !SHEET_CONTROL_SECRET ||
+        secret !== SHEET_CONTROL_SECRET
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: "Unauthorized",
+        });
+      }
+
+      const maps =
+        await getCustomerMapsWaitingForResolve();
+
+      const results = [];
+
+      for (const customerMap of maps) {
+        try {
+          const reviewUrl =
+            String(
+              customerMap?.source_review_url ||
+              ""
+            ).trim();
+
+          if (!reviewUrl) {
+            results.push({
+              customerMapId:
+                customerMap.id,
+              ok: false,
+              reason:
+                "missing_source_review_url",
+            });
+
+            continue;
+          }
+
+          // =====================================
+          // 1. Resolve review URL
+          // =====================================
+
+          const directResult =
+            await getReviewFromDirectUrl(
+              reviewUrl
+            );
+
+          if (
+            !directResult?.found ||
+            !directResult?.review
+          ) {
+            results.push({
+              customerMapId:
+                customerMap.id,
+              ok: false,
+              reason:
+                directResult?.reason ||
+                "review_not_found",
+            });
+
+            continue;
+          }
+
+          const businessName =
+            String(
+              directResult.businessName ||
+              customerMap.business_name ||
+              ""
+            ).trim();
+
+          if (!businessName) {
+            results.push({
+              customerMapId:
+                customerMap.id,
+              ok: false,
+              reason:
+                "business_name_not_found",
+            });
+
+            continue;
+          }
+
+          // =====================================
+          // 2. Search Google Place
+          // =====================================
+
+          const places =
+            await searchPlaceByText(
+              businessName
+            );
+
+          if (
+            !Array.isArray(places) ||
+            places.length === 0
+          ) {
+            results.push({
+              customerMapId:
+                customerMap.id,
+              ok: false,
+              businessName,
+              reason:
+                "place_not_found",
+            });
+
+            continue;
+          }
+
+          const place =
+            places[0];
+
+          const placeId =
+            String(
+              place?.placeId ||
+              ""
+            ).trim();
+
+          if (!placeId) {
+            results.push({
+              customerMapId:
+                customerMap.id,
+              ok: false,
+              businessName,
+              reason:
+                "place_id_missing",
+            });
+
+            continue;
+          }
+
+          // =====================================
+          // 3. Save resolved Map
+          // =====================================
+
+          const updated =
+            await updateResolvedCustomerMap({
+              customerMapId:
+                customerMap.id,
+
+              businessName:
+                place.businessName ||
+                businessName,
+
+              placeId,
+
+              mapUrl:
+                place.mapUrl ||
+                null,
+            });
+
+          results.push({
+            customerMapId:
+              customerMap.id,
+            ok: true,
+            businessName:
+              updated.business_name,
+            placeId:
+              updated.place_id,
+            mapUrl:
+              updated.map_url,
+          });
+
+        } catch (mapError) {
+          console.error(
+            "RESOLVE CUSTOMER MAP ERROR:",
+            {
+              customerMapId:
+                customerMap?.id,
+
+              error:
+                mapError?.message ||
+                String(mapError),
+            }
+          );
+
+          results.push({
+            customerMapId:
+              customerMap?.id ||
+              null,
+            ok: false,
+            reason:
+              "resolve_error",
+            error:
+              mapError?.message ||
+              String(mapError),
+          });
+        }
+      }
+
+      const resolved =
+        results.filter(
+          (item) =>
+            item.ok === true
+        ).length;
+
+      const failed =
+        results.length -
+        resolved;
+
+      return res.json({
+        ok: true,
+        total:
+          results.length,
+        resolved,
+        failed,
+        results,
+      });
+
+    } catch (error) {
+      console.error(
+        "RESOLVE EXISTING CUSTOMER MAPS ERROR:",
         error
       );
 
