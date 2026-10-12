@@ -775,6 +775,55 @@ export async function getLatestJobByCustomerId(
   return data;
 }
 
+export async function getJobByCustomerAndReviewUrl(
+  customerId,
+  reviewUrl
+) {
+  const normalizedUrl =
+    String(reviewUrl || "").trim();
+
+  if (
+    !customerId ||
+    !normalizedUrl
+  ) {
+    return null;
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "customer_id",
+        customerId
+      )
+      .eq(
+        "review_url",
+        normalizedUrl
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
+      )
+      .limit(1)
+      .maybeSingle();
+
+
+  if (error) {
+    throw error;
+  }
+
+
+  return data || null;
+}
+
 // =========================================================
 // GET WAITING PAYMENT JOBS BY CUSTOMER
 // ใช้รวมเฉพาะงานที่สำเร็จแล้วและยังไม่ได้ชำระ
