@@ -1750,8 +1750,8 @@ async function startApprovedExistingCustomerBatch({
   }
 
 
-  const startedAt =
-    new Date().toISOString();
+  const queuedAt =
+  new Date().toISOString();
 
 
   const startedJobs = [];
@@ -1762,23 +1762,28 @@ async function startApprovedExistingCustomerBatch({
   // ========================================
 
   for (const job of jobs) {
-    const updatedJob =
-      await updateJob(
-        job.id,
-        {
-          status:
-            "processing",
+  const updatedJob =
+    await updateJob(
+      job.id,
+      {
+        status:
+          "queued",
 
-          started_at:
-            startedAt,
-        }
-      );
+        queued_at:
+          queuedAt,
 
+        started_at:
+          null,
 
-    startedJobs.push(
-      updatedJob
+        dispatched_at:
+          null,
+      }
     );
-  }
+
+  startedJobs.push(
+    updatedJob
+  );
+}
 
 
   // ========================================
@@ -1801,77 +1806,7 @@ async function startApprovedExistingCustomerBatch({
   });
 
 
-  // ========================================
-  // 3. ลง Google Sheet ทุก Job
-  //
-  // Sheet fail ไม่ทำให้งานในระบบย้อนกลับ
-  // เหมือน behavior ของ startApprovedJob เดิม
-  // ========================================
-
-  for (
-    const updatedJob of
-      startedJobs
-  ) {
-
-    try {
-      await appendJobToGoogleSheet({
-        jobId:
-          updatedJob.id,
-
-        customerId:
-          customer.id,
-
-        customerName:
-          customer.display_name ||
-          "",
-
-        platform:
-          customer.platform ||
-          "line",
-
-        phone:
-          customer.phone ||
-          "",
-
-        businessName:
-          updatedJob.business_name ||
-          "",
-
-        reviewUrl:
-          updatedJob.review_url ||
-          "",
-
-        price:
-          updatedJob.price ||
-          "",
-
-        status:
-          updatedJob.status ||
-          "processing",
-
-        startedAt,
-
-        removedAt:
-          "",
-
-        paidAt:
-          "",
-      });
-
-    } catch (error) {
-      console.error(
-        "EXISTING BATCH GOOGLE SHEET FAILED:",
-        {
-          jobId:
-            updatedJob.id,
-
-          error:
-            error.message,
-        }
-      );
-    }
-  }
-
+  
 
   // ========================================
   // 4. แจ้งลูกค้าเพียง 1 ข้อความ
@@ -1921,10 +1856,10 @@ We'll proceed with the confirmed reviews and notify you as results become availa
 
 
   return {
-    startedJobs,
-    startedAt,
-    botReply,
-  };
+  startedJobs,
+  queuedAt,
+  botReply,
+};
 }
 
 async function startApprovedJob({
