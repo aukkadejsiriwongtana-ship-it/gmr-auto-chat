@@ -2166,3 +2166,216 @@ export async function getDepartmentForReviewAge(
 
   return null;
 }
+
+// =========================================================
+// DISPATCH QUEUE
+// =========================================================
+
+export async function getActiveDepartments() {
+  const { data, error } =
+    await supabase
+      .from("gmr_departments")
+      .select("*")
+      .eq("is_active", true)
+      .order(
+        "min_review_age_days",
+        {
+          ascending: true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+export async function getQueuedJobsByDepartmentId(
+  departmentId
+) {
+  if (!departmentId) {
+    throw new Error(
+      "Missing departmentId in getQueuedJobsByDepartmentId"
+    );
+  }
+
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .select("*")
+      .eq(
+        "department_id",
+        departmentId
+      )
+      .eq(
+        "status",
+        "queued"
+      )
+      .is(
+        "dispatch_round_id",
+        null
+      )
+      .not(
+        "review_url",
+        "is",
+        null
+      )
+      .order(
+        "queued_at",
+        {
+          ascending: true,
+          nullsFirst: true,
+        }
+      )
+      .order(
+        "created_at",
+        {
+          ascending: true,
+        }
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+export async function createDispatchRound({
+  departmentId,
+  startedAt,
+  dispatchedCount = 0,
+}) {
+  if (!departmentId) {
+    throw new Error(
+      "Missing departmentId in createDispatchRound"
+    );
+  }
+
+  const { data, error } =
+    await supabase
+      .from("gmr_dispatch_rounds")
+      .insert({
+        department_id:
+          departmentId,
+
+        started_at:
+          startedAt ||
+          new Date().toISOString(),
+
+        dispatched_count:
+          Number(
+            dispatchedCount || 0
+          ),
+
+        removed_count:
+          0,
+
+        status:
+          "open",
+      })
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function markJobDispatched({
+  jobId,
+  dispatchRoundId,
+  dispatchedAt,
+}) {
+  if (!jobId) {
+    throw new Error(
+      "Missing jobId in markJobDispatched"
+    );
+  }
+
+  if (!dispatchRoundId) {
+    throw new Error(
+      "Missing dispatchRoundId in markJobDispatched"
+    );
+  }
+
+  const sentAt =
+    dispatchedAt ||
+    new Date().toISOString();
+
+  const { data, error } =
+    await supabase
+      .from("gmr_jobs")
+      .update({
+        status:
+          "processing",
+
+        dispatch_round_id:
+          dispatchRoundId,
+
+        dispatched_at:
+          sentAt,
+
+        started_at:
+          sentAt,
+      })
+      .eq(
+        "id",
+        jobId
+      )
+      .eq(
+        "status",
+        "queued"
+      )
+      .is(
+        "dispatch_round_id",
+        null
+      )
+      .select()
+      .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+export async function updateDepartmentLastDispatchedAt(
+  departmentId,
+  dispatchedAt
+) {
+  if (!departmentId) {
+    throw new Error(
+      "Missing departmentId in updateDepartmentLastDispatchedAt"
+    );
+  }
+
+  const { data, error } =
+    await supabase
+      .from("gmr_departments")
+      .update({
+        last_dispatched_at:
+          dispatchedAt ||
+          new Date().toISOString(),
+      })
+      .eq(
+        "id",
+        departmentId
+      )
+      .select()
+      .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
