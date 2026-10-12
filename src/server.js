@@ -529,24 +529,38 @@ function buildPaymentBreakdown({
           );
 
 
-        if (
-          currency ===
-          "THB"
-        ) {
+       if (
+  currency ===
+  "THB"
+) {
+  if (language === "en") {
+    return (
+      `• ${priceText} THB/review` +
+      ` × ${item.count}` +
+      ` = ${lineTotal} THB`
+    );
+  }
 
-          return (
-            `• ${priceText} บาท/รีวิว` +
-            ` × ${item.count}` +
-            ` = ${lineTotal} บาท`
-          );
-        }
+  return (
+    `• ${priceText} บาท/รีวิว` +
+    ` × ${item.count}` +
+    ` = ${lineTotal} บาท`
+  );
+}
 
+        if (language === "th") {
+  return (
+    `• $${priceText} USD/รีวิว` +
+    ` × ${item.count}` +
+    ` = $${lineTotal} USD`
+  );
+}
 
-        return (
-          `• $${priceText} USD/review` +
-          ` × ${item.count}` +
-          ` = $${lineTotal} USD`
-        );
+return (
+  `• $${priceText} USD/review` +
+  ` × ${item.count}` +
+  ` = $${lineTotal} USD`
+);
       }
     );
 
