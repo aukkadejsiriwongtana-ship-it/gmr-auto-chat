@@ -1128,6 +1128,69 @@ for (
   dispatchedJobs
 ) {
   try {
+    // ----------------------------------------
+    // Customer Name
+    // ----------------------------------------
+
+    const jobCustomer =
+      await getCustomerById(
+        job.customer_id
+      );
+
+
+    // ----------------------------------------
+    // Review ของ Job นี้
+    // ห้ามเดาถ้ามีหลาย Review
+    // ----------------------------------------
+
+    const jobReviews =
+      await getReviewsByJobId(
+        job.id
+      );
+
+
+    let selectedReview =
+      null;
+
+
+    const explicitlySelected =
+      jobReviews.filter(
+        (review) =>
+          review
+            ?.selected_by_customer ===
+          true
+      );
+
+
+    if (
+      explicitlySelected.length > 0
+    ) {
+      selectedReview =
+        explicitlySelected[
+          explicitlySelected.length - 1
+        ];
+    } else if (
+      jobReviews.length === 1
+    ) {
+      selectedReview =
+        jobReviews[0];
+    }
+
+
+    // ----------------------------------------
+    // Review Age
+    // null = ไม่รู้
+    // ห้ามเดา
+    // ----------------------------------------
+
+    const reviewAgeDays =
+      selectedReview
+        ? getReviewAgeDays(
+            selectedReview
+          )
+        : null;
+
+
     await appendDispatchJobToGoogleSheet({
       sheetName:
         department.active_sheet_name,
@@ -1138,15 +1201,16 @@ for (
       sentAt:
         dispatchedAt,
 
+      // ตอนนี้ระบบยังไม่มี Batch ID จริง
       batchId:
-        job.batch_id ||
         "",
 
       jobId:
         job.id,
 
       customerName:
-        job.customer_name ||
+        jobCustomer
+          ?.display_name ||
         "",
 
       mapName:
@@ -1158,7 +1222,7 @@ for (
         "",
 
       reviewAge:
-        job.review_age_days ??
+        reviewAgeDays ??
         "",
 
       startedAt:
@@ -1178,6 +1242,8 @@ for (
       elapsedTime:
         "",
     });
+
+
   } catch (error) {
     console.error(
       "DISPATCH GOOGLE SHEET FAILED:",
@@ -1197,7 +1263,6 @@ for (
     );
   }
 }
-
         
         // ========================================
         // 7. บันทึกเวลารอบล่าสุด
