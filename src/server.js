@@ -1812,22 +1812,24 @@ async function startApprovedExistingCustomerBatch({
   // 4. แจ้งลูกค้าเพียง 1 ข้อความ
   // ========================================
 
-  const botReply =
-    getCustomerText(
-      customer,
+const botReply =
+  getCustomerText(
+    customer,
 
-      `เริ่มดำเนินการเรียบร้อยแล้วครับ ✅
+    `รับงานเรียบร้อยแล้วครับ ✅
 
 จำนวนทั้งหมด ${startedJobs.length} รีวิว
 
-ทางเราจะดำเนินการตามรายการที่ยืนยันไว้ และแจ้งให้ทราบเมื่อมีผลสำเร็จครับ`,
+ระบบได้จัดงานเข้าคิวเรียบร้อยแล้ว และจะส่งเข้าทีมดำเนินการตามรอบถัดไปอัตโนมัติครับ
+เมื่อมีผลสำเร็จ ทางเราจะแจ้งให้ทราบครับ`,
 
-      `Your batch has now been started. ✅
+    `Your request has been confirmed. ✅
 
 Total: ${startedJobs.length} review(s)
 
-We'll proceed with the confirmed reviews and notify you as results become available.`
-    );
+Your reviews have been added to our processing queue and will be assigned to the appropriate team in the next dispatch round automatically.
+We'll notify you once there is an update or a successful result.`
+  );
 
 
   await saveMessage({
@@ -1869,36 +1871,79 @@ async function startApprovedJob({
   platform,
   phone,
 }) {
-  const template =
-    await getTemplate(
-      "script_5_started",
-      customer.language || "th"
-    );
+  
+const currency =
+  getCurrencyFromUnitPrice({
+    price:
+      job.price,
+
+    currency:
+      job.currency,
+  });
 
 
-  if (!template) {
-    throw new Error(
-      "script_5_started template not found"
-    );
-  }
+const formattedPrice =
+  formatMoney(
+    Number(job.price || 0),
+    currency
+  );
 
 
-  const formattedPrice =
-    Number(
-      job.price || 0
-    ).toLocaleString(
-      customer.language === "en"
-        ? "en-US"
-        : "th-TH"
-    );
+const priceText =
+  currency === "USD"
+    ? `$${formattedPrice} USD/review`
+    : `${formattedPrice} บาท/รีวิว`;
 
 
-  const botReply =
-    template.content.replace(
-      "{{price}}",
-      formattedPrice
-    );
+const thaiPaymentCondition =
+  currency === "USD"
+    ? "1. ชำระผ่านช่องทาง Payment Link ที่ทางเราจัดส่งให้เท่านั้น"
+    : "1. ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี";
 
+
+const englishPaymentCondition =
+  currency === "USD"
+    ? "1. Payment must be made through the payment link provided by us."
+    : "1. Payment must be made via the provided QR payment method. Direct bank transfer is not accepted.";
+
+
+const botReply =
+  getCustomerText(
+    customer,
+
+    `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
+
+ค่าดำเนินการยื่นเรื่อง: ${priceText}
+
+ระยะเวลาดำเนินการโดยประมาณ 1–14 วันทำการ
+
+🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
+
+📌 เงื่อนไขการให้บริการ:
+${thaiPaymentCondition}
+2. ชำระค่าบริการทันทีหลังจากรีวิวถูกนำออก
+3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวลบรีวิวให้ภายหลัง ค่าบริการเต็มจำนวนยังคงต้องชำระ
+4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
+5. งานจะถือว่าสำเร็จสมบูรณ์เมื่อรีวิวถูกนำออกและลูกค้าชำระค่าบริการเรียบร้อยแล้ว
+6. ทางเราดำเนินการยื่นเรื่องให้แพลตฟอร์มตรวจสอบเพื่อนำรีวิวออกเท่านั้น ไม่มีส่วนเกี่ยวข้องกับปัญหาอื่น ๆ รวมถึงรีวิวอื่น ๆ ของลูกค้า`,
+
+    `We have started processing your request.
+
+Service fee: ${priceText}
+
+Estimated processing time: approximately 1–14 business days.
+
+🔥 We will notify you as soon as the review has been successfully removed. 🔥
+
+📌 Terms of Service:
+${englishPaymentCondition}
+2. Payment is due immediately after the review has been removed.
+3. Once processing has started, the request cannot be cancelled or changed. If the reviewer later removes the review independently, the full service fee will still apply.
+4. The service fee is non-refundable once processing has started.
+5. The case is considered fully completed once the review has been removed and payment has been completed.
+6. Our service is limited to submitting the specified review to the platform for assessment and removal. We are not responsible for other issues or other reviews associated with the customer's listing.`
+  );
+  
 
  const queuedAt =
   new Date().toISOString();
@@ -10173,10 +10218,10 @@ if (isExistingBatchCredit) {
 
 
     await replyLineTextMessage(
-      event.replyToken,
+  event.replyToken,
 
-      `✅ อนุมัติเครดิตแล้ว\nเริ่มงานทั้งหมด ${batchStartResult.startedJobs.length} รีวิว และส่งเข้า Google Sheet เรียบร้อยครับ`
-    );
+  `✅ อนุมัติเครดิตแล้ว\nรับเข้าคิวทั้งหมด ${batchStartResult.startedJobs.length} รีวิวแล้วครับ\nระบบจะรวบรวมและส่งเข้าแผนกตามรอบถัดไปอัตโนมัติ`
+);
 
 
   } catch (error) {
@@ -10293,11 +10338,10 @@ if (isExistingBatchCredit) {
       startResult.botReply,
   });
 
-
-  await replyLineTextMessage(
-    event.replyToken,
-    "✅ อนุมัติเครดิตแล้ว เริ่มงานและส่งเข้า Google Sheet เรียบร้อยครับ"
-  );
+await replyLineTextMessage(
+  event.replyToken,
+  "✅ อนุมัติเครดิตแล้ว รับงานเข้าคิวเรียบร้อยครับ ระบบจะส่งเข้าแผนกตามรอบถัดไปอัตโนมัติ"
+);
 
 
   continue;
