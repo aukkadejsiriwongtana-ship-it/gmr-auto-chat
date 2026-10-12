@@ -2967,6 +2967,29 @@ ${englishPaymentCondition}
 };
 }
 
+function shouldSuppressDuplicateBotReply({
+  conversation,
+  botReply,
+}) {
+  const previous =
+    String(
+      conversation?.last_bot_message ||
+      ""
+    ).trim();
+
+  const next =
+    String(
+      botReply ||
+      ""
+    ).trim();
+
+  if (!previous || !next) {
+    return false;
+  }
+
+  return previous === next;
+}
+
 async function getGlobalFaqReply({
   customer,
   message,
