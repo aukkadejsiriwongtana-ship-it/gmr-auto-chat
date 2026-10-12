@@ -3132,6 +3132,29 @@ function getGlobalFaqReply(
   return null;
 }
 
+function shouldSuppressDuplicateBotReply({
+  conversation,
+  botReply,
+}) {
+  const previous =
+    String(
+      conversation?.last_bot_message ||
+      ""
+    ).trim();
+
+  const next =
+    String(
+      botReply ||
+      ""
+    ).trim();
+
+  if (!previous || !next) {
+    return false;
+  }
+
+  return previous === next;
+}
+
 async function sendGlobalFaqIfMatched({
   customer,
   conversation,
@@ -5840,7 +5863,49 @@ await updateLastBotMessage(
     "I couldn't find the Google Maps listing from this business name. Please send the full business name or the Google Maps link."
   );
 
+if (
+  shouldSuppressDuplicateBotReply({
+    conversation,
+    botReply,
+  })
+) {
+  console.log(
+    "DUPLICATE BOT REPLY SUPPRESSED:",
+    {
+      customerId:
+        customer.id,
 
+      botReply,
+    }
+  );
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    inputType:
+      classification.type,
+
+    botReply:
+      null,
+
+    placeFound:
+      false,
+
+    duplicateSuppressed:
+      true,
+  };
+}
+
+    
   await saveMessage({
     customerId:
       customer.id,
