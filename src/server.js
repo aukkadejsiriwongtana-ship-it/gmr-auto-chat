@@ -65,6 +65,11 @@ updateJob,
   updateQuote,
   updateCustomerPhone,
   updateCustomerLanguage,
+  lockCustomerLanguageToThai,
+getActiveFaqs,
+registerFaqHit,
+getBotControl,
+setBotControl,
   createPendingPayment,
 getPaymentByLineGroupMessageId,
   getJobById,
@@ -89,6 +94,8 @@ claimLegacyCustomerImport,
 rollbackLegacyCustomerImport,
   getLegacyImportedJob,
 getVerifiedPaymentByJobId,
+
+  
   
 } from "./repositories/gmrRepository.js";
 
