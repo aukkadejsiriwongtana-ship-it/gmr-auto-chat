@@ -3750,7 +3750,7 @@ console.log(
   // -------------------------------------------------------
   // 2. CONVERSATION
   // -------------------------------------------------------
-const conversation =
+let conversation =
   await getOrCreateConversation(
     customer.id
   );
@@ -4062,7 +4062,85 @@ console.log(
   }
 );
 
+// =========================================================
+// EXISTING CUSTOMER - START NEW JOB WHILE OLD JOB UNPAID
+//
+// ลูกค้าเก่าสามารถส่งงานใหม่ได้
+// แม้ยังมีงานเก่า waiting_payment อยู่
+//
+// IMPORTANT:
+// - ไม่แก้ status งานเก่า
+// - ไม่ถือว่างานเก่าชำระแล้ว
+// - เปิด Conversation สำหรับงานใหม่เท่านั้น
+// =========================================================
 
+const incomingMapUrl =
+  extractGoogleMapsUrl(
+    message
+  );
+
+const incomingClassification =
+  incomingMapUrl
+    ? {
+        type:
+          INPUT_TYPES.MAP_URL,
+        confidence: 1,
+      }
+    : classifyInput({
+        messageType,
+        text:
+          message || "",
+      });
+
+const isNewJobInput =
+  [
+    INPUT_TYPES.MAP_URL,
+    INPUT_TYPES.REVIEW_URL,
+  ].includes(
+    incomingClassification.type
+  );
+
+
+if (
+  isExistingCustomer &&
+  conversation.state ===
+    GMR_STATES.REMOVED_WAITING_PAYMENT &&
+  isNewJobInput
+) {
+  console.log(
+    "EXISTING CUSTOMER STARTING NEW JOB WHILE OLD PAYMENT PENDING:",
+    {
+      customerId:
+        customer.id,
+
+      previousState:
+        conversation.state,
+
+      inputType:
+        incomingClassification.type,
+    }
+  );
+
+  await updateConversationState({
+    customerId:
+      customer.id,
+
+    state:
+      GMR_STATES.NEW,
+
+    handoff:
+      false,
+
+    handoffReason:
+      null,
+  });
+
+  conversation =
+    await getConversationByCustomerId(
+      customer.id
+    );
+}
+  
 let autoConfirmDirectMap =
   false;
 
