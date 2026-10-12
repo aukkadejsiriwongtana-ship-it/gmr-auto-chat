@@ -72,6 +72,7 @@ updatePayment,
 getPendingPriceJobs,
 getWaitingPaymentJobsByCustomerId,
 getExistingCustomerOpenBatchJobs,
+getDepartmentForReviewAge,
 
 getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
@@ -4031,15 +4032,48 @@ const directRating =
     directReview.reviewUrl ||
     reviewUrl;
 
+  const directReviewAgeDays =
+  getReviewAgeDays(
+    directReview
+  );
+
+const directReviewDepartment =
+  await getDepartmentForReviewAge(
+    directReviewAgeDays
+  );
+
+const directReviewDepartmentId =
+  directReviewDepartment?.id ||
+  null;
+
+console.log(
+  "DIRECT REVIEW DEPARTMENT ROUTING:",
+  {
+    customerId:
+      customer.id,
+
+    reviewUrl:
+      canonicalReviewUrl,
+
+    reviewAgeDays:
+      directReviewAgeDays,
+
+    departmentCode:
+      directReviewDepartment
+        ?.code ||
+      null,
+
+    departmentId:
+      directReviewDepartmentId,
+  }
+);
   // =========================================================
 // EXISTING CUSTOMER - DIRECT REVIEW AUTO PRICE
 // =========================================================
 
 if (isExistingCustomer) {
   const reviewAgeDays =
-    getReviewAgeDays(
-      directReview
-    );
+    directReviewAgeDays;
 
 
   // ========================================
@@ -4138,6 +4172,9 @@ if (isExistingCustomer) {
               directReview.text.trim()
             ),
 
+departmentId:
+  directReviewDepartmentId,
+          
           status:
             "existing_evidence_pending",
         });
@@ -4601,6 +4638,9 @@ When finished, reply "Confirm all" to confirm the full batch before we begin.`
           directReview.text.trim()
         ),
 
+departmentId:
+  directReviewDepartmentId,
+      
       status:
         "waiting_price",
     });
@@ -11721,6 +11761,42 @@ if (!bestMatch) {
 const matchedReview =
   bestMatch.review;
 
+  const matchedReviewAgeDays =
+  getReviewAgeDays(
+    matchedReview
+  );
+
+const matchedReviewDepartment =
+  await getDepartmentForReviewAge(
+    matchedReviewAgeDays
+  );
+
+const matchedReviewDepartmentId =
+  matchedReviewDepartment?.id ||
+  null;
+
+console.log(
+  "IMAGE REVIEW DEPARTMENT ROUTING:",
+  {
+    customerId:
+      customer.id,
+
+    reviewUrl:
+      matchedReview.reviewUrl,
+
+    reviewAgeDays:
+      matchedReviewAgeDays,
+
+    departmentCode:
+      matchedReviewDepartment
+        ?.code ||
+      null,
+
+    departmentId:
+      matchedReviewDepartmentId,
+  }
+);
+
 
 // ========================================
 // STEP 4
@@ -11785,6 +11861,12 @@ if (mapJob) {
           matchedReview.text
         ),
 
+department_id:
+  matchedReviewDepartmentId,
+
+      departmentId:
+  matchedReviewDepartmentId,
+      
       status:
         "draft",
     });
