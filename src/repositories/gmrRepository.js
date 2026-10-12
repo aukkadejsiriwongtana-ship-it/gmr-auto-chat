@@ -1552,6 +1552,293 @@ export async function markCustomerMapChecked({
 }ไป
 
 // =========================================================
+// FIND REVIEW ALREADY KNOWN BY CUSTOMER
+//
+// กันกรณี:
+// - ลูกค้าเคยส่ง review นี้แล้ว
+// - เคยมีงาน review นี้อยู่ในระบบแล้ว
+// =========================================================
+
+export async function findExistingCustomerReview({
+  customerId,
+  providerReviewId = null,
+  reviewUrl = null,
+}) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in findExistingCustomerReview"
+    );
+  }
+
+  const safeProviderReviewId =
+    String(
+      providerReviewId || ""
+    ).trim();
+
+  const safeReviewUrl =
+    String(
+      reviewUrl || ""
+    ).trim();
+
+
+  // -----------------------------------------
+  // 1. เช็ก provider_review_id ก่อน
+  // -----------------------------------------
+
+  if (safeProviderReviewId) {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("gmr_reviews")
+      .select("*")
+      .eq(
+        "customer_id",
+        customerId
+      )
+      .eq(
+        "provider_review_id",
+        safeProviderReviewId
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      return data;
+    }
+  }
+
+
+  // -----------------------------------------
+  // 2. fallback เช็ก canonical review_url
+  // -----------------------------------------
+
+  if (safeReviewUrl) {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("gmr_reviews")
+      .select("*")
+      .eq(
+        "customer_id",
+        customerId
+      )
+      .eq(
+        "review_url",
+        safeReviewUrl
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      return data;
+    }
+  }
+
+  return null;
+}
+
+
+// =========================================================
+// FIND EXISTING REACTIVATION ALERT
+//
+// กันการส่งเข้า LINE กลุ่มซ้ำ
+// =========================================================
+
+export async function findExistingReactivationAlert({
+  customerMapId,
+  providerReviewId = null,
+  reviewUrl = null,
+}) {
+  if (!customerMapId) {
+    throw new Error(
+      "Missing customerMapId in findExistingReactivationAlert"
+    );
+  }
+
+  const safeProviderReviewId =
+    String(
+      providerReviewId || ""
+    ).trim();
+
+  const safeReviewUrl =
+    String(
+      reviewUrl || ""
+    ).trim();
+
+
+  if (safeProviderReviewId) {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from(
+        "gmr_review_reactivation_alerts"
+      )
+      .select("*")
+      .eq(
+        "customer_map_id",
+        customerMapId
+      )
+      .eq(
+        "provider_review_id",
+        safeProviderReviewId
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      return data;
+    }
+  }
+
+
+  if (safeReviewUrl) {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from(
+        "gmr_review_reactivation_alerts"
+      )
+      .select("*")
+      .eq(
+        "customer_map_id",
+        customerMapId
+      )
+      .eq(
+        "review_url",
+        safeReviewUrl
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (data) {
+      return data;
+    }
+  }
+
+  return null;
+}
+
+
+// =========================================================
+// CREATE REACTIVATION ALERT
+//
+// ตอนสร้าง:
+// ยังไม่ทักลูกค้า
+// รอทีมตรวจใน LINE กลุ่มก่อน
+// =========================================================
+
+export async function createReactivationAlert({
+  customerId,
+  customerMapId,
+  providerReviewId = null,
+  reviewUrl = null,
+  reviewerName = null,
+  reviewText = null,
+  rating = null,
+  reviewDate = null,
+}) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in createReactivationAlert"
+    );
+  }
+
+  if (!customerMapId) {
+    throw new Error(
+      "Missing customerMapId in createReactivationAlert"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_review_reactivation_alerts"
+    )
+    .insert({
+      customer_id:
+        customerId,
+
+      customer_map_id:
+        customerMapId,
+
+      provider_review_id:
+        providerReviewId ||
+        null,
+
+      review_url:
+        reviewUrl ||
+        null,
+
+      reviewer_name:
+        reviewerName ||
+        null,
+
+      review_text:
+        reviewText ||
+        null,
+
+      rating:
+        rating === null ||
+        rating === undefined
+          ? null
+          : Number(rating),
+
+      review_date:
+        reviewDate ||
+        null,
+
+      detected_at:
+        new Date()
+          .toISOString(),
+
+      review_status:
+        "pending_team_review",
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
