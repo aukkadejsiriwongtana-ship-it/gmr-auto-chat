@@ -14643,14 +14643,35 @@ if (
         customer.display_name ||
         "",
 
-      businessName:
+     businessName:
+  hasMultipleWaitingPaymentJobs
+    ? `หลายงาน (${waitingPaymentJobs.length} งาน)`
+    : (
         paymentJob.business_name ||
-        "",
+        ""
+      ),
 
-      amount:
-        imageClassification.amount ||
-        paymentJob.price ||
-        0,
+amount:
+  imageClassification.amount ||
+  (
+    hasMultipleWaitingPaymentJobs
+      ? waitingPaymentJobs.reduce(
+          (
+            total,
+            job
+          ) =>
+            total +
+            Number(
+              job.price ||
+              0
+            ),
+          0
+        )
+      : (
+          paymentJob.price ||
+          0
+        )
+  ),
 
       transactionDate:
         imageClassification.transactionDate ||
@@ -14688,16 +14709,28 @@ if (
   }
 
 
-  console.log(
-    "PAYMENT NEEDS REVIEW:",
-    {
-      paymentId:
-        pendingPayment.id,
+console.log(
+  "PAYMENT NEEDS REVIEW:",
+  {
+    paymentId:
+      pendingPayment.id,
 
-      jobId:
-        paymentJob.id,
-    }
-  );
+    jobId:
+      paymentJob.id,
+
+    multipleWaitingJobs:
+      hasMultipleWaitingPaymentJobs,
+
+    waitingPaymentCount:
+      waitingPaymentJobs.length,
+
+    waitingPaymentJobIds:
+      waitingPaymentJobs.map(
+        (job) =>
+          job.id
+      ),
+  }
+);
 }
 
 
