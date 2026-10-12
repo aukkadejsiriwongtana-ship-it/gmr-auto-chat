@@ -2473,7 +2473,7 @@ async function startApprovedExistingCustomerBatch({
 
 
   // ========================================
-  // Safety Check ก่อนเริ่ม
+  // Safety Check
   // ========================================
 
   const invalidJobs =
@@ -2510,44 +2510,44 @@ async function startApprovedExistingCustomerBatch({
 
 
   const queuedAt =
-  new Date().toISOString();
+    new Date().toISOString();
 
 
   const startedJobs = [];
 
 
   // ========================================
-  // 1. เปลี่ยนทุก Job → processing
+  // 1. ทุก Job → queued
   // ========================================
 
   for (const job of jobs) {
-  const updatedJob =
-    await updateJob(
-      job.id,
-      {
-        status:
-          "queued",
+    const updatedJob =
+      await updateJob(
+        job.id,
+        {
+          status:
+            "queued",
 
-        queued_at:
-          queuedAt,
+          queued_at:
+            queuedAt,
 
-        started_at:
-          null,
+          started_at:
+            null,
 
-        dispatched_at:
-          null,
-      }
+          dispatched_at:
+            null,
+        }
+      );
+
+
+    startedJobs.push(
+      updatedJob
     );
-
-  startedJobs.push(
-    updatedJob
-  );
-}
+  }
 
 
   // ========================================
   // 2. Conversation → IN_PROGRESS
-  // ทำครั้งเดียว
   // ========================================
 
   await updateConversationState({
@@ -2565,31 +2565,202 @@ async function startApprovedExistingCustomerBatch({
   });
 
 
-  
-
   // ========================================
-  // 4. แจ้งลูกค้าเพียง 1 ข้อความ
+  // 3. สรุปราคาแยก THB / USD
   // ========================================
 
-const botReply =
-  getCustomerText(
-    customer,
+  const thbBreakdown =
+    buildPaymentBreakdown({
+      jobs:
+        startedJobs,
 
-    `รับงานเรียบร้อยแล้วครับ ✅
+      currency:
+        "THB",
+
+      language:
+        customer?.language ||
+        "th",
+    });
+
+
+  const usdBreakdown =
+    buildPaymentBreakdown({
+      jobs:
+        startedJobs,
+
+      currency:
+        "USD",
+
+      language:
+        customer?.language ||
+        "th",
+    });
+
+
+  const thaiPriceLines = [];
+  const englishPriceLines = [];
+
+
+  if (
+    thbBreakdown.totalReviews > 0
+  ) {
+    thaiPriceLines.push(
+      "ค่าดำเนินการรายการ THB:",
+      ...thbBreakdown.lines,
+      `รวม THB: ${formatMoney(
+        thbBreakdown.total,
+        "THB"
+      )} บาท`
+    );
+
+
+    englishPriceLines.push(
+      "THB service fees:",
+      ...thbBreakdown.lines,
+      `Total THB: ${formatMoney(
+        thbBreakdown.total,
+        "THB"
+      )} THB`
+    );
+  }
+
+
+  if (
+    usdBreakdown.totalReviews > 0
+  ) {
+    if (
+      thaiPriceLines.length > 0
+    ) {
+      thaiPriceLines.push("");
+    }
+
+    if (
+      englishPriceLines.length > 0
+    ) {
+      englishPriceLines.push("");
+    }
+
+
+    thaiPriceLines.push(
+      "ค่าดำเนินการรายการ USD:",
+      ...usdBreakdown.lines,
+      `รวม USD: $${formatMoney(
+        usdBreakdown.total,
+        "USD"
+      )} USD`
+    );
+
+
+    englishPriceLines.push(
+      "USD service fees:",
+      ...usdBreakdown.lines,
+      `Total USD: $${formatMoney(
+        usdBreakdown.total,
+        "USD"
+      )} USD`
+    );
+  }
+
+
+  // ========================================
+  // 4. Payment condition
+  // ========================================
+
+  const hasTHB =
+    thbBreakdown.totalReviews > 0;
+
+  const hasUSD =
+    usdBreakdown.totalReviews > 0;
+
+
+  let thaiPaymentCondition = "";
+
+  let englishPaymentCondition = "";
+
+
+  if (
+    hasTHB &&
+    hasUSD
+  ) {
+    thaiPaymentCondition =
+      "1. รายการ THB ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี และรายการ USD ชำระผ่าน Payment Link ที่ทางเราจัดส่งให้เท่านั้น";
+
+    englishPaymentCondition =
+      "1. THB payments must be made via the provided QR payment method; direct bank transfer is not accepted. USD payments must be made through the payment link provided by us.";
+
+  } else if (hasUSD) {
+    thaiPaymentCondition =
+      "1. ชำระผ่านช่องทาง Payment Link ที่ทางเราจัดส่งให้เท่านั้น";
+
+    englishPaymentCondition =
+      "1. Payment must be made through the payment link provided by us.";
+
+  } else {
+    thaiPaymentCondition =
+      "1. ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี";
+
+    englishPaymentCondition =
+      "1. Payment must be made via the provided QR payment method. Direct bank transfer is not accepted.";
+  }
+
+
+  // ========================================
+  // 5. ข้อความแจ้งลูกค้า
+  // ========================================
+
+  const botReply =
+    getCustomerText(
+      customer,
+
+      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ ✅
 
 จำนวนทั้งหมด ${startedJobs.length} รีวิว
 
-ระบบได้จัดงานเข้าคิวเรียบร้อยแล้ว และจะส่งเข้าทีมดำเนินการตามรอบถัดไปอัตโนมัติครับ
-เมื่อมีผลสำเร็จ ทางเราจะแจ้งให้ทราบครับ`,
+รายละเอียดค่าดำเนินการ:
+${thaiPriceLines.join("\n")}
 
-    `Your request has been confirmed. ✅
+ระยะเวลาดำเนินการโดยประมาณ 1–14 วันทำการ
+
+ระบบได้จัดงานเข้าคิวเรียบร้อยแล้ว และจะส่งเข้าทีมดำเนินการตามรอบถัดไปอัตโนมัติครับ
+
+🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
+
+📌 เงื่อนไขการให้บริการ:
+${thaiPaymentCondition}
+2. ชำระค่าบริการเฉพาะรีวิวที่ดำเนินการสำเร็จ และชำระทันทีหลังจากรีวิวถูกนำออก
+3. แต่ละรีวิวคิดค่าบริการตามราคาที่ระบุไว้ข้างต้น
+4. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวลบรีวิวให้ภายหลัง ค่าบริการเต็มจำนวนของรีวิวนั้นยังคงต้องชำระ
+5. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
+6. งานแต่ละรีวิวจะถือว่าสำเร็จสมบูรณ์เมื่อรีวิวนั้นถูกนำออกและลูกค้าชำระค่าบริการเรียบร้อยแล้ว
+7. ทางเราดำเนินการยื่นเรื่องให้แพลตฟอร์มตรวจสอบเพื่อนำรีวิวที่ระบุออกเท่านั้น ไม่มีส่วนเกี่ยวข้องกับปัญหาอื่น ๆ รวมถึงรีวิวอื่น ๆ ของลูกค้า`,
+
+      `We have started processing your request. ✅
 
 Total: ${startedJobs.length} review(s)
 
-Your reviews have been added to our processing queue and will be assigned to the appropriate team in the next dispatch round automatically.
-We'll notify you once there is an update or a successful result.`
-  );
+Service fee breakdown:
+${englishPriceLines.join("\n")}
 
+Estimated processing time: approximately 1–14 business days.
+
+Your reviews have been added to our processing queue and will be assigned to the appropriate team in the next dispatch round automatically.
+
+🔥 We will notify you as soon as each review has been successfully removed. 🔥
+
+📌 Terms of Service:
+${englishPaymentCondition}
+2. Payment is required only for successfully removed reviews and is due immediately after each successful removal.
+3. Each review will be charged according to the applicable service fee shown above.
+4. Once processing has started, the request cannot be cancelled or changed. If the reviewer later removes a review independently, the full service fee for that review will still apply.
+5. Service fees are non-refundable once processing has started.
+6. Each case is considered fully completed once that review has been removed and payment has been completed.
+7. Our service is limited to submitting the specified reviews to the platform for assessment and removal. We are not responsible for other issues or other reviews associated with the customer's listing.`
+    );
+
+
+  // ========================================
+  // 6. Save outbound message
+  // ========================================
 
   await saveMessage({
     customerId:
@@ -2617,10 +2788,10 @@ We'll notify you once there is an update or a successful result.`
 
 
   return {
-  startedJobs,
-  queuedAt,
-  botReply,
-};
+    startedJobs,
+    queuedAt,
+    botReply,
+  };
 }
 
 async function startApprovedJob({
