@@ -1007,22 +1007,17 @@ export async function syncCustomerMapsForExistingCustomer(
   // -----------------------------------------
 
   const {
-    data: jobs,
-    error: jobsError,
-  } = await supabase
-    .from("gmr_jobs")
-    .select(
-      "customer_id, business_name, place_id, map_url"
-    )
-    .eq(
-      "customer_id",
-      customerId
-    )
-    .not(
-      "place_id",
-      "is",
-      null
-    );
+  data: jobs,
+  error: jobsError,
+} = await supabase
+  .from("gmr_jobs")
+  .select(
+    "customer_id, business_name, place_id, map_url, review_url"
+  )
+  .eq(
+    "customer_id",
+    customerId
+  );
 
   if (jobsError) {
     throw jobsError;
@@ -1046,16 +1041,24 @@ export async function syncCustomerMapsForExistingCustomer(
   const mapByPlaceId =
     new Map();
 
-  for (const job of jobs) {
-    const placeId =
-      String(
-        job?.place_id || ""
-      ).trim();
+ for (const job of jobs) {
+  let placeId =
+    String(
+      job?.place_id || ""
+    ).trim();
 
-    if (!placeId) {
-      continue;
-    }
+  let mapUrl =
+    String(
+      job?.map_url || ""
+    ).trim();
 
+  const reviewUrl =
+    String(
+      job?.review_url || ""
+    ).trim();
+
+  // ถ้ามี place_id อยู่แล้ว ใช้ได้เลย
+  if (placeId) {
     mapByPlaceId.set(
       placeId,
       {
@@ -1070,7 +1073,42 @@ export async function syncCustomerMapsForExistingCustomer(
           placeId,
 
         map_url:
-          job.map_url ||
+          mapUrl ||
+          null,
+
+        is_active:
+          true,
+
+        updated_at:
+          new Date()
+            .toISOString(),
+      }
+    );
+
+    continue;
+  }
+
+  // ถ้าไม่มี place_id แต่มี review_url
+  // เก็บไว้ด้วย key review_url ชั่วคราว
+  if (reviewUrl) {
+    const fallbackKey =
+      `review:${reviewUrl}`;
+
+    mapByPlaceId.set(
+      fallbackKey,
+      {
+        customer_id:
+          customerId,
+
+        business_name:
+          job.business_name ||
+          null,
+
+        place_id:
+          null,
+
+        map_url:
+          mapUrl ||
           null,
 
         is_active:
@@ -1082,6 +1120,7 @@ export async function syncCustomerMapsForExistingCustomer(
       }
     );
   }
+}
 
   const maps =
     Array.from(
