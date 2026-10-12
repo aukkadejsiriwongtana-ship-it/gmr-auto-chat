@@ -3840,10 +3840,11 @@ if (
 ) {
 
   const legacyMatches =
-    await getPendingLegacyCustomersByDisplayName(
-      customer.display_name
-    );
-
+  await getPendingLegacyCustomersByDisplayName(
+    customer.display_name,
+    "line",
+    "line_main"
+  );
 
   console.log(
     "LEGACY CUSTOMER MATCH CHECK:",
