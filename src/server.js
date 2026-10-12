@@ -15701,12 +15701,18 @@ app.post(
 
         try {
           const result =
-            await createLegacyCustomerFromSheet({
-              platform:
-                item.platform,
+           await createLegacyCustomerFromSheet({
+  platform:
+    item.platform,
 
-              platformAccount:
-                item.platformAccount,
+  platformAccount:
+    item.platformAccount,
+
+  legacyCustomerId:
+    item.legacyCustomerId,
+
+  displayName:
+    item.displayName,
 
               displayName:
                 item.displayName,
