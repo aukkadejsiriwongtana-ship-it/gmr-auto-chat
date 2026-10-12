@@ -74,6 +74,12 @@ getWaitingPaymentJobsByCustomerId,
 getExistingCustomerOpenBatchJobs,
 getDepartmentForReviewAge,
 
+getActiveDepartments,
+getQueuedJobsByDepartmentId,
+createDispatchRound,
+markJobDispatched,
+updateDepartmentLastDispatchedAt,
+
 getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
 getLegacyCustomerByLineGroupMessageId,
