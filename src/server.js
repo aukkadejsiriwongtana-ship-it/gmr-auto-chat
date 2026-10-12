@@ -76,10 +76,8 @@ getExistingCustomerOpenBatchJobs,
 getDepartmentForReviewAge,
 
 getActiveDepartments,
-getQueuedJobsByDepartmentId,
-createDispatchRound,
-markJobDispatched,
-updateDepartmentLastDispatchedAt,
+claimDepartmentDispatch,
+completeDepartmentDispatch,
 
 getPendingLegacyCustomersByDisplayName,
 setLegacyCustomerPendingMatch,
@@ -871,7 +869,6 @@ async function sendDepartmentDispatchToLineGroup({
 let departmentDispatchRunning =
   false;
 
-
 async function runDepartmentDispatch() {
   if (departmentDispatchRunning) {
     console.log(
@@ -891,11 +888,8 @@ async function runDepartmentDispatch() {
 
 
   try {
-    const now =
-      new Date();
-
     const dispatchedAt =
-      now.toISOString();
+      new Date().toISOString();
 
 
     const departments =
@@ -911,7 +905,7 @@ async function runDepartmentDispatch() {
     ) {
       try {
         // ========================================
-        // 1. Department ต้องมี LINE Group
+        // 1. ต้องมี LINE Group
         // ========================================
 
         if (
@@ -920,17 +914,6 @@ async function runDepartmentDispatch() {
             ""
           ).trim()
         ) {
-          console.log(
-            "DEPARTMENT DISPATCH SKIPPED: no line_group_id",
-            {
-              departmentId:
-                department.id,
-
-              departmentCode:
-                department.code,
-            }
-          );
-
           results.push({
             departmentCode:
               department.code,
@@ -947,99 +930,38 @@ async function runDepartmentDispatch() {
 
 
         // ========================================
-        // 2. เช็กว่าถึงรอบ Dispatch หรือยัง
+        // 2. Atomic Claim
+        //
+        // queued
+        // → dispatching
+        // + สร้าง round status=sending
         // ========================================
 
-        const intervalHours =
-          Number(
-            department
-              .dispatch_interval_hours ||
-            4
-          );
+        const claimResult =
+          await claimDepartmentDispatch({
+            departmentId:
+              department.id,
 
-
-        const lastDispatchedAt =
-          department
-            .last_dispatched_at
-            ? new Date(
-                department
-                  .last_dispatched_at
-              )
-            : null;
-
-
-        if (lastDispatchedAt) {
-          const nextDispatchAt =
-            new Date(
-              lastDispatchedAt.getTime() +
-              intervalHours *
-                60 *
-                60 *
-                1000
-            );
-
-
-          if (
-            now.getTime() <
-            nextDispatchAt.getTime()
-          ) {
-            console.log(
-              "DEPARTMENT DISPATCH NOT DUE:",
-              {
-                departmentCode:
-                  department.code,
-
-                lastDispatchedAt:
-                  lastDispatchedAt
-                    .toISOString(),
-
-                nextDispatchAt:
-                  nextDispatchAt
-                    .toISOString(),
-              }
-            );
-
-            results.push({
-              departmentCode:
-                department.code,
-
-              dispatched:
-                false,
-
-              reason:
-                "not_due",
-
-              nextDispatchAt:
-                nextDispatchAt
-                  .toISOString(),
-            });
-
-            continue;
-          }
-        }
-
-
-        // ========================================
-        // 3. ดึง Job ที่รอแจก
-        // ========================================
-
-        const queuedJobs =
-          await getQueuedJobsByDepartmentId(
-            department.id
-          );
+            claimedAt:
+              dispatchedAt,
+          });
 
 
         if (
-          queuedJobs.length === 0
+          claimResult?.ok !== true
         ) {
-          console.log(
-            "DEPARTMENT DISPATCH: no queued jobs",
-            {
-              departmentCode:
-                department.code,
-            }
+          throw new Error(
+            `Dispatch claim failed: ${
+              claimResult?.reason ||
+              "unknown"
+            }`
           );
+        }
 
+
+        if (
+          claimResult?.claimed !== true
+        ) {
           results.push({
             departmentCode:
               department.code,
@@ -1048,230 +970,210 @@ async function runDepartmentDispatch() {
               false,
 
             reason:
-              "no_jobs",
+              claimResult?.reason ||
+              "not_claimed",
+
+            nextDispatchAt:
+              claimResult
+                ?.next_dispatch_at ||
+              null,
           });
 
           continue;
         }
 
 
+        const dispatchRoundId =
+          claimResult
+            .dispatch_round_id;
+
+
+        const claimedJobs =
+          Array.isArray(
+            claimResult.jobs
+          )
+            ? claimResult.jobs
+            : [];
+
+
+        if (
+          !dispatchRoundId ||
+          claimedJobs.length === 0
+        ) {
+          throw new Error(
+            "Claim succeeded but dispatch round/jobs missing"
+          );
+        }
+
+
         // ========================================
-        // 4. ส่งเข้า LINE Group ก่อน
+        // 3. ส่ง LINE
         //
-        // ถ้าส่งไม่สำเร็จ
-        // Job ต้องยังเป็น queued
+        // ถ้าตรงนี้ fail:
+        // งานจะค้าง dispatching
+        // และไม่ถูกยิงซ้ำอัตโนมัติ
         // ========================================
 
         await sendDepartmentDispatchToLineGroup({
           department,
 
           jobs:
-            queuedJobs,
+            claimedJobs,
 
           dispatchedAt,
         });
 
 
         // ========================================
-        // 5. สร้าง Dispatch Round
+        // 4. LINE สำเร็จ
+        // dispatching → processing
         // ========================================
 
-        const dispatchRound =
-          await createDispatchRound({
-            departmentId:
-              department.id,
+        const completeResult =
+          await completeDepartmentDispatch({
+            dispatchRoundId,
 
-            startedAt:
-              dispatchedAt,
-
-            dispatchedCount:
-              queuedJobs.length,
+            dispatchedAt,
           });
 
 
-        // ========================================
-        // 6. queued → processing
-        // ========================================
+        if (
+          completeResult?.ok !== true
+        ) {
+          throw new Error(
+            `Dispatch complete failed: ${
+              completeResult?.reason ||
+              "unknown"
+            }`
+          );
+        }
 
-        const dispatchedJobs = [];
 
+        // ========================================
+        // 5. Google Sheet
+        // ========================================
 
         for (
           const job of
-          queuedJobs
+          claimedJobs
         ) {
-          const updatedJob =
-            await markJobDispatched({
+          try {
+            const jobCustomer =
+              await getCustomerById(
+                job.customer_id
+              );
+
+
+            const jobReviews =
+              await getReviewsByJobId(
+                job.id
+              );
+
+
+            let selectedReview =
+              null;
+
+
+            const explicitlySelected =
+              jobReviews.filter(
+                (review) =>
+                  review
+                    ?.selected_by_customer ===
+                  true
+              );
+
+
+            if (
+              explicitlySelected.length >
+              0
+            ) {
+              selectedReview =
+                explicitlySelected[
+                  explicitlySelected
+                    .length - 1
+                ];
+
+            } else if (
+              jobReviews.length === 1
+            ) {
+              selectedReview =
+                jobReviews[0];
+            }
+
+
+            const reviewAgeDays =
+              selectedReview
+                ? getReviewAgeDays(
+                    selectedReview
+                  )
+                : null;
+
+
+            await appendDispatchJobToGoogleSheet({
+              sheetName:
+                department
+                  .active_sheet_name,
+
+              dispatchRoundId,
+
+              sentAt:
+                dispatchedAt,
+
+              batchId:
+                "",
+
               jobId:
                 job.id,
 
-              dispatchRoundId:
-                dispatchRound.id,
+              customerName:
+                jobCustomer
+                  ?.display_name ||
+                "",
 
-              dispatchedAt,
+              mapName:
+                job.business_name ||
+                "",
+
+              reviewUrl:
+                job.review_url ||
+                "",
+
+              reviewAge:
+                reviewAgeDays ??
+                "",
+
+              startedAt:
+                dispatchedAt,
+
+              status:
+                "processing",
+
+              removedAt:
+                "",
+
+              cycleCompleted:
+                "",
+
+              elapsedTime:
+                "",
             });
 
+          } catch (error) {
+            console.error(
+              "DISPATCH GOOGLE SHEET FAILED:",
+              {
+                jobId:
+                  job.id,
 
-          if (updatedJob) {
-            dispatchedJobs.push(
-              updatedJob
+                departmentCode:
+                  department.code,
+
+                error:
+                  error.message,
+              }
             );
           }
         }
-
-// ========================================
-// 6.1 ลง Google Sheet ของแผนก
-// ========================================
-
-for (
-  const job of
-  dispatchedJobs
-) {
-  try {
-    // ----------------------------------------
-    // Customer Name
-    // ----------------------------------------
-
-    const jobCustomer =
-      await getCustomerById(
-        job.customer_id
-      );
-
-
-    // ----------------------------------------
-    // Review ของ Job นี้
-    // ห้ามเดาถ้ามีหลาย Review
-    // ----------------------------------------
-
-    const jobReviews =
-      await getReviewsByJobId(
-        job.id
-      );
-
-
-    let selectedReview =
-      null;
-
-
-    const explicitlySelected =
-      jobReviews.filter(
-        (review) =>
-          review
-            ?.selected_by_customer ===
-          true
-      );
-
-
-    if (
-      explicitlySelected.length > 0
-    ) {
-      selectedReview =
-        explicitlySelected[
-          explicitlySelected.length - 1
-        ];
-    } else if (
-      jobReviews.length === 1
-    ) {
-      selectedReview =
-        jobReviews[0];
-    }
-
-
-    // ----------------------------------------
-    // Review Age
-    // null = ไม่รู้
-    // ห้ามเดา
-    // ----------------------------------------
-
-    const reviewAgeDays =
-      selectedReview
-        ? getReviewAgeDays(
-            selectedReview
-          )
-        : null;
-
-
-    await appendDispatchJobToGoogleSheet({
-      sheetName:
-        department.active_sheet_name,
-
-      dispatchRoundId:
-        dispatchRound.id,
-
-      sentAt:
-        dispatchedAt,
-
-      // ตอนนี้ระบบยังไม่มี Batch ID จริง
-      batchId:
-        "",
-
-      jobId:
-        job.id,
-
-      customerName:
-        jobCustomer
-          ?.display_name ||
-        "",
-
-      mapName:
-        job.business_name ||
-        "",
-
-      reviewUrl:
-        job.review_url ||
-        "",
-
-      reviewAge:
-        reviewAgeDays ??
-        "",
-
-      startedAt:
-        job.started_at ||
-        dispatchedAt,
-
-      status:
-        job.status ||
-        "processing",
-
-      removedAt:
-        "",
-
-      cycleCompleted:
-        "",
-
-      elapsedTime:
-        "",
-    });
-
-
-  } catch (error) {
-    console.error(
-      "DISPATCH GOOGLE SHEET FAILED:",
-      {
-        jobId:
-          job.id,
-
-        departmentCode:
-          department.code,
-
-        sheetName:
-          department.active_sheet_name,
-
-        error:
-          error.message,
-      }
-    );
-  }
-}
-        
-        // ========================================
-        // 7. บันทึกเวลารอบล่าสุด
-        // ========================================
-
-        await updateDepartmentLastDispatchedAt(
-          department.id,
-          dispatchedAt
-        );
 
 
         console.log(
@@ -1280,14 +1182,11 @@ for (
             departmentCode:
               department.code,
 
-            dispatchRoundId:
-              dispatchRound.id,
-
-            queuedCount:
-              queuedJobs.length,
+            dispatchRoundId,
 
             dispatchedCount:
-              dispatchedJobs.length,
+              completeResult
+                .dispatched_count,
           }
         );
 
@@ -1299,11 +1198,11 @@ for (
           dispatched:
             true,
 
-          dispatchRoundId:
-            dispatchRound.id,
+          dispatchRoundId,
 
           jobCount:
-            dispatchedJobs.length,
+            completeResult
+              .dispatched_count,
         });
 
 
@@ -1352,6 +1251,7 @@ for (
       false;
   }
 }
+
 
 async function getCustomerStage({
   customer,
