@@ -26,6 +26,7 @@ import {
 
 import {
   appendJobToGoogleSheet,
+  appendDispatchJobToGoogleSheet,
   updateJobInGoogleSheet,
 } from "./services/googleSheetsService.js";
 
