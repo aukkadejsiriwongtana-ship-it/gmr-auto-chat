@@ -93,6 +93,114 @@ export async function appendJobToGoogleSheet({
   return data;
 }
 
+export async function appendDispatchJobToGoogleSheet({
+  sheetName,
+  dispatchRoundId = "",
+  sentAt = "",
+  batchId = "",
+  jobId,
+  customerName = "",
+  mapName = "",
+  reviewUrl = "",
+  reviewAge = "",
+  startedAt = "",
+  status = "",
+  removedAt = "",
+  cycleCompleted = "",
+  elapsedTime = "",
+}) {
+  if (!sheetName) {
+    throw new Error(
+      "Missing sheetName in appendDispatchJobToGoogleSheet"
+    );
+  }
+
+  if (!jobId) {
+    throw new Error(
+      "Missing jobId in appendDispatchJobToGoogleSheet"
+    );
+  }
+
+  const payload = {
+    secret:
+      GOOGLE_SHEETS_WEBHOOK_SECRET,
+
+    action:
+      "dispatch_append",
+
+    sheetName,
+
+    dispatchRoundId,
+    sentAt,
+    batchId,
+    jobId,
+    customerName,
+    mapName,
+    reviewUrl,
+    reviewAge,
+    startedAt,
+    status,
+    removedAt,
+    cycleCompleted,
+    elapsedTime,
+  };
+
+  const response =
+    await fetch(
+      GOOGLE_SHEETS_WEBHOOK_URL,
+      {
+        method:
+          "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
+
+        body:
+          JSON.stringify(payload),
+
+        redirect:
+          "follow",
+      }
+    );
+
+
+  const text =
+    await response.text();
+
+
+  let data;
+
+  try {
+    data =
+      JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Invalid Google Sheets response: ${text}`
+    );
+  }
+
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error ||
+      "Google Sheets dispatch append failed"
+    );
+  }
+
+
+  if (data.ok !== true) {
+    throw new Error(
+      data?.error ||
+      "Google Sheets dispatch append returned failure"
+    );
+  }
+
+
+  return data;
+}
+
 export async function updateJobInGoogleSheet({
   jobId,
   status,
