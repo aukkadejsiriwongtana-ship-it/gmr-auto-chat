@@ -1549,7 +1549,7 @@ export async function markCustomerMapChecked({
   }
 
   return data;
-}ไป
+}
 
 // =========================================================
 // FIND REVIEW ALREADY KNOWN BY CUSTOMER
