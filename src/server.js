@@ -99,6 +99,11 @@ backfillExistingCustomerMaps,
 getCustomerMapsWaitingForResolve,
 updateResolvedCustomerMap,
   
+getCustomerMapsDueForReactivationCheck,
+markCustomerMapChecked,
+findExistingCustomerReview,
+findExistingReactivationAlert,
+createReactivationAlert,
   
 } from "./repositories/gmrRepository.js";
 
@@ -15924,6 +15929,369 @@ if (!businessName) {
     } catch (error) {
       console.error(
         "RESOLVE EXISTING CUSTOMER MAPS ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+);
+
+// =========================================================
+// CHECK REACTIVATION MAPS
+//
+// รอบแรกของแต่ละ Map = BASELINE เท่านั้น
+// ห้ามแจ้งทีมจากรีวิวเก่าที่มีอยู่ก่อนเริ่มระบบ
+//
+// รอบถัดไป:
+// - เช็กเฉพาะ Map ที่ครบ 3 วัน
+// - เอาเฉพาะ 1 ดาว
+// - เอาเฉพาะ review ที่ใหม่กว่า last_checked_at
+// - กัน review/job เดิม
+// - กัน alert เดิม
+// =========================================================
+
+app.post(
+  "/check-reactivation-maps",
+  async (req, res) => {
+    try {
+      const {
+        secret,
+        dryRun = true,
+      } = req.body || {};
+
+      const SHEET_CONTROL_SECRET =
+        process.env.SHEET_CONTROL_SECRET;
+
+      if (
+        !SHEET_CONTROL_SECRET ||
+        secret !== SHEET_CONTROL_SECRET
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: "Unauthorized",
+        });
+      }
+
+      const maps =
+        await getCustomerMapsDueForReactivationCheck();
+
+      const results = [];
+
+      for (const customerMap of maps) {
+        try {
+          const placeId =
+            String(
+              customerMap?.place_id ||
+              ""
+            ).trim();
+
+          if (!placeId) {
+            continue;
+          }
+
+          const newestResult =
+            await getNewestReviews(
+              placeId
+            );
+
+          const reviews =
+            Array.isArray(
+              newestResult?.reviews
+            )
+              ? newestResult.reviews
+              : [];
+
+          const oneStarReviews =
+            reviews.filter(
+              (review) =>
+                Number(
+                  review?.rating
+                ) === 1
+            );
+
+          // =====================================
+          // FIRST RUN = BASELINE ONLY
+          //
+          // สำคัญ:
+          // ห้ามเอารีวิวเก่าที่มีอยู่แล้ว
+          // ไปเสนอขายลูกค้า
+          // =====================================
+
+          if (
+            !customerMap.last_checked_at
+          ) {
+            let newestReviewDate =
+              null;
+
+            for (
+              const review of
+              oneStarReviews
+            ) {
+              const reviewDate =
+                review?.isoDate
+                  ? new Date(
+                      review.isoDate
+                    )
+                  : null;
+
+              if (
+                !reviewDate ||
+                Number.isNaN(
+                  reviewDate.getTime()
+                )
+              ) {
+                continue;
+              }
+
+              if (
+                !newestReviewDate ||
+                reviewDate >
+                  newestReviewDate
+              ) {
+                newestReviewDate =
+                  reviewDate;
+              }
+            }
+
+            if (dryRun !== true) {
+              await markCustomerMapChecked({
+                customerMapId:
+                  customerMap.id,
+
+                lastReviewSeenAt:
+                  newestReviewDate
+                    ? newestReviewDate
+                        .toISOString()
+                    : null,
+              });
+            }
+
+            results.push({
+              customerMapId:
+                customerMap.id,
+
+              customerId:
+                customerMap.customer_id,
+
+              businessName:
+                customerMap.business_name,
+
+              status:
+                "baseline",
+
+              oneStarCount:
+                oneStarReviews.length,
+
+              wouldMarkChecked:
+                true,
+            });
+
+            continue;
+          }
+
+          const lastCheckedAt =
+            new Date(
+              customerMap.last_checked_at
+            );
+
+          const candidates = [];
+
+          for (
+            const review of
+            oneStarReviews
+          ) {
+            const reviewDate =
+              review?.isoDate
+                ? new Date(
+                    review.isoDate
+                  )
+                : null;
+
+            // ไม่มีวันที่ที่เชื่อถือได้
+            // → ไม่เดาว่าเป็นรีวิวใหม่
+            if (
+              !reviewDate ||
+              Number.isNaN(
+                reviewDate.getTime()
+              )
+            ) {
+              continue;
+            }
+
+            // ต้องใหม่กว่ารอบตรวจล่าสุดจริง
+            if (
+              reviewDate <=
+              lastCheckedAt
+            ) {
+              continue;
+            }
+
+            const providerReviewId =
+              String(
+                review?.reviewId ||
+                ""
+              ).trim() ||
+              null;
+
+            const reviewUrl =
+              String(
+                review?.reviewUrl ||
+                ""
+              ).trim() ||
+              null;
+
+            // ---------------------------------
+            // เคยมีงานนี้แล้วหรือไม่
+            // ---------------------------------
+
+            const existingReview =
+              await findExistingCustomerReview({
+                customerId:
+                  customerMap.customer_id,
+
+                providerReviewId,
+
+                reviewUrl,
+              });
+
+            if (existingReview) {
+              continue;
+            }
+
+            // ---------------------------------
+            // เคยแจ้ง Reactivation ไปแล้วหรือไม่
+            // ---------------------------------
+
+            const existingAlert =
+              await findExistingReactivationAlert({
+                customerMapId:
+                  customerMap.id,
+
+                providerReviewId,
+
+                reviewUrl,
+              });
+
+            if (existingAlert) {
+              continue;
+            }
+
+            candidates.push({
+              providerReviewId,
+
+              reviewUrl,
+
+              reviewerName:
+                review?.reviewerName ||
+                null,
+
+              reviewText:
+                review?.text ||
+                null,
+
+              rating:
+                Number(
+                  review?.rating
+                ) || 1,
+
+              reviewDate:
+                reviewDate
+                  .toISOString(),
+            });
+          }
+
+          // =====================================
+          // ตอนนี้ยังไม่ส่ง LINE กลุ่ม
+          // dryRun=true ใช้ตรวจ logic ก่อน
+          // =====================================
+
+          if (dryRun !== true) {
+            for (
+              const candidate of
+              candidates
+            ) {
+              await createReactivationAlert({
+                customerId:
+                  customerMap.customer_id,
+
+                customerMapId:
+                  customerMap.id,
+
+                ...candidate,
+              });
+            }
+
+            await markCustomerMapChecked({
+              customerMapId:
+                customerMap.id,
+            });
+          }
+
+          results.push({
+            customerMapId:
+              customerMap.id,
+
+            customerId:
+              customerMap.customer_id,
+
+            businessName:
+              customerMap.business_name,
+
+            status:
+              "checked",
+
+            newOneStarCount:
+              candidates.length,
+
+            candidates,
+          });
+
+        } catch (mapError) {
+          console.error(
+            "REACTIVATION MAP CHECK ERROR:",
+            {
+              customerMapId:
+                customerMap?.id,
+
+              error:
+                mapError?.message ||
+                String(mapError),
+            }
+          );
+
+          results.push({
+            customerMapId:
+              customerMap?.id ||
+              null,
+
+            status:
+              "error",
+
+            error:
+              mapError?.message ||
+              String(mapError),
+          });
+        }
+      }
+
+      return res.json({
+        ok: true,
+        dryRun:
+          dryRun === true,
+        mapsChecked:
+          maps.length,
+        results,
+      });
+
+    } catch (error) {
+      console.error(
+        "CHECK REACTIVATION MAPS ERROR:",
         error
       );
 
