@@ -6270,8 +6270,85 @@ await updateLastBotMessage(
 ) {
 
   // 1. ค้นชื่อธุรกิจใน Google Places
-  const places =
-    await searchPlaceByText(message);
+  let places;
+
+try {
+  places =
+    await searchPlaceByText(
+      message
+    );
+
+} catch (error) {
+  console.error(
+    "BUSINESS NAME SEARCH TEMPORARILY FAILED:",
+    {
+      customerId:
+        customer.id,
+
+      message,
+
+      error:
+        error.message,
+
+      code:
+        error?.code ||
+        null,
+
+      status:
+        error?.status ||
+        null,
+    }
+  );
+
+  const botReply =
+    getCustomerText(
+      customer,
+      "ระบบ Google Map ตอบกลับชั่วคราวไม่ได้ครับ รบกวนส่งชื่อธุรกิจหรือส่งข้อความเดิมอีกครั้งในอีกสักครู่นะครับ",
+      "Google Maps is temporarily unavailable. Please send the business name or the same message again in a moment."
+    );
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    inputType:
+      classification.type,
+
+    botReply,
+
+    temporaryMapError:
+      true,
+  };
+}
 
   if (!places.length) {
   const botReply =
@@ -12861,10 +12938,72 @@ if (!placeId) {
   }
 
 
-  const places =
+  let places;
+
+try {
+  places =
     await searchPlaceByText(
       businessName
     );
+
+} catch (error) {
+  console.error(
+    "REVIEW SCREENSHOT MAP SEARCH TEMPORARILY FAILED:",
+    {
+      customerId:
+        customer.id,
+
+      businessName,
+
+      error:
+        error.message,
+
+      code:
+        error?.code ||
+        null,
+
+      status:
+        error?.status ||
+        null,
+    }
+  );
+
+  const botReply =
+    getCustomerText(
+      customer,
+      "ระบบ Google Map ตอบกลับชั่วคราวไม่ได้ครับ รบกวนส่งรูปรีวิวหรือลิงก์เดิมอีกครั้งในอีกสักครู่นะครับ",
+      "Google Maps is temporarily unavailable. Please send the review screenshot or link again in a moment."
+    );
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      "line",
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  await replyLineTextMessage(
+    replyToken,
+    botReply
+  );
+
+  continue;
+}
 
 
   if (!places.length) {
