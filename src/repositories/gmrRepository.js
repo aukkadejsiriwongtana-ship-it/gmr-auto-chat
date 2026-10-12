@@ -1839,6 +1839,176 @@ export async function createReactivationAlert({
 }
 
 // =========================================================
+// LINK REACTIVATION ALERT TO LINE GROUP MESSAGE
+// =========================================================
+
+export async function setReactivationAlertLineGroupMessage({
+  alertId,
+  lineGroupMessageId,
+}) {
+  if (!alertId) {
+    throw new Error(
+      "Missing alertId in setReactivationAlertLineGroupMessage"
+    );
+  }
+
+  if (!lineGroupMessageId) {
+    throw new Error(
+      "Missing lineGroupMessageId in setReactivationAlertLineGroupMessage"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_review_reactivation_alerts"
+    )
+    .update({
+      line_group_message_id:
+        lineGroupMessageId,
+    })
+    .eq(
+      "id",
+      alertId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+
+// =========================================================
+// GET PENDING REACTIVATION ALERT BY LINE MESSAGE ID
+//
+// ใช้ตอนทีม Reply:
+// - ส่งลูกค้า
+// - ข้าม
+// =========================================================
+
+export async function getReactivationAlertByLineGroupMessageId(
+  lineGroupMessageId
+) {
+  const messageId =
+    String(
+      lineGroupMessageId || ""
+    ).trim();
+
+  if (!messageId) {
+    return null;
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_review_reactivation_alerts"
+    )
+    .select("*")
+    .eq(
+      "line_group_message_id",
+      messageId
+    )
+    .eq(
+      "review_status",
+      "pending_team_review"
+    )
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data || null;
+}
+
+
+// =========================================================
+// SAVE TEAM DECISION
+// =========================================================
+
+export async function setReactivationAlertTeamDecision({
+  alertId,
+  decision,
+}) {
+  if (!alertId) {
+    throw new Error(
+      "Missing alertId in setReactivationAlertTeamDecision"
+    );
+  }
+
+  const safeDecision =
+    String(
+      decision || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    ![
+      "send_to_customer",
+      "skip",
+    ].includes(
+      safeDecision
+    )
+  ) {
+    throw new Error(
+      "Invalid reactivation team decision"
+    );
+  }
+
+  const now =
+    new Date().toISOString();
+
+  const reviewStatus =
+    safeDecision ===
+    "send_to_customer"
+      ? "sent_to_customer"
+      : "skipped";
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_review_reactivation_alerts"
+    )
+    .update({
+      team_decision:
+        safeDecision,
+
+      team_reviewed_at:
+        now,
+
+      review_status:
+        reviewStatus,
+
+      updated_at:
+        now,
+    })
+    .eq(
+      "id",
+      alertId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+// =========================================================
 // GET VERIFIED PAID PRICING HISTORY BY CUSTOMER
 //
 // ใช้สำหรับลูกค้าเก่า
