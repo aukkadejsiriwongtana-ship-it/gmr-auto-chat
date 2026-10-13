@@ -21,6 +21,7 @@ import {
   replyLineTextMessage,
   downloadLineMessageContent,
   getLineUserProfile,
+  getFacebookUserProfile,
 } from "./services/customerMessagingService.js";
 
 
@@ -107,6 +108,12 @@ createReactivationAlert,
 setReactivationAlertLineGroupMessage,
 getReactivationAlertByLineGroupMessageId,
 setReactivationAlertTeamDecision,
+claimWebhookEvent,
+claimUnknownSalesQuestion,
+setUnknownSalesQuestionLineMessage,
+getPendingReactivationAlertByCustomerId,
+updateReactivationAlertCustomerResponse,
+getCustomerMapById,
   
 } from "./repositories/gmrRepository.js";
 
@@ -796,7 +803,10 @@ function getPlatformLabel(
     return "Facebook เพจต่างประเทศ";
   }
 
-  if (platform === "facebook") {
+  if (
+    platform === "facebook" ||
+    platform.startsWith("facebook:")
+  ) {
     return "Facebook";
   }
 
@@ -1673,6 +1683,34 @@ async function triggerHumanAttention({
     };
   }
 
+  // กัน Sales alert ซ้ำสำหรับคำถาม/เหตุการณ์เดิม
+  const attentionDedupeKey = crypto
+    .createHash("sha256")
+    .update([
+      customer?.id || "-",
+      conversation?.state || "UNKNOWN",
+      String(reason || "").trim(),
+      String(message || "").trim().toLowerCase(),
+    ].join("|"))
+    .digest("hex");
+
+  const attentionClaim = await claimUnknownSalesQuestion({
+    customerId: customer?.id,
+    platform: customer?.platform || null,
+    state: conversation?.state || null,
+    message: String(message || "").trim() || null,
+    reason: reason || null,
+    dedupeKey: attentionDedupeKey,
+  });
+
+  if (attentionClaim?.claimed === false) {
+    console.log("HUMAN ATTENTION DUPLICATE SUPPRESSED", {
+      customerId: customer?.id,
+      reason,
+    });
+    return { sent: false, duplicate: true };
+  }
+
   const customerName =
     customer?.display_name ||
     "ไม่ทราบชื่อ";
@@ -1768,6 +1806,17 @@ const messageId =
     ?.[0]
     ?.id ||
   null;
+
+if (messageId && attentionClaim?.row?.id) {
+  try {
+    await setUnknownSalesQuestionLineMessage({
+      questionId: attentionClaim.row.id,
+      lineGroupMessageId: messageId,
+    });
+  } catch (linkError) {
+    console.error("UNKNOWN SALES QUESTION LINK FAILED:", linkError);
+  }
+}
 
 
 // ========================================
@@ -4486,6 +4535,99 @@ let autoConfirmDirectMap =
     );
   }
 
+  // =======================================================
+  // REACTIVATION CUSTOMER RESPONSE
+  // ทีมอนุมัติให้ทักลูกค้าแล้วเท่านั้น
+  // สนใจ -> ป้อน review URL กลับเข้า Existing Customer flow เดิม
+  // ไม่สนใจ -> ปิด lead และคง State เดิม
+  // =======================================================
+  const pendingReactivation =
+    await getPendingReactivationAlertByCustomerId(customer.id);
+
+  if (pendingReactivation && messageType === "text") {
+    const reactText = String(message || "").trim().toLowerCase();
+    const interestedWords = [
+      "สนใจ", "สนใจครับ", "สนใจค่ะ", "เอาครับ", "เอาค่ะ",
+      "ดำเนินการ", "ได้", "yes", "interested", "proceed", "go ahead", "ok", "okay"
+    ];
+    const declineWords = [
+      "ไม่สนใจ", "ไม่เอา", "ข้าม", "ไม่ครับ", "ไม่ค่ะ",
+      "no", "not interested", "skip", "no thanks"
+    ];
+
+    if (declineWords.includes(reactText)) {
+      await updateReactivationAlertCustomerResponse({
+        alertId: pendingReactivation.id,
+        response: message,
+        status: "customer_declined",
+      });
+      const declineReply = getCustomerText(
+        customer,
+        "รับทราบครับ หากต้องการให้ช่วยตรวจสอบรีวิวอื่น สามารถส่งลิงก์มาได้ตลอดครับ",
+        "Understood. If you'd like us to check another review, you can send the review link at any time."
+      );
+      await saveMessage({
+        customerId: customer.id, platform, direction: "outbound",
+        messageType: "text", messageText: declineReply,
+      });
+      await updateLastBotMessage(customer.id, declineReply);
+      return {
+        ok: true, customerId: customer.id,
+        stateBefore: conversation.state, stateAfter: conversation.state,
+        reactivationDeclined: true, botReply: declineReply,
+      };
+    }
+
+    if (interestedWords.includes(reactText)) {
+      await updateReactivationAlertCustomerResponse({
+        alertId: pendingReactivation.id,
+        response: message,
+        status: "customer_interested",
+      });
+
+      const reviewUrl = String(pendingReactivation.review_url || "").trim();
+      if (!reviewUrl) {
+        await triggerHumanAttention({
+          customer, conversation, message,
+          reason: "REACTIVATION_INTEREST_NO_REVIEW_URL",
+        });
+        return {
+          ok: true, customerId: customer.id,
+          stateBefore: conversation.state, stateAfter: conversation.state,
+          botReply: null, softHandoff: false,
+          note: "Reactivation interested but review URL missing; Sales notified.",
+        };
+      }
+
+      // เปลี่ยนสถานะชั่วคราวเป็น NEW เพื่อให้ Existing Customer direct-review flow
+      // รับ review นี้เหมือนลูกค้าส่งลิงก์เข้ามาเอง โดยยังคง payment history เดิม
+      await updateConversationState({
+        customerId: customer.id,
+        state: GMR_STATES.NEW,
+        handoff: false,
+        handoffReason: null,
+      });
+
+      const replay = await processTestMessage({
+        platform,
+        platformUserId,
+        message: reviewUrl,
+        messageType: "text",
+        displayName: customer.display_name || displayName || "Customer",
+      });
+
+      return {
+        ok: true,
+        customerId: customer.id,
+        reactivationInterested: true,
+        replayResult: replay,
+        // replay flow บาง branch ส่งเองอยู่แล้ว; ไม่ให้ webhook ยิงซ้ำ
+        botReply: replay?.alreadySent ? null : replay?.botReply || null,
+        alreadySent: replay?.alreadySent === true,
+      };
+    }
+  }
+
 // -------------------------------------------------------
 // EXISTING CUSTOMER HISTORY CHECK
 // -------------------------------------------------------
@@ -6296,6 +6438,7 @@ departmentId:
             conversation.state,
 
           botReply,
+          alreadySent: true,
         };
       }
 
@@ -6516,6 +6659,7 @@ When finished, reply "Confirm all" to confirm the full batch before we begin.`
           conversation.state,
 
         botReply,
+        alreadySent: true,
       };
     }
 
@@ -11226,6 +11370,30 @@ app.post("/line/webhook", async (req, res) => {
     for (const event of events) {
 
       // ========================================
+      // WEBHOOK IDEMPOTENCY
+      // LINE retry ต้องไม่ประมวลผลซ้ำ
+      // ========================================
+      const lineEventId =
+        event?.webhookEventId ||
+        event?.message?.id ||
+        null;
+
+      if (lineEventId) {
+        const claim = await claimWebhookEvent({
+          platform: "line",
+          eventId: String(lineEventId),
+          payload: {
+            type: event?.type || null,
+            sourceType: event?.source?.type || null,
+          },
+        });
+        if (claim?.claimed === false) {
+          console.log("DUPLICATE LINE EVENT SUPPRESSED", { lineEventId });
+          continue;
+        }
+      }
+
+      // ========================================
       // GROUP MESSAGE
       // ไม่ส่งเข้าระบบลูกค้า
       // ========================================
@@ -11298,6 +11466,72 @@ console.log(
   String(groupText || "")
     .trim()
     .toLowerCase();
+
+// =========================================================
+// REACTIVATION TEAM DECISION
+// Reply: ส่งลูกค้า / ข้าม
+// =========================================================
+if (
+  quotedMessageId &&
+  ["ส่งลูกค้า", "ข้าม"].includes(normalizedGroupText)
+) {
+  const reactivationAlert =
+    await getReactivationAlertByLineGroupMessageId(quotedMessageId);
+
+  if (reactivationAlert) {
+    if (normalizedGroupText === "ข้าม") {
+      await setReactivationAlertTeamDecision({
+        alertId: reactivationAlert.id,
+        decision: "skip",
+      });
+      await replyLineTextMessage(
+        event.replyToken,
+        "✅ ข้าม Reactivation รายการนี้แล้ว ระบบจะไม่ทักลูกค้าครับ"
+      );
+      continue;
+    }
+
+    const reactCustomer =
+      await getCustomerById(reactivationAlert.customer_id);
+    const reactMap =
+      await getCustomerMapById(reactivationAlert.customer_map_id);
+
+    if (!reactCustomer) {
+      await replyLineTextMessage(event.replyToken, "❌ ไม่พบข้อมูลลูกค้าของ Reactivation นี้ครับ");
+      continue;
+    }
+
+    const reactCustomerText = getCustomerText(
+      reactCustomer,
+      `ตรวจพบรีวิว 1 ดาวใหม่บน Google Maps ของ ${reactMap?.business_name || "ธุรกิจของคุณ"}\n\nReviewer: ${reactivationAlert.reviewer_name || "-"}\n\nต้องการให้ทางเราตรวจสอบเพื่อดำเนินการรีวิวนี้ไหมครับ?\nหากสนใจ พิมพ์ “สนใจ” ได้เลยครับ`,
+      `We found a new 1-star review on the Google Maps listing for ${reactMap?.business_name || "your business"}.\n\nReviewer: ${reactivationAlert.reviewer_name || "-"}\n\nWould you like us to check this review for you?\nIf you're interested, reply “Interested”.`
+    );
+
+    await sendMessageToCustomer({
+      platform: reactCustomer.platform,
+      platformUserId: reactCustomer.platform_user_id,
+      text: reactCustomerText,
+    });
+    await saveMessage({
+      customerId: reactCustomer.id,
+      platform: reactCustomer.platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: reactCustomerText,
+    });
+    await updateLastBotMessage(reactCustomer.id, reactCustomerText);
+    await setReactivationAlertTeamDecision({
+      alertId: reactivationAlert.id,
+      decision: "send_to_customer",
+    });
+
+    await replyLineTextMessage(
+      event.replyToken,
+      "✅ ส่งข้อความ Reactivation ให้ลูกค้าแล้วครับ ระบบจะรอคำตอบโดยไม่ Handoff"
+    );
+    continue;
+  }
+}
 
 // =========================================================
 // LEGACY CUSTOMER MATCH APPROVAL
@@ -15292,7 +15526,8 @@ try {
   // ========================================
 
   if (
-    result?.botReply
+    result?.botReply &&
+    result?.alreadySent !== true
   ) {
 
     try {
@@ -15354,6 +15589,119 @@ try {
     if (!res.headersSent) {
       return res.sendStatus(500);
     }
+  }
+});
+
+
+// =========================================================
+// FACEBOOK MESSENGER WEBHOOK
+// Direct Meta Messenger integration
+// Platform key = facebook:<PAGE_ID>
+// =========================================================
+app.get("/facebook/webhook", (req, res) => {
+  const verifyToken = process.env.FACEBOOK_VERIFY_TOKEN;
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && verifyToken && token === verifyToken) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+app.post("/facebook/webhook", async (req, res) => {
+  try {
+    const appSecret = process.env.FACEBOOK_APP_SECRET;
+    if (appSecret) {
+      const signature = req.get("x-hub-signature-256");
+      if (!signature || !req.rawBody) return res.sendStatus(401);
+      const expected = "sha256=" + crypto
+        .createHmac("sha256", appSecret)
+        .update(req.rawBody)
+        .digest("hex");
+      const a = Buffer.from(signature);
+      const b = Buffer.from(expected);
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.sendStatus(401);
+      }
+    }
+
+    res.sendStatus(200);
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+
+    for (const entry of entries) {
+      const pageId = String(entry?.id || "").trim();
+      const events = Array.isArray(entry?.messaging) ? entry.messaging : [];
+
+      for (const event of events) {
+        if (!event?.message || event.message.is_echo === true) continue;
+        const senderId = String(event?.sender?.id || "").trim();
+        if (!senderId) continue;
+
+        const eventId = event?.message?.mid ||
+          `${pageId}:${senderId}:${event?.timestamp || ""}:${event?.message?.text || ""}`;
+        const claim = await claimWebhookEvent({
+          platform: `facebook:${pageId || "default"}`,
+          eventId: String(eventId),
+          payload: { pageId, senderId, timestamp: event?.timestamp || null },
+        });
+        if (claim?.claimed === false) {
+          console.log("DUPLICATE FACEBOOK EVENT SUPPRESSED", { eventId });
+          continue;
+        }
+
+        const platform = `facebook:${pageId || "default"}`;
+        let displayName = "Facebook User";
+        try {
+          const profile = await getFacebookUserProfile({
+            pageId,
+            userId: senderId,
+          });
+          if (profile?.displayName) displayName = profile.displayName;
+        } catch (profileError) {
+          console.error("FACEBOOK PROFILE FETCH FAILED:", profileError);
+        }
+
+        const messageType = event?.message?.text ? "text" : "unknown";
+        const message = event?.message?.text || "";
+
+        const botControl = await getBotControl();
+        if (botControl.enabled !== true) {
+          const pausedCustomer = await getOrCreateCustomer({
+            platform, platformUserId: senderId, displayName,
+            language: detectCustomerLanguage(message, "en"),
+          });
+          await saveMessage({
+            customerId: pausedCustomer.id, platform,
+            direction: "inbound", messageType, messageText: message || null,
+            platformMessageId: event?.message?.mid || null,
+          });
+          continue;
+        }
+
+        const result = await processTestMessage({
+          platform,
+          platformUserId: senderId,
+          displayName,
+          message,
+          messageType,
+        });
+
+        console.log("FACEBOOK FLOW RESULT:", result);
+
+        if (result?.botReply && result?.alreadySent !== true) {
+          await sendMessageToCustomer({
+            platform,
+            platformUserId: senderId,
+            text: result.botReply,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.error("FACEBOOK WEBHOOK ERROR:", error);
+    if (!res.headersSent) return res.sendStatus(500);
   }
 });
 
@@ -16459,14 +16807,20 @@ app.post(
               const candidate of
               candidates
             ) {
-              await createReactivationAlert({
-                customerId:
-                  customerMap.customer_id,
+              const createdAlert =
+                await createReactivationAlert({
+                  customerId:
+                    customerMap.customer_id,
 
-                customerMapId:
-                  customerMap.id,
+                  customerMapId:
+                    customerMap.id,
 
-                ...candidate,
+                  ...candidate,
+                });
+
+              await sendReactivationAlertToLineGroup({
+                alert: createdAlert,
+                customerMap,
               });
             }
 
