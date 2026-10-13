@@ -114,6 +114,13 @@ setUnknownSalesQuestionLineMessage,
 getPendingReactivationAlertByCustomerId,
 updateReactivationAlertCustomerResponse,
 getCustomerMapById,
+findCustomerByPhoneOrEmail,
+createManualCustomer,
+updateCustomerEditableFields,
+updateJobEditableFields,
+logSheetSyncChange,
+upsertCustomerMapRecord,
+updateCustomerTransportMetadata,
   
 } from "./repositories/gmrRepository.js";
 
@@ -11467,6 +11474,45 @@ console.log(
     .trim()
     .toLowerCase();
 
+
+// =========================================================
+// MANUAL ASSIGNED WORK COMMAND
+// Example starts with: /manual
+// =========================================================
+if (/^\/manual\b/i.test(String(groupText || "").trim())) {
+  try {
+    const manualResult = await createManualAssignedWorkFromGroupText(groupText);
+    const lines = manualResult.createdJobs.map(
+      (item, index) => `${index + 1}. ${item.reviewUrl}\n   Job: ${item.jobId}\n   Status: ${item.status}`
+    );
+
+    await replyLineTextMessage(
+      event.replyToken,
+      [
+        "✅ รับ Manual Assigned Work เข้าระบบแล้ว",
+        `Customer: ${manualResult.customer?.display_name || "-"}`,
+        `Phone: ${manualResult.customer?.phone || "-"}`,
+        `Email: ${manualResult.customer?.email || "-"}`,
+        `Price: ${manualResult.parsed.price} ${manualResult.parsed.currency || ""}/review`,
+        `จำนวน: ${manualResult.createdJobs.length} รีวิว`,
+        "",
+        ...lines,
+        "",
+        "หมายเหตุ: งานชุดนี้ customer_notify=false ระบบจะไม่ทักลูกค้าเอง",
+      ].join("\n")
+    );
+  } catch (manualError) {
+    let message = `❌ Manual Assigned Work ไม่สำเร็จ: ${manualError.message}`;
+    if (manualError.message === "MANUAL_WORK_NO_REVIEW_URL") {
+      message = "❌ ไม่พบ Review URL ในข้อความ /manual";
+    } else if (manualError.message === "MANUAL_WORK_INVALID_PRICE") {
+      message = "❌ กรุณาระบุ Price/ราคา ที่มากกว่า 0";
+    }
+    await replyLineTextMessage(event.replyToken, message);
+  }
+  continue;
+}
+
 // =========================================================
 // REACTIVATION TEAM DECISION
 // Reply: ส่งลูกค้า / ข้าม
@@ -15593,6 +15639,199 @@ try {
 });
 
 
+
+// =========================================================
+// BOTPRESS -> GMR CORE BRIDGE
+// Interactive replies are returned to Botpress; Botpress sends them to Messenger.
+// page_key keeps Page TH / Page EN identities separate.
+// =========================================================
+app.post("/botpress/inbound", async (req, res) => {
+  try {
+    const expectedSecret = process.env.BOTPRESS_WEBHOOK_SECRET;
+    const suppliedSecret =
+      req.get("x-gmr-secret") ||
+      req.body?.secret ||
+      null;
+
+    if (!expectedSecret || suppliedSecret !== expectedSecret) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const body = req.body || {};
+    const pageKey = String(body.page_key || body.pageKey || "gmr_th").trim();
+    const platformUserId = String(
+      body.platform_user_id || body.sender_id || body.senderId || body.user_id || ""
+    ).trim();
+    const message = String(body.message || body.text || "").trim();
+    const messageId = String(body.message_id || body.messageId || "").trim() || null;
+    const displayName = String(
+      body.display_name ||
+      [body.first_name, body.last_name].filter(Boolean).join(" ") ||
+      "Facebook User"
+    ).trim();
+
+    if (!platformUserId) {
+      return res.status(400).json({ ok: false, error: "Missing platform_user_id" });
+    }
+    if (!message) {
+      return res.status(400).json({ ok: false, error: "Missing message" });
+    }
+
+    const platform = `facebook:${pageKey || "default"}`;
+
+    if (messageId) {
+      const claim = await claimWebhookEvent({
+        platform,
+        eventId: messageId,
+        payload: { pageKey, platformUserId },
+      });
+      if (claim?.claimed === false) {
+        return res.status(200).json({
+          ok: true,
+          duplicate: true,
+          reply: null,
+          should_reply: false,
+        });
+      }
+    }
+
+    const botControl = await getBotControl();
+    if (botControl.enabled !== true) {
+      const pausedCustomer = await getOrCreateCustomer({
+        platform,
+        platformUserId,
+        displayName,
+        language: detectCustomerLanguage(message, pageKey === "gmr_en" ? "en" : "th"),
+      });
+      await saveMessage({
+        customerId: pausedCustomer.id,
+        platform,
+        direction: "inbound",
+        messageType: "text",
+        messageText: message,
+        platformMessageId: messageId,
+        metadata: { transport: "botpress", page_key: pageKey },
+      });
+      return res.status(200).json({
+        ok: true,
+        paused: true,
+        reply: null,
+        should_reply: false,
+      });
+    }
+
+    const result = await processTestMessage({
+      platform,
+      platformUserId,
+      message,
+      messageType: "text",
+      displayName,
+    });
+
+    const reply = result?.alreadySent === true
+      ? null
+      : (result?.botReply || null);
+
+    return res.status(200).json({
+      ok: true,
+      reply,
+      should_reply: Boolean(reply),
+      customer_id: result?.customerId || null,
+      state_before: result?.stateBefore || null,
+      state_after: result?.stateAfter || null,
+      soft_handoff: result?.softHandoff === true,
+    });
+  } catch (error) {
+    console.error("BOTPRESS INBOUND ERROR:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+      reply: null,
+      should_reply: false,
+    });
+  }
+});
+
+// =========================================================
+// GOOGLE SHEET -> SUPABASE EDITABLE SYNC
+// Editable fields only. IDs/status remain controlled by the workflow.
+// =========================================================
+app.post("/sheet-sync", async (req, res) => {
+  try {
+    const { secret, jobId, customerId, field, value } = req.body || {};
+    const expectedSecret = process.env.SHEET_CONTROL_SECRET;
+
+    if (!expectedSecret || secret !== expectedSecret) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+    if (!field) {
+      return res.status(400).json({ ok: false, error: "Missing field" });
+    }
+
+    const safeField = String(field).trim();
+    const customerFields = new Set(["customerName", "phone", "email"]);
+    const jobFields = new Set(["businessName", "reviewUrl", "price", "currency"]);
+
+    let resolvedCustomerId = customerId || null;
+    let job = null;
+
+    if (jobId) {
+      job = await getJobById(jobId);
+      if (!job) return res.status(404).json({ ok: false, error: "Job not found" });
+      resolvedCustomerId = resolvedCustomerId || job.customer_id;
+    }
+
+    if (customerFields.has(safeField)) {
+      if (!resolvedCustomerId) {
+        return res.status(400).json({ ok: false, error: "Missing customerId" });
+      }
+      const before = await getCustomerById(resolvedCustomerId);
+      const args = { customerId: resolvedCustomerId };
+      if (safeField === "customerName") args.displayName = value;
+      if (safeField === "phone") args.phone = value;
+      if (safeField === "email") args.email = value;
+      const updated = await updateCustomerEditableFields(args);
+      await logSheetSyncChange({
+        jobId: jobId || null,
+        customerId: resolvedCustomerId,
+        fieldName: safeField,
+        oldValue:
+          safeField === "customerName" ? before?.display_name :
+          safeField === "phone" ? before?.phone : before?.email,
+        newValue: value,
+      });
+      return res.json({ ok: true, field: safeField, customer: updated });
+    }
+
+    if (jobFields.has(safeField)) {
+      if (!jobId) return res.status(400).json({ ok: false, error: "Missing jobId" });
+      const args = { jobId };
+      if (safeField === "businessName") args.businessName = value;
+      if (safeField === "reviewUrl") args.reviewUrl = value;
+      if (safeField === "price") args.price = value;
+      if (safeField === "currency") args.currency = value;
+      const beforeValue =
+        safeField === "businessName" ? job?.business_name :
+        safeField === "reviewUrl" ? job?.review_url :
+        safeField === "price" ? job?.price : job?.currency;
+      const updated = await updateJobEditableFields(args);
+      await logSheetSyncChange({
+        jobId,
+        customerId: resolvedCustomerId,
+        fieldName: safeField,
+        oldValue: beforeValue,
+        newValue: value,
+      });
+      return res.json({ ok: true, field: safeField, job: updated });
+    }
+
+    return res.status(400).json({ ok: false, error: "Field is not editable" });
+  } catch (error) {
+    console.error("SHEET SYNC ERROR:", error);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 // =========================================================
 // FACEBOOK MESSENGER WEBHOOK
 // Direct Meta Messenger integration
@@ -17806,69 +18045,51 @@ app.post("/sheet-control", async (req, res) => {
 
 
   // ========================================
-  // 7. ส่งข้อความเก็บเงิน
+  // 7-9. CUSTOMER NOTIFICATION
+  // Manual/internal jobs must never message the customer automatically.
   // ========================================
 
-  await sendMessageToCustomer({
-    platform:
-      customer.platform,
+  const shouldNotifyCustomer =
+    job?.customer_notify !== false &&
+    customer?.customer_notify !== false &&
+    customer?.platform !== "manual";
 
-    platformUserId:
-      customer.platform_user_id,
-
-    text:
-      botReply,
-  });
-
-
-  // ========================================
-  // 8. THB → ส่ง QR
-  // ========================================
-
-  if (
-    paymentCurrency ===
-    "THB"
-  ) {
-
+  if (shouldNotifyCustomer) {
     await sendMessageToCustomer({
-      platform:
-        customer.platform,
-
-      platformUserId:
-        customer.platform_user_id,
-
-      imageUrl:
-        thbPaymentQrUrl,
+      platform: customer.platform,
+      platformUserId: customer.platform_user_id,
+      text: botReply,
     });
+
+    if (paymentCurrency === "THB") {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        imageUrl: thbPaymentQrUrl,
+      });
+    }
+
+    await saveMessage({
+      customerId: customer.id,
+      platform: customer.platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(customer.id, botReply);
+  } else {
+    try {
+      await triggerHumanAttention({
+        customer,
+        conversation,
+        message: `Manual job removed: ${job.review_url || job.id} | Amount ${formattedTotal} ${paymentCurrency}`,
+        reason: "MANUAL_JOB_REMOVED_AWAITING_INTERNAL_PAYMENT_UPDATE",
+      });
+    } catch (notifyError) {
+      console.error("MANUAL REMOVED INTERNAL ALERT FAILED:", notifyError);
+    }
   }
-
-
-  // ========================================
-  // 9. SAVE OUTBOUND
-  // ========================================
-
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform:
-      customer.platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
-  });
-
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
 
 
   console.log(
@@ -17940,7 +18161,7 @@ app.post("/sheet-control", async (req, res) => {
       removedAt,
 
       customerNotified:
-        true,
+        shouldNotifyCustomer,
     });
 }
 
