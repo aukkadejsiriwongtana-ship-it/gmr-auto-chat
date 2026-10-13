@@ -791,6 +791,7 @@ function parseManualAssignedWorkText(text) {
     businessName: null,
     price: null,
     currency: "THB",
+    workType: null,
     reviewUrls: [],
   };
 
@@ -828,6 +829,13 @@ function parseManualAssignedWorkText(text) {
     if (/^(currency|สกุล|สกุลเงิน)\s*:/i.test(line)) {
       const currency = valueAfterColon(line).toUpperCase();
       parsed.currency = currency || "THB";
+      continue;
+    }
+    if (/^(type|department|ประเภท|แผนก)\s*:/i.test(line)) {
+      const rawType = valueAfterColon(line).trim().toUpperCase();
+      if (rawType === "T0" || rawType === "T2") {
+        parsed.workType = rawType;
+      }
       continue;
     }
   }
@@ -890,6 +898,16 @@ async function createManualAssignedWorkFromGroupText(groupText) {
     let reviewAgeDays = null;
     let departmentId = null;
 
+    if (parsed.workType) {
+      const explicitDepartment =
+        await getDepartmentForReviewAge(
+          parsed.workType === "T0" ? 0 : 15
+        );
+
+      departmentId =
+        explicitDepartment?.id || null;
+    }
+
     try {
       const resolved = await resolveGoogleShortUrl(originalUrl);
       if (resolved) canonicalReviewUrl = resolved;
@@ -908,8 +926,27 @@ async function createManualAssignedWorkFromGroupText(groupText) {
         businessName = directResult.businessName || businessName;
         reviewAgeDays = getReviewAgeDays(review);
 
-        const department = await getDepartmentForReviewAge(reviewAgeDays);
-        departmentId = department?.id || null;
+        const detectedType =
+          reviewAgeDays !== null &&
+          reviewAgeDays !== undefined
+            ? (reviewAgeDays <= 14 ? "T0" : "T2")
+            : null;
+
+        if (
+          parsed.workType &&
+          detectedType &&
+          parsed.workType !== detectedType
+        ) {
+          throw new Error(
+            `MANUAL_WORK_TYPE_MISMATCH:${parsed.workType}:${detectedType}`
+          );
+        }
+
+        if (!parsed.workType) {
+          const department =
+            await getDepartmentForReviewAge(reviewAgeDays);
+          departmentId = department?.id || null;
+        }
       }
     } catch (error) {
       console.error("MANUAL REVIEW LOOKUP FAILED:", {
@@ -932,6 +969,12 @@ async function createManualAssignedWorkFromGroupText(groupText) {
         duplicate: true,
       });
       continue;
+    }
+
+    if (!departmentId) {
+      throw new Error(
+        "MANUAL_WORK_TYPE_REQUIRED"
+      );
     }
 
     const now = new Date().toISOString();
@@ -11874,6 +11917,7 @@ if (/^\/manual\b/i.test(String(groupText || "").trim())) {
         `Customer: ${manualResult.customer?.display_name || "-"}`,
         `Phone: ${manualResult.customer?.phone || "-"}`,
         `Email: ${manualResult.customer?.email || "-"}`,
+        `Type: ${manualResult.parsed.workType || "AUTO"}`,
         `Price: ${manualResult.parsed.price} ${manualResult.parsed.currency || ""}/review`,
         `จำนวน: ${manualResult.createdJobs.length} รีวิว`,
         "",
@@ -11888,6 +11932,11 @@ if (/^\/manual\b/i.test(String(groupText || "").trim())) {
       message = "❌ ไม่พบ Review URL ในข้อความ /manual";
     } else if (manualError.message === "MANUAL_WORK_INVALID_PRICE") {
       message = "❌ กรุณาระบุ Price/ราคา ที่มากกว่า 0";
+    } else if (manualError.message === "MANUAL_WORK_TYPE_REQUIRED") {
+      message = "❌ กรุณาระบุ Type: T0 หรือ Type: T2";
+    } else if (String(manualError.message || "").startsWith("MANUAL_WORK_TYPE_MISMATCH:")) {
+      const parts = String(manualError.message).split(":");
+      message = `❌ Type ที่ระบุไม่ตรงกับอายุรีวิวที่ตรวจพบ (ระบุ ${parts[1]} แต่ระบบตรวจพบ ${parts[2]})`;
     }
     await replyLineTextMessage(event.replyToken, message);
   }
