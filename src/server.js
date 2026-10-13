@@ -48,6 +48,7 @@ import {
   updateLastUserMessage,
   updateLastBotMessage,
   createJob,
+  getJobByCustomerAndReviewUrl,
     getLatestJobByCustomerId,
   hasPaymentByCustomerId,
   getPaidPricingHistoryByCustomerId,
@@ -770,6 +771,434 @@ import {
 import {
   createReviewScreenshot,
 } from "./services/reviewScreenshotService.js";
+
+
+
+// =========================================================
+// MANUAL ASSIGNED WORK
+// LINE sales group command: /manual
+// Creates/uses a customer, creates one job per review URL,
+// writes JOBS_MASTER, and NEVER messages the customer.
+// =========================================================
+function parseManualAssignedWorkText(text) {
+  const raw = String(text || "").trim();
+  const lines = raw.split(/\r?\n/);
+
+  const parsed = {
+    customerName: null,
+    phone: null,
+    email: null,
+    businessName: null,
+    price: null,
+    currency: "THB",
+    reviewUrls: [],
+  };
+
+  const valueAfterColon = (line) => {
+    const index = line.indexOf(":");
+    return index >= 0 ? line.slice(index + 1).trim() : "";
+  };
+
+  for (const rawLine of lines) {
+    const line = String(rawLine || "").trim();
+    if (!line || /^\/manual\b/i.test(line)) continue;
+
+    if (/^(customer|customer\s*name|name|ลูกค้า|ชื่อลูกค้า)\s*:/i.test(line)) {
+      parsed.customerName = valueAfterColon(line) || null;
+      continue;
+    }
+    if (/^(phone|tel|telephone|เบอร์|เบอร์โทร|โทร)\s*:/i.test(line)) {
+      parsed.phone = valueAfterColon(line) || null;
+      continue;
+    }
+    if (/^(email|e-mail|อีเมล)\s*:/i.test(line)) {
+      parsed.email = valueAfterColon(line).toLowerCase() || null;
+      continue;
+    }
+    if (/^(business|business\s*name|map|ร้าน|ชื่อร้าน|ธุรกิจ)\s*:/i.test(line)) {
+      parsed.businessName = valueAfterColon(line) || null;
+      continue;
+    }
+    if (/^(price|ราคา)\s*:/i.test(line)) {
+      const priceText = valueAfterColon(line).replace(/,/g, "");
+      const price = Number(priceText);
+      parsed.price = Number.isFinite(price) ? price : null;
+      continue;
+    }
+    if (/^(currency|สกุล|สกุลเงิน)\s*:/i.test(line)) {
+      const currency = valueAfterColon(line).toUpperCase();
+      parsed.currency = currency || "THB";
+      continue;
+    }
+  }
+
+  const urls = raw.match(/https?:\/\/[^\s]+/gi) || [];
+  parsed.reviewUrls = [...new Set(
+    urls
+      .map((url) => url.replace(/[),.;]+$/g, "").trim())
+      .filter(Boolean)
+  )];
+
+  if (parsed.reviewUrls.length === 0) {
+    throw new Error("MANUAL_WORK_NO_REVIEW_URL");
+  }
+
+  if (!Number.isFinite(parsed.price) || parsed.price <= 0) {
+    throw new Error("MANUAL_WORK_INVALID_PRICE");
+  }
+
+  if (!/^[A-Z]{3}$/.test(parsed.currency)) {
+    parsed.currency = "THB";
+  }
+
+  return parsed;
+}
+
+async function createManualAssignedWorkFromGroupText(groupText) {
+  const parsed = parseManualAssignedWorkText(groupText);
+
+  let customer = await findCustomerByPhoneOrEmail({
+    phone: parsed.phone,
+    email: parsed.email,
+  });
+
+  if (!customer) {
+    customer = await createManualCustomer({
+      platformUserId: `manual:${crypto.randomUUID()}`,
+      displayName: parsed.customerName,
+      phone: parsed.phone,
+      email: parsed.email,
+      language: parsed.currency === "USD" ? "en" : "th",
+      platformAccount: "manual_internal",
+    });
+  } else if (parsed.customerName || parsed.phone || parsed.email) {
+    customer = await updateCustomerEditableFields({
+      customerId: customer.id,
+      ...(parsed.customerName ? { displayName: parsed.customerName } : {}),
+      ...(parsed.phone ? { phone: parsed.phone } : {}),
+      ...(parsed.email ? { email: parsed.email } : {}),
+    });
+  }
+
+  const createdJobs = [];
+
+  for (const originalUrl of parsed.reviewUrls) {
+    let canonicalReviewUrl = originalUrl;
+    let directResult = null;
+    let review = null;
+    let businessName = parsed.businessName || null;
+    let reviewAgeDays = null;
+    let departmentId = null;
+
+    try {
+      const resolved = await resolveGoogleShortUrl(originalUrl);
+      if (resolved) canonicalReviewUrl = resolved;
+    } catch (error) {
+      console.error("MANUAL URL RESOLVE FAILED:", {
+        originalUrl,
+        error: error.message,
+      });
+    }
+
+    try {
+      directResult = await getReviewFromDirectUrl(canonicalReviewUrl);
+      if (directResult?.found && directResult?.review) {
+        review = directResult.review;
+        canonicalReviewUrl = review.reviewUrl || canonicalReviewUrl;
+        businessName = directResult.businessName || businessName;
+        reviewAgeDays = getReviewAgeDays(review);
+
+        const department = await getDepartmentForReviewAge(reviewAgeDays);
+        departmentId = department?.id || null;
+      }
+    } catch (error) {
+      console.error("MANUAL REVIEW LOOKUP FAILED:", {
+        reviewUrl: canonicalReviewUrl,
+        error: error.message,
+      });
+    }
+
+    const duplicate =
+      (await getJobByCustomerAndReviewUrl(customer.id, canonicalReviewUrl)) ||
+      (canonicalReviewUrl !== originalUrl
+        ? await getJobByCustomerAndReviewUrl(customer.id, originalUrl)
+        : null);
+
+    if (duplicate) {
+      createdJobs.push({
+        jobId: duplicate.id,
+        reviewUrl: duplicate.review_url || canonicalReviewUrl,
+        status: duplicate.status,
+        duplicate: true,
+      });
+      continue;
+    }
+
+    const now = new Date().toISOString();
+
+    let job = await createJob({
+      customerId: customer.id,
+      businessName,
+      reviewUrl: canonicalReviewUrl,
+      reviewCase: "direct_review",
+      reviewVisible: review ? true : null,
+      reviewHasText: review
+        ? Boolean(String(review.reviewText || review.text || "").trim())
+        : null,
+      departmentId,
+      status: departmentId ? "queued" : "processing",
+    });
+
+    job = await updateJob(job.id, {
+      price: parsed.price,
+      currency: parsed.currency,
+      source: "manual",
+      customer_notify: false,
+      updated_at: now,
+      ...(departmentId ? { queued_at: now } : { started_at: now }),
+    });
+
+    try {
+      await upsertCustomerMapRecord({
+        customerId: customer.id,
+        businessName,
+        sourceReviewUrl: canonicalReviewUrl,
+      });
+    } catch (error) {
+      console.error("MANUAL CUSTOMER MAP UPSERT FAILED:", {
+        customerId: customer.id,
+        reviewUrl: canonicalReviewUrl,
+        error: error.message,
+      });
+    }
+
+    await appendJobToGoogleSheet({
+      jobId: job.id,
+      customerId: customer.id,
+      customerName: customer.display_name || "",
+      platform: "manual",
+      phone: customer.phone || "",
+      businessName: businessName || "",
+      reviewUrl: canonicalReviewUrl,
+      price: parsed.price,
+      status: job.status,
+      startedAt: job.started_at || job.queued_at || now,
+      removedAt: "",
+      paidAt: "",
+      email: customer.email || "",
+      currency: parsed.currency,
+      source: "manual",
+      customerNotify: false,
+    });
+
+    createdJobs.push({
+      jobId: job.id,
+      reviewUrl: canonicalReviewUrl,
+      status: job.status,
+      duplicate: false,
+    });
+  }
+
+  return {
+    customer,
+    parsed,
+    createdJobs,
+  };
+}
+
+
+async function findExistingJobForSubmittedReviewUrl(customerId, rawUrl) {
+  const originalUrl = String(rawUrl || "").trim();
+  if (!customerId || !originalUrl) return { job: null, originalUrl, resolvedUrl: null };
+
+  let resolvedUrl = null;
+  try {
+    resolvedUrl = await resolveGoogleShortUrl(originalUrl);
+  } catch (error) {
+    console.error("EXISTING REVIEW URL RESOLVE FAILED:", {
+      customerId,
+      originalUrl,
+      error: error.message,
+    });
+  }
+
+  const candidates = [...new Set([originalUrl, resolvedUrl].filter(Boolean))];
+
+  for (const candidateUrl of candidates) {
+    const job = await getJobByCustomerAndReviewUrl(customerId, candidateUrl);
+    if (job) return { job, originalUrl, resolvedUrl: resolvedUrl || candidateUrl };
+  }
+
+  try {
+    const lookupUrl = resolvedUrl || originalUrl;
+    const directResult = await getReviewFromDirectUrl(lookupUrl);
+    const canonicalUrl = directResult?.review?.reviewUrl || null;
+
+    if (canonicalUrl) {
+      const job = await getJobByCustomerAndReviewUrl(customerId, canonicalUrl);
+      if (job) return { job, originalUrl, resolvedUrl: canonicalUrl };
+    }
+  } catch (error) {
+    console.log("EXISTING REVIEW CANONICAL LOOKUP SKIPPED:", {
+      customerId,
+      originalUrl,
+      error: error.message,
+    });
+  }
+
+  return { job: null, originalUrl, resolvedUrl };
+}
+
+function getExistingJobCustomerReply(customer, job) {
+  const status = String(job?.status || "").trim().toLowerCase();
+
+  if (status === "waiting_payment" || status === "removed_waiting_payment") {
+    return getCustomerText(
+      customer,
+      "รีวิวนี้ดำเนินการสำเร็จแล้ว และอยู่ระหว่างรอชำระค่าบริการครับ",
+      "This review has already been completed and is awaiting payment."
+    );
+  }
+
+  if (status === "paid") {
+    return getCustomerText(
+      customer,
+      "รีวิวนี้ดำเนินการและชำระเรียบร้อยแล้วครับ",
+      "This review has already been completed and paid."
+    );
+  }
+
+  if (Number(job?.review_missing_count || 0) >= 1) {
+    return getCustomerText(
+      customer,
+      "รีวิวนี้อยู่ระหว่างตรวจสอบผลโดยทีมงานครับ ไม่ต้องส่งลิงก์ซ้ำครับ",
+      "This review is currently being verified by our team. You do not need to resend the link."
+    );
+  }
+
+  return getCustomerText(
+    customer,
+    "รีวิวนี้อยู่ระหว่างดำเนินการแล้วครับ ไม่ต้องส่งลิงก์ซ้ำครับ",
+    "This review is already being processed. You do not need to resend the link."
+  );
+}
+
+async function sendRemovalConfirmationToLineGroup({
+  job,
+  customer,
+  reviewUrl,
+  reason = null,
+  detectedAt = null,
+}) {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  const groupId = process.env.LINE_GROUP_ID;
+
+  if (!token || !groupId) {
+    throw new Error("Missing LINE configuration for removal confirmation");
+  }
+
+  const currency = String(job?.currency || "THB").toUpperCase();
+  const price = Number(job?.price || 0);
+  const priceText =
+    price > 0
+      ? (currency === "THB"
+          ? `${price.toLocaleString("th-TH")} บาท`
+          : `$${price.toLocaleString("en-US")} ${currency}`)
+      : "-";
+
+  const text = [
+    "🔎 พบว่ารีวิวอาจถูกนำออกแล้ว — รอคนยืนยัน",
+    "",
+    `Customer: ${customer?.display_name || "-"}`,
+    `Business: ${job?.business_name || "-"}`,
+    `ราคา: ${priceText}`,
+    `Job ID: ${job?.id || "-"}`,
+    "",
+    "Review:",
+    reviewUrl || "-",
+    "",
+    `ตรวจพบเมื่อ: ${detectedAt || new Date().toISOString()}`,
+    `Provider reason: ${reason || "-"}`,
+    "",
+    "กรุณาเปิดลิงก์ตรวจสอบด้วยคน",
+    "",
+    "ถ้ารีวิวออกแล้ว พิมพ์:",
+    `ออกแล้ว ${job?.id || ""}`,
+    "",
+    "ถ้ารีวิวยังอยู่ พิมพ์:",
+    `ยังอยู่ ${job?.id || ""}`,
+    "",
+    "ระบบจะไม่เรียกเก็บเงินลูกค้าจนกว่าทีมจะยืนยันว่าออกแล้ว",
+  ].join("\n");
+
+  const response = await fetch(
+    "https://api.line.me/v2/bot/message/push",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        to: groupId,
+        messages: [{ type: "text", text }],
+      }),
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+
+  if (responseText) {
+    try { data = JSON.parse(responseText); } catch { data = {}; }
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `LINE removal confirm push failed: ${response.status} ${responseText}`
+    );
+  }
+
+  return {
+    ok: true,
+    messageId: data?.sentMessages?.[0]?.id
+      ? String(data.sentMessages[0].id)
+      : null,
+  };
+}
+
+async function callSheetControlInternally({ jobId, value }) {
+  const secret = process.env.SHEET_CONTROL_SECRET;
+
+  if (!secret) throw new Error("Missing SHEET_CONTROL_SECRET");
+
+  const response = await fetch(
+    `http://127.0.0.1:${PORT}/sheet-control`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        secret,
+        jobId,
+        action: "manual_action",
+        value,
+      }),
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok || data?.ok !== true) {
+    throw new Error(
+      data?.error || `Internal sheet-control failed ${response.status}: ${responseText}`
+    );
+  }
+
+  return data;
+}
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -5574,6 +6003,51 @@ const detectedMapUrl =
     message
   );
     
+
+
+// =========================================================
+// SAME REVIEW DUPLICATE GUARD
+// =========================================================
+if (detectedMapUrl) {
+  const existingSubmission =
+    await findExistingJobForSubmittedReviewUrl(
+      customer.id,
+      detectedMapUrl
+    );
+
+  if (existingSubmission?.job) {
+    const existingJob = existingSubmission.job;
+    const botReply = getExistingJobCustomerReply(customer, existingJob);
+    const suppressed = shouldSuppressDuplicateBotReply({
+      conversation,
+      botReply,
+    });
+
+    if (!suppressed) {
+      await saveMessage({
+        customerId: customer.id,
+        platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: botReply,
+      });
+
+      await updateLastBotMessage(customer.id, botReply);
+    }
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      jobId: existingJob.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      duplicateReviewSubmission: true,
+      existingJobStatus: existingJob.status,
+      botReply: suppressed ? null : botReply,
+      note: "Existing review job detected; duplicate submission suppressed.",
+    };
+  }
+}
 
 let classification =
   detectedMapUrl
@@ -11513,6 +11987,53 @@ if (/^\/manual\b/i.test(String(groupText || "").trim())) {
   continue;
 }
 
+
+// =========================================================
+// REVIEW REMOVAL HUMAN CONFIRMATION
+// =========================================================
+{
+  const removalCommand =
+    String(groupText || "")
+      .trim()
+      .match(
+        /^(ออกแล้ว|ยังอยู่|confirm_removed|review_still_visible)\s+([0-9a-fA-F-]{36})$/i
+      );
+
+  if (removalCommand) {
+    const command = String(removalCommand[1] || "").trim().toLowerCase();
+    const jobId = String(removalCommand[2] || "").trim();
+
+    try {
+      const value =
+        (command === "ออกแล้ว" || command === "confirm_removed")
+          ? "CONFIRM_REMOVED"
+          : "REVIEW_STILL_VISIBLE";
+
+      await callSheetControlInternally({ jobId, value });
+
+      await replyLineTextMessage(
+        event.replyToken,
+        value === "CONFIRM_REMOVED"
+          ? `✅ ยืนยันว่ารีวิวออกแล้ว\nJob: ${jobId}\nระบบส่งเข้า Flow เก็บเงินเรียบร้อยครับ`
+          : `✅ ยืนยันว่ารีวิวยังอยู่\nJob: ${jobId}\nระบบ Reset และจะตรวจต่อในรอบถัดไปครับ`
+      );
+    } catch (error) {
+      await replyLineTextMessage(
+        event.replyToken,
+        `❌ ดำเนินการไม่สำเร็จ\nJob: ${jobId}\n${error.message}`
+      );
+
+      console.error("GROUP REVIEW REMOVAL CONFIRMATION FAILED:", {
+        jobId,
+        command,
+        error: error.message,
+      });
+    }
+
+    continue;
+  }
+}
+
 // =========================================================
 // REACTIVATION TEAM DECISION
 // Reply: ส่งลูกค้า / ข้าม
@@ -13492,30 +14013,56 @@ if (
     );
 
   if (detectedMapUrl) {
+    let shouldSendFastAck = true;
 
-  // เริ่ม lock ลูกค้าคนนี้
-  mapProcessingUsers.add(
-    platformUserId
-  );
-
-  try {
+    try {
       const existingCustomer =
         await getCustomerByPlatformUserId(
           "line",
           platformUserId
         );
 
-      const ackText =
-        getCustomerText(
-          existingCustomer,
-          "ได้รับลิงก์แล้วครับ กำลังตรวจสอบรีวิวใน Google Map ให้อยู่ครับ",
-          "I've received the link. I'm checking the reviews on Google Maps now."
+      if (existingCustomer) {
+        const existingSubmission =
+          await findExistingJobForSubmittedReviewUrl(
+            existingCustomer.id,
+            detectedMapUrl
+          );
+
+        if (existingSubmission?.job) {
+          shouldSendFastAck = false;
+
+          console.log(
+            "FAST MAP ACK SUPPRESSED FOR EXISTING REVIEW:",
+            {
+              customerId:
+                existingCustomer.id,
+              jobId:
+                existingSubmission.job.id,
+              status:
+                existingSubmission.job.status,
+            }
+          );
+        }
+      }
+
+      if (shouldSendFastAck) {
+        mapProcessingUsers.add(
+          platformUserId
         );
 
-      await replyLineTextMessage(
-        replyToken,
-        ackText
-      );
+        const ackText =
+          getCustomerText(
+            existingCustomer,
+            "ได้รับลิงก์แล้วครับ กำลังตรวจสอบรีวิวใน Google Map ให้อยู่ครับ",
+            "I've received the link. I'm checking the reviews on Google Maps now."
+          );
+
+        await replyLineTextMessage(
+          replyToken,
+          ackText
+        );
+      }
 
     } catch (error) {
       console.error(
@@ -18193,6 +18740,12 @@ app.post("/sheet-control", async (req, res) => {
             review_removed_detected_at:
               null,
 
+            removal_team_alerted_at:
+              null,
+
+            removal_team_alert_message_id:
+              null,
+
             removed_at:
               null,
           }
@@ -18631,14 +19184,53 @@ app.post(
           ) >= 1
         ) {
 
+          if (!job.removal_team_alerted_at) {
+            const customer =
+              await getCustomerById(
+                job.customer_id
+              );
+
+            try {
+              const alertResult =
+                await sendRemovalConfirmationToLineGroup({
+                  job,
+                  customer,
+                  reviewUrl,
+                  reason:
+                    "RETRY_PENDING_HUMAN_CONFIRM",
+                  detectedAt:
+                    job.review_removed_detected_at ||
+                    new Date().toISOString(),
+                });
+
+              await updateJob(
+                job.id,
+                {
+                  removal_team_alerted_at:
+                    new Date().toISOString(),
+                  removal_team_alert_message_id:
+                    alertResult?.messageId || null,
+                }
+              );
+            } catch (error) {
+              console.error(
+                "REVIEW MONITOR TEAM ALERT RETRY FAILED:",
+                {
+                  jobId:
+                    job.id,
+                  error:
+                    error.message,
+                }
+              );
+            }
+          }
+
           results.push({
             jobId:
               job.id,
-
             result:
               "AWAITING_HUMAN_CONFIRM",
           });
-
 
           continue;
         }
@@ -18757,6 +19349,12 @@ app.post(
               review_removed_detected_at:
                 null,
 
+              removal_team_alerted_at:
+                null,
+
+              removal_team_alert_message_id:
+                null,
+
               removed_at:
                 null,
             }
@@ -18868,26 +19466,25 @@ app.post(
         if (customer) {
 
           try {
+            const alertResult =
+              await sendRemovalConfirmationToLineGroup({
+                job,
+                customer,
+                reviewUrl,
+                reason:
+                  lookupReason,
+                detectedAt,
+              });
 
-            const latestConversation =
-              await getConversationByCustomerId(
-                customer.id
-              );
-
-
-            await triggerHumanAttention({
-              customer,
-
-              conversation:
-                latestConversation,
-
-              message:
-                `Review URL: ${reviewUrl}`,
-
-              reason:
-                "REVIEW_REMOVAL_DETECTED_AWAITING_HUMAN_CONFIRM",
-            });
-
+            await updateJob(
+              job.id,
+              {
+                removal_team_alerted_at:
+                  new Date().toISOString(),
+                removal_team_alert_message_id:
+                  alertResult?.messageId || null,
+              }
+            );
 
           } catch (error) {
 
