@@ -2940,9 +2940,20 @@ async function startApprovedExistingCustomerBatch({
     );
   }
 
-
   // ========================================
-  // 4. Payment condition
+  // 4. START MESSAGE
+  //
+  // THB:
+  // - ภาษาไทย
+  // - QR Scan Payment
+  // - 1–20 วันทำการ
+  //
+  // USD:
+  // - English
+  // - Stripe
+  // - 1–14 days
+  //
+  // Batch รองรับ THB / USD / Mixed
   // ========================================
 
   const hasTHB =
@@ -2952,93 +2963,107 @@ async function startApprovedExistingCustomerBatch({
     usdBreakdown.totalReviews > 0;
 
 
-  let thaiPaymentCondition = "";
+  let botReply = "";
 
-  let englishPaymentCondition = "";
 
+  // ========================================
+  // THB ONLY
+  // ========================================
 
   if (
     hasTHB &&
-    hasUSD
+    !hasUSD
   ) {
-    thaiPaymentCondition =
-      "1. รายการ THB ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี และรายการ USD ชำระผ่าน Payment Link ที่ทางเราจัดส่งให้เท่านั้น";
-
-    englishPaymentCondition =
-      "1. THB payments must be made via the provided QR payment method; direct bank transfer is not accepted. USD payments must be made through the payment link provided by us.";
-
-  } else if (hasUSD) {
-    thaiPaymentCondition =
-      "1. ชำระผ่านช่องทาง Payment Link ที่ทางเราจัดส่งให้เท่านั้น";
-
-    englishPaymentCondition =
-      "1. Payment must be made through the payment link provided by us.";
-
-  } else {
-    thaiPaymentCondition =
-      "1. ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี";
-
-    englishPaymentCondition =
-      "1. Payment must be made via the provided QR payment method. Direct bank transfer is not accepted.";
-  }
-
-
-  // ========================================
-  // 5. ข้อความแจ้งลูกค้า
-  // ========================================
-
-  const botReply =
-    getCustomerText(
-      customer,
-
-      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ ✅
+    botReply =
+      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
 
 จำนวนทั้งหมด ${startedJobs.length} รีวิว
 
-รายละเอียดค่าดำเนินการ:
+รายละเอียดค่าบริการ:
 ${thaiPriceLines.join("\n")}
 
-ระยะเวลาดำเนินการโดยประมาณ 1–14 วันทำการ
-
-ระบบได้จัดงานเข้าคิวเรียบร้อยแล้ว และจะส่งเข้าทีมดำเนินการตามรอบถัดไปอัตโนมัติครับ
+ระยะเวลาดำเนินการโดยประมาณ: 1–20 วันทำการ
 
 🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
 
 📌 เงื่อนไขการให้บริการ:
-${thaiPaymentCondition}
-2. ชำระค่าบริการเฉพาะรีวิวที่ดำเนินการสำเร็จ และชำระทันทีหลังจากรีวิวถูกนำออก
-3. แต่ละรีวิวคิดค่าบริการตามราคาที่ระบุไว้ข้างต้น
-4. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวลบรีวิวให้ภายหลัง ค่าบริการเต็มจำนวนของรีวิวนั้นยังคงต้องชำระ
-5. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
-6. งานแต่ละรีวิวจะถือว่าสำเร็จสมบูรณ์เมื่อรีวิวนั้นถูกนำออกและลูกค้าชำระค่าบริการเรียบร้อยแล้ว
-7. ทางเราดำเนินการยื่นเรื่องให้แพลตฟอร์มตรวจสอบเพื่อนำรีวิวที่ระบุออกเท่านั้น ไม่มีส่วนเกี่ยวข้องกับปัญหาอื่น ๆ รวมถึงรีวิวอื่น ๆ ของลูกค้า`,
+1. ชำระผ่านแสกนจ่ายเท่านั้น ไม่รับผ่านโอนเข้าบัญชี
+2. ชำระค่าบริการทันทีหลังจากลบออก
+3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวยินดีลบรีวิวให้ภายหลัง (ค่าบริการเต็มจำนวนยังคงต้องชำระ)
+4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
+5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
+6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
 
-      `We have started processing your request. ✅
-
-Total: ${startedJobs.length} review(s)
-
-Service fee breakdown:
-${englishPriceLines.join("\n")}
-
-Estimated processing time: approximately 1–14 business days.
-
-Your reviews have been added to our processing queue and will be assigned to the appropriate team in the next dispatch round automatically.
-
-🔥 We will notify you as soon as each review has been successfully removed. 🔥
-
-📌 Terms of Service:
-${englishPaymentCondition}
-2. Payment is required only for successfully removed reviews and is due immediately after each successful removal.
-3. Each review will be charged according to the applicable service fee shown above.
-4. Once processing has started, the request cannot be cancelled or changed. If the reviewer later removes a review independently, the full service fee for that review will still apply.
-5. Service fees are non-refundable once processing has started.
-6. Each case is considered fully completed once that review has been removed and payment has been completed.
-7. Our service is limited to submitting the specified reviews to the platform for assessment and removal. We are not responsible for other issues or other reviews associated with the customer's listing.`
-    );
+หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
+  }
 
 
   // ========================================
-  // 6. Save outbound message
+  // USD ONLY
+  // ========================================
+
+  else if (
+    hasUSD &&
+    !hasTHB
+  ) {
+    botReply =
+      `We have already commenced the service.
+
+Total: ${startedJobs.length} review(s)
+
+Service Fee:
+${englishPriceLines.join("\n")}
+
+Duration: 1-14days(depends on GG system)
+
+🔥We will promptly notify the client upon successful completion🔥
+
+📌 Terms & Conditions:
+1. Payment is accepted via STRIPE(credit card).
+2. Full payment is required immediately upon completion of the service.
+3. The service has commenced, cancellation or changes are not permitted. (The full service fee remains payable)
+4. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
+
+Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
+  }
+
+
+  // ========================================
+  // MIXED THB + USD
+  //
+  // ปกติไม่ควรเกิดบ่อย
+  // แต่รองรับไว้เพื่อไม่ให้ระบบพัง
+  // ========================================
+
+  else {
+    botReply =
+      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
+
+จำนวนทั้งหมด ${startedJobs.length} รีวิว
+
+รายละเอียดค่าบริการ:
+${thaiPriceLines.join("\n")}
+
+ระยะเวลาดำเนินการโดยประมาณ:
+• THB: 1–20 วันทำการ
+• USD: 1–14 days (depends on GG system)
+
+🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
+
+📌 เงื่อนไขการให้บริการ:
+1. รายการ THB ชำระผ่านแสกนจ่ายเท่านั้น ไม่รับผ่านโอนเข้าบัญชี และรายการ USD ชำระผ่าน STRIPE (credit card)
+2. ชำระค่าบริการทันทีหลังจากลบออก
+3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวยินดีลบรีวิวให้ภายหลัง (ค่าบริการเต็มจำนวนยังคงต้องชำระ)
+4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
+5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
+6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
+
+หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
+  }
+
+
+  // ========================================
+  // 5. SAVE OUTBOUND MESSAGE
   // ========================================
 
   await saveMessage({
@@ -3073,6 +3098,11 @@ ${englishPaymentCondition}
   };
 }
 
+
+// =========================================================
+// START APPROVED SINGLE JOB
+// =========================================================
+
 async function startApprovedJob({
   customer,
   conversation,
@@ -3080,82 +3110,109 @@ async function startApprovedJob({
   platform,
   phone,
 }) {
-  
-const currency =
-  getCurrencyFromUnitPrice({
-    price:
-      job.price,
 
-    currency:
-      job.currency,
-  });
+  // ========================================
+  // PRICE / CURRENCY
+  // ========================================
 
+  const currency =
+    getCurrencyFromUnitPrice({
+      price:
+        job.price,
 
-const formattedPrice =
-  formatMoney(
-    Number(job.price || 0),
-    currency
-  );
+      currency:
+        job.currency,
+    });
 
 
-const priceText =
-  currency === "USD"
-    ? `$${formattedPrice} USD/review`
-    : `${formattedPrice} บาท/รีวิว`;
+  const formattedPrice =
+    formatMoney(
+      Number(
+        job.price || 0
+      ),
+      currency
+    );
 
 
-const thaiPaymentCondition =
-  currency === "USD"
-    ? "1. ชำระผ่านช่องทาง Payment Link ที่ทางเราจัดส่งให้เท่านั้น"
-    : "1. ชำระผ่านสแกนจ่ายเท่านั้น ไม่รับการโอนเข้าบัญชี";
+  // ========================================
+  // MESSAGE
+  //
+  // ราคาอิงจาก Job จริง
+  // ห้าม Hardcode 6500 / 199
+  // ========================================
+
+  let botReply = "";
 
 
-const englishPaymentCondition =
-  currency === "USD"
-    ? "1. Payment must be made through the payment link provided by us."
-    : "1. Payment must be made via the provided QR payment method. Direct bank transfer is not accepted.";
+  // ========================================
+  // THB
+  // ========================================
 
+  if (
+    currency === "THB"
+  ) {
+    const priceText =
+      `${formattedPrice} บาท/รีวิว`;
 
-const botReply =
-  getCustomerText(
-    customer,
+    botReply =
+      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
 
-    `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
+หากลบออก ${priceText}
 
-ค่าดำเนินการยื่นเรื่อง: ${priceText}
-
-ระยะเวลาดำเนินการโดยประมาณ 1–14 วันทำการ
+ระยะเวลาดำเนินการโดยประมาณ: 1–20 วันทำการ
 
 🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
 
 📌 เงื่อนไขการให้บริการ:
-${thaiPaymentCondition}
-2. ชำระค่าบริการทันทีหลังจากรีวิวถูกนำออก
-3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวลบรีวิวให้ภายหลัง ค่าบริการเต็มจำนวนยังคงต้องชำระ
+1. ชำระผ่านแสกนจ่ายเท่านั้น ไม่รับผ่านโอนเข้าบัญชี
+2. ชำระค่าบริการทันทีหลังจากลบออก
+3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวยินดีลบรีวิวให้ภายหลัง (ค่าบริการเต็มจำนวนยังคงต้องชำระ)
 4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
-5. งานจะถือว่าสำเร็จสมบูรณ์เมื่อรีวิวถูกนำออกและลูกค้าชำระค่าบริการเรียบร้อยแล้ว
-6. ทางเราดำเนินการยื่นเรื่องให้แพลตฟอร์มตรวจสอบเพื่อนำรีวิวออกเท่านั้น ไม่มีส่วนเกี่ยวข้องกับปัญหาอื่น ๆ รวมถึงรีวิวอื่น ๆ ของลูกค้า`,
+5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
+6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
 
-    `We have started processing your request.
+หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
+  }
 
-Service fee: ${priceText}
 
-Estimated processing time: approximately 1–14 business days.
+  // ========================================
+  // USD
+  // ========================================
 
-🔥 We will notify you as soon as the review has been successfully removed. 🔥
+  else {
+    const priceText =
+      `$${formattedPrice} (USD) per review`;
 
-📌 Terms of Service:
-${englishPaymentCondition}
-2. Payment is due immediately after the review has been removed.
-3. Once processing has started, the request cannot be cancelled or changed. If the reviewer later removes the review independently, the full service fee will still apply.
-4. The service fee is non-refundable once processing has started.
-5. The case is considered fully completed once the review has been removed and payment has been completed.
-6. Our service is limited to submitting the specified review to the platform for assessment and removal. We are not responsible for other issues or other reviews associated with the customer's listing.`
-  );
-  
+    botReply =
+      `We have already commenced the service.
 
- const queuedAt =
-  new Date().toISOString();
+Service Fee: ${priceText}
+
+Duration: 1-14days(depends on GG system)
+
+🔥We will promptly notify the client upon successful completion🔥
+
+📌 Terms & Conditions:
+1. Payment is accepted via STRIPE(credit card).
+2. Full payment is required immediately upon completion of the service.
+3. The service has commenced, cancellation or changes are not permitted. (The full service fee remains payable)
+4. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
+
+Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
+  }
+
+
+  // ========================================
+  // QUEUE TIME
+  // ========================================
+
+  const queuedAt =
+    new Date().toISOString();
+
+
+  // ========================================
+  // CONVERSATION → IN_PROGRESS
+  // ========================================
 
   await updateConversationState({
     customerId:
@@ -3172,27 +3229,32 @@ ${englishPaymentCondition}
   });
 
 
+  // ========================================
+  // JOB → QUEUED
+  // ========================================
+
   const updatedJob =
-  await updateJob(
-    job.id,
-    {
-      status:
-        "queued",
+    await updateJob(
+      job.id,
+      {
+        status:
+          "queued",
 
-      queued_at:
-        queuedAt,
+        queued_at:
+          queuedAt,
 
-      started_at:
-        null,
+        started_at:
+          null,
 
-      dispatched_at:
-        null,
-    }
-  );
-
-
+        dispatched_at:
+          null,
+      }
+    );
 
 
+  // ========================================
+  // SAVE OUTBOUND
+  // ========================================
 
   await saveMessage({
     customerId:
@@ -3218,12 +3280,13 @@ ${englishPaymentCondition}
 
 
   return {
-  updatedJob,
-  botReply,
-  queuedAt,
-};
+    updatedJob,
+    botReply,
+    queuedAt,
+  };
 }
 
+  
 function shouldSuppressDuplicateBotReply({
   conversation,
   botReply,
