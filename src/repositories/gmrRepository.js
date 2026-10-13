@@ -1991,6 +1991,11 @@ export async function setReactivationAlertTeamDecision({
       review_status:
         reviewStatus,
 
+      customer_contacted_at:
+        safeDecision === "send_to_customer"
+          ? now
+          : null,
+
       updated_at:
         now,
     })
@@ -4138,3 +4143,152 @@ export async function markDispatchStuckAlerted({
     }
   );
 }
+
+// =========================================================
+// WEBHOOK IDEMPOTENCY
+// =========================================================
+export async function claimWebhookEvent({
+  platform,
+  eventId,
+  payload = null,
+}) {
+  const safePlatform = String(platform || "").trim();
+  const safeEventId = String(eventId || "").trim();
+
+  if (!safePlatform || !safeEventId) {
+    return { claimed: true, skipped: true };
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_webhook_events")
+    .insert({
+      platform: safePlatform,
+      event_id: safeEventId,
+      payload,
+      received_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    if (error.code === "23505") {
+      return { claimed: false, duplicate: true };
+    }
+    throw error;
+  }
+
+  return { claimed: true, id: data?.id || null };
+}
+
+// =========================================================
+// UNKNOWN QUESTION / HUMAN ATTENTION DEDUPE
+// =========================================================
+export async function claimUnknownSalesQuestion({
+  customerId,
+  platform,
+  state,
+  message,
+  reason,
+  dedupeKey,
+}) {
+  if (!customerId || !dedupeKey) {
+    return { claimed: true, skipped: true };
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("gmr_sales_unknown_questions")
+    .insert({
+      customer_id: customerId,
+      platform: platform || null,
+      conversation_state: state || null,
+      message_text: message || null,
+      reason: reason || null,
+      dedupe_key: dedupeKey,
+      status: "open",
+      created_at: now,
+      updated_at: now,
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    if (error.code === "23505") {
+      return { claimed: false, duplicate: true };
+    }
+    throw error;
+  }
+
+  return { claimed: true, row: data };
+}
+
+export async function setUnknownSalesQuestionLineMessage({
+  questionId,
+  lineGroupMessageId,
+}) {
+  if (!questionId || !lineGroupMessageId) return null;
+  const { data, error } = await supabase
+    .from("gmr_sales_unknown_questions")
+    .update({
+      line_group_message_id: String(lineGroupMessageId),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", questionId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// =========================================================
+// REACTIVATION HELPERS
+// =========================================================
+export async function getPendingReactivationAlertByCustomerId(customerId) {
+  if (!customerId) return null;
+  const { data, error } = await supabase
+    .from("gmr_review_reactivation_alerts")
+    .select("*")
+    .eq("customer_id", customerId)
+    .eq("review_status", "sent_to_customer")
+    .order("customer_contacted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+export async function updateReactivationAlertCustomerResponse({
+  alertId,
+  response,
+  status,
+}) {
+  if (!alertId) throw new Error("Missing alertId");
+  const allowed = ["customer_interested", "customer_declined", "waiting_price", "price_sent"];
+  if (!allowed.includes(status)) throw new Error("Invalid reactivation customer status");
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("gmr_review_reactivation_alerts")
+    .update({
+      customer_response: response || null,
+      customer_responded_at: now,
+      review_status: status,
+      updated_at: now,
+    })
+    .eq("id", alertId)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getCustomerMapById(customerMapId) {
+  if (!customerMapId) return null;
+  const { data, error } = await supabase
+    .from("gmr_customer_maps")
+    .select("*")
+    .eq("id", customerMapId)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
