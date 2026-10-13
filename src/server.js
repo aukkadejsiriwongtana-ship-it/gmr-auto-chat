@@ -1365,12 +1365,44 @@ async function sendDepartmentDispatchToLineGroup({
     );
 
 
+  const thaiTime = (() => {
+    const date = new Date(sentAt);
+
+    if (Number.isNaN(date.getTime())) {
+      return sentAt;
+    }
+
+    const parts = new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        timeZone: "Asia/Bangkok",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }
+    ).formatToParts(date);
+
+    const get = (type) =>
+      parts.find(
+        (part) => part.type === type
+      )?.value || "";
+
+    return (
+      `${get("day")}/${get("month")}/${get("year")} ` +
+      `${get("hour")}:${get("minute")}`
+    );
+  })();
+
+
   const text = [
     `📦 รอบแจกงาน ${department.code || "-"}`,
     "",
     `แผนก: ${department.name || department.code || "-"}`,
     `จำนวน: ${jobs.length} รีวิว`,
-    `เวลา: ${sentAt}`,
+    `เวลา: ${thaiTime}`,
     "",
     "รายการ:",
     ...reviewLines,
