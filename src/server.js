@@ -1885,12 +1885,39 @@ await markDispatchStuckAlerted({
 
         // ========================================
         // 5. Google Sheet
+        // - sync JOBS_MASTER status
+        // - append department active sheet
         // ========================================
 
         for (
           const job of
           claimedJobs
         ) {
+          try {
+            await updateJobInGoogleSheet({
+              jobId:
+                job.id,
+
+              status:
+                "processing",
+            });
+
+          } catch (error) {
+            console.error(
+              "DISPATCH JOBS_MASTER UPDATE FAILED:",
+              {
+                jobId:
+                  job.id,
+
+                departmentCode:
+                  department.code,
+
+                error:
+                  error.message,
+              }
+            );
+          }
+
           try {
             const jobCustomer =
               await getCustomerById(
