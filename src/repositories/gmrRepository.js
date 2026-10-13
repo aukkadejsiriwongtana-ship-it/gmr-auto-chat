@@ -4292,3 +4292,279 @@ export async function getCustomerMapById(customerMapId) {
   return data || null;
 }
 
+
+// =========================================================
+// MANUAL CUSTOMER / SHEET EDITABLE SYNC HELPERS
+// =========================================================
+
+export async function findCustomerByPhoneOrEmail({
+  phone = null,
+  email = null,
+}) {
+  const safePhone = String(phone || "").trim();
+  const safeEmail = String(email || "").trim().toLowerCase();
+
+  if (!safePhone && !safeEmail) {
+    return null;
+  }
+
+  if (safePhone) {
+    const { data, error } = await supabase
+      .from("gmr_customers")
+      .select("*")
+      .eq("phone", safePhone)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (data) return data;
+  }
+
+  if (safeEmail) {
+    const { data, error } = await supabase
+      .from("gmr_customers")
+      .select("*")
+      .ilike("email", safeEmail)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (data) return data;
+  }
+
+  return null;
+}
+
+export async function createManualCustomer({
+  platformUserId,
+  displayName = null,
+  phone = null,
+  email = null,
+  language = "th",
+  platformAccount = "manual_internal",
+}) {
+  if (!platformUserId) {
+    throw new Error("Missing platformUserId in createManualCustomer");
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .insert({
+      platform: "manual",
+      platform_account: platformAccount,
+      platform_user_id: String(platformUserId),
+      display_name: displayName || null,
+      phone: phone || null,
+      email: email || null,
+      language: language === "en" ? "en" : "th",
+      customer_type: "new",
+      source: "manual",
+      customer_notify: false,
+      transport_metadata: {},
+      updated_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function updateCustomerEditableFields({
+  customerId,
+  displayName,
+  phone,
+  email,
+}) {
+  if (!customerId) {
+    throw new Error("Missing customerId in updateCustomerEditableFields");
+  }
+
+  const updates = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (displayName !== undefined) {
+    updates.display_name = String(displayName || "").trim() || null;
+  }
+  if (phone !== undefined) {
+    updates.phone = String(phone || "").trim() || null;
+  }
+  if (email !== undefined) {
+    updates.email = String(email || "").trim().toLowerCase() || null;
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .update(updates)
+    .eq("id", customerId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function updateJobEditableFields({
+  jobId,
+  businessName,
+  price,
+  currency,
+  reviewUrl,
+}) {
+  if (!jobId) {
+    throw new Error("Missing jobId in updateJobEditableFields");
+  }
+
+  const updates = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (businessName !== undefined) {
+    updates.business_name = String(businessName || "").trim() || null;
+  }
+
+  if (price !== undefined) {
+    const parsedPrice =
+      price === "" || price === null
+        ? null
+        : Number(String(price).replace(/,/g, ""));
+
+    if (
+      parsedPrice !== null &&
+      (!Number.isFinite(parsedPrice) || parsedPrice < 0)
+    ) {
+      throw new Error("Invalid price");
+    }
+
+    updates.price = parsedPrice;
+  }
+
+  if (currency !== undefined) {
+    const safeCurrency = String(currency || "")
+      .trim()
+      .toUpperCase();
+
+    updates.currency = safeCurrency || null;
+  }
+
+  if (reviewUrl !== undefined) {
+    updates.review_url = String(reviewUrl || "").trim() || null;
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_jobs")
+    .update(updates)
+    .eq("id", jobId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function logSheetSyncChange({
+  jobId = null,
+  customerId = null,
+  fieldName,
+  oldValue = null,
+  newValue = null,
+}) {
+  if (!fieldName) return null;
+
+  const { data, error } = await supabase
+    .from("gmr_sheet_sync_log")
+    .insert({
+      job_id: jobId || null,
+      customer_id: customerId || null,
+      field_name: fieldName,
+      old_value: oldValue === undefined ? null : String(oldValue ?? ""),
+      new_value: newValue === undefined ? null : String(newValue ?? ""),
+      source: "google_sheet",
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function upsertCustomerMapRecord({
+  customerId,
+  businessName = null,
+  placeId = null,
+  mapUrl = null,
+  sourceReviewUrl = null,
+}) {
+  if (!customerId) {
+    throw new Error("Missing customerId in upsertCustomerMapRecord");
+  }
+
+  const safePlaceId = String(placeId || "").trim();
+  const safeReviewUrl = String(sourceReviewUrl || "").trim();
+
+  if (!safePlaceId && !safeReviewUrl) {
+    return null;
+  }
+
+  const mapKey = safePlaceId
+    ? `place:${safePlaceId}`
+    : `review:${safeReviewUrl}`;
+
+  const payload = {
+    customer_id: customerId,
+    business_name: businessName || null,
+    place_id: safePlaceId || null,
+    map_url: mapUrl || null,
+    source_review_url: safeReviewUrl || null,
+    map_key: mapKey,
+    is_active: true,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from("gmr_customer_maps")
+    .upsert(payload, {
+      onConflict: "customer_id,map_key",
+      ignoreDuplicates: false,
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function updateCustomerTransportMetadata({
+  customerId,
+  platformAccount = null,
+  transportMetadata = {},
+}) {
+  if (!customerId) {
+    throw new Error("Missing customerId in updateCustomerTransportMetadata");
+  }
+
+  const updates = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (platformAccount !== undefined) {
+    updates.platform_account = platformAccount || null;
+  }
+
+  if (transportMetadata !== undefined) {
+    updates.transport_metadata = transportMetadata || {};
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .update(updates)
+    .eq("id", customerId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
