@@ -5,15 +5,48 @@ const GOOGLE_SHEETS_WEBHOOK_SECRET =
   process.env.GOOGLE_SHEETS_WEBHOOK_SECRET;
 
 if (!GOOGLE_SHEETS_WEBHOOK_URL) {
-  throw new Error(
-    "Missing GOOGLE_SHEETS_WEBHOOK_URL"
-  );
+  throw new Error("Missing GOOGLE_SHEETS_WEBHOOK_URL");
 }
 
 if (!GOOGLE_SHEETS_WEBHOOK_SECRET) {
-  throw new Error(
-    "Missing GOOGLE_SHEETS_WEBHOOK_SECRET"
+  throw new Error("Missing GOOGLE_SHEETS_WEBHOOK_SECRET");
+}
+
+async function postToSheet(payload) {
+  const response = await fetch(
+    GOOGLE_SHEETS_WEBHOOK_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        secret: GOOGLE_SHEETS_WEBHOOK_SECRET,
+        ...payload,
+      }),
+      redirect: "follow",
+    }
   );
+
+  const text = await response.text();
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Invalid Google Sheets response: ${text}`
+    );
+  }
+
+  if (!response.ok || data?.ok !== true) {
+    throw new Error(
+      data?.error ||
+      `Google Sheets webhook failed (${response.status})`
+    );
+  }
+
+  return data;
 }
 
 export async function appendJobToGoogleSheet({
@@ -29,11 +62,13 @@ export async function appendJobToGoogleSheet({
   startedAt = "",
   removedAt = "",
   paidAt = "",
+  email = "",
+  currency = "",
+  source = "",
+  customerNotify = "",
 }) {
-  const payload = {
-    secret:
-      GOOGLE_SHEETS_WEBHOOK_SECRET,
-
+  return postToSheet({
+    action: "append",
     jobId,
     customerId,
     customerName,
@@ -46,51 +81,11 @@ export async function appendJobToGoogleSheet({
     startedAt,
     removedAt,
     paidAt,
-  };
-
-  const response = await fetch(
-    GOOGLE_SHEETS_WEBHOOK_URL,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
-      body:
-        JSON.stringify(payload),
-      redirect: "follow",
-    }
-  );
-
-  const text =
-    await response.text();
-
-  let data;
-
-  try {
-    data =
-      JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Invalid Google Sheets response: ${text}`
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets webhook failed"
-    );
-  }
-
-  if (data.ok !== true) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets webhook returned failure"
-    );
-  }
-
-  return data;
+    email,
+    currency,
+    source,
+    customerNotify,
+  });
 }
 
 export async function appendDispatchJobToGoogleSheet({
@@ -121,15 +116,9 @@ export async function appendDispatchJobToGoogleSheet({
     );
   }
 
-  const payload = {
-    secret:
-      GOOGLE_SHEETS_WEBHOOK_SECRET,
-
-    action:
-      "dispatch_append",
-
+  return postToSheet({
+    action: "dispatch_append",
     sheetName,
-
     dispatchRoundId,
     sentAt,
     batchId,
@@ -143,62 +132,7 @@ export async function appendDispatchJobToGoogleSheet({
     removedAt,
     cycleCompleted,
     elapsedTime,
-  };
-
-  const response =
-    await fetch(
-      GOOGLE_SHEETS_WEBHOOK_URL,
-      {
-        method:
-          "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify(payload),
-
-        redirect:
-          "follow",
-      }
-    );
-
-
-  const text =
-    await response.text();
-
-
-  let data;
-
-  try {
-    data =
-      JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Invalid Google Sheets response: ${text}`
-    );
-  }
-
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets dispatch append failed"
-    );
-  }
-
-
-  if (data.ok !== true) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets dispatch append returned failure"
-    );
-  }
-
-
-  return data;
+  });
 }
 
 export async function updateJobInGoogleSheet({
@@ -206,65 +140,30 @@ export async function updateJobInGoogleSheet({
   status,
   removedAt = "",
   paidAt = "",
+  customerName,
+  phone,
+  businessName,
+  reviewUrl,
+  price,
+  email,
+  currency,
+  source,
+  customerNotify,
 }) {
-  const payload = {
-    secret:
-      GOOGLE_SHEETS_WEBHOOK_SECRET,
-
-    action:
-      "update",
-
+  return postToSheet({
+    action: "update",
     jobId,
-
     status,
-
     removedAt,
-
     paidAt,
-  };
-
-  const response = await fetch(
-    GOOGLE_SHEETS_WEBHOOK_URL,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type":
-          "application/json",
-      },
-      body:
-        JSON.stringify(payload),
-      redirect:
-        "follow",
-    }
-  );
-
-  const text =
-    await response.text();
-
-  let data;
-
-  try {
-    data =
-      JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Invalid Google Sheets response: ${text}`
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets update failed"
-    );
-  }
-
-  if (data.ok !== true) {
-    throw new Error(
-      data?.error ||
-      "Google Sheets update returned failure"
-    );
-  }
-
-  return data;
+    customerName,
+    phone,
+    businessName,
+    reviewUrl,
+    price,
+    email,
+    currency,
+    source,
+    customerNotify,
+  });
 }
