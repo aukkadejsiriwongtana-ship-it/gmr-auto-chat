@@ -1099,36 +1099,29 @@ async function sendRemovalConfirmationToLineGroup({
 
   const currency = String(job?.currency || "THB").toUpperCase();
   const price = Number(job?.price || 0);
+
   const priceText =
     price > 0
-      ? (currency === "THB"
-          ? `${price.toLocaleString("th-TH")} บาท`
-          : `$${price.toLocaleString("en-US")} ${currency}`)
+      ? (
+          currency === "THB"
+            ? `${price.toLocaleString("th-TH")} บาท`
+            : `$${price.toLocaleString("en-US")} ${currency}`
+        )
       : "-";
 
   const text = [
-    "🔎 พบว่ารีวิวอาจถูกนำออกแล้ว — รอคนยืนยัน",
+    "🔎 รีวิวออกแล้ว — รอยืนยัน",
     "",
     `Customer: ${customer?.display_name || "-"}`,
     `Business: ${job?.business_name || "-"}`,
     `ราคา: ${priceText}`,
-    `Job ID: ${job?.id || "-"}`,
     "",
-    "Review:",
+    "เปิดรีวิว:",
     reviewUrl || "-",
     "",
-    `ตรวจพบเมื่อ: ${detectedAt || new Date().toISOString()}`,
-    `Provider reason: ${reason || "-"}`,
-    "",
-    "กรุณาเปิดลิงก์ตรวจสอบด้วยคน",
-    "",
-    "ถ้ารีวิวออกแล้ว พิมพ์:",
-    `ออกแล้ว ${job?.id || ""}`,
-    "",
-    "ถ้ารีวิวยังอยู่ พิมพ์:",
-    `ยังอยู่ ${job?.id || ""}`,
-    "",
-    "ระบบจะไม่เรียกเก็บเงินลูกค้าจนกว่าทีมจะยืนยันว่าออกแล้ว",
+    "กด Reply ข้อความนี้ แล้วพิมพ์",
+    '✅ "อนุมัติ" = รีวิวออกแล้ว',
+    '❌ "ยังอยู่" = รีวิวยังแสดงอยู่',
   ].join("\n");
 
   const response = await fetch(
@@ -1150,7 +1143,11 @@ async function sendRemovalConfirmationToLineGroup({
   let data = {};
 
   if (responseText) {
-    try { data = JSON.parse(responseText); } catch { data = {}; }
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = {};
+    }
   }
 
   if (!response.ok) {
@@ -1159,11 +1156,20 @@ async function sendRemovalConfirmationToLineGroup({
     );
   }
 
+  const messageId =
+    data?.sentMessages?.[0]?.id
+      ? String(data.sentMessages[0].id)
+      : null;
+
+  if (!messageId) {
+    throw new Error(
+      "LINE removal confirmation push succeeded but no message ID was returned"
+    );
+  }
+
   return {
     ok: true,
-    messageId: data?.sentMessages?.[0]?.id
-      ? String(data.sentMessages[0].id)
-      : null,
+    messageId,
   };
 }
 
@@ -11989,7 +11995,79 @@ if (/^\/manual\b/i.test(String(groupText || "").trim())) {
 
 
 // =========================================================
-// REVIEW REMOVAL HUMAN CONFIRMATION
+// REVIEW REMOVAL HUMAN CONFIRMATION — REPLY MODE
+//
+// ทีมกด Reply ที่ข้อความแจ้งเตือน แล้วพิมพ์:
+//   อนุมัติ = ยืนยันว่ารีวิวออกแล้ว
+//   ยังอยู่  = รีวิวยังแสดงอยู่
+//
+// ไม่ต้องพิมพ์ Job ID / UUID
+// =========================================================
+if (
+  quotedMessageId &&
+  ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)
+) {
+  try {
+    const monitoringJobs =
+      await getJobsForReviewMonitoring();
+
+    const removalJob =
+      (monitoringJobs || []).find(
+        (item) =>
+          String(
+            item?.removal_team_alert_message_id || ""
+          ) === String(quotedMessageId)
+      );
+
+    if (removalJob) {
+      const value =
+        normalizedGroupText === "อนุมัติ"
+          ? "CONFIRM_REMOVED"
+          : "REVIEW_STILL_VISIBLE";
+
+      await callSheetControlInternally({
+        jobId: removalJob.id,
+        value,
+      });
+
+      await replyLineTextMessage(
+        event.replyToken,
+        value === "CONFIRM_REMOVED"
+          ? "✅ ยืนยันว่ารีวิวออกแล้ว ระบบดำเนินขั้นตอนถัดไปเรียบร้อยครับ"
+          : "✅ รับทราบครับ รีวิวนี้ยังอยู่ ระบบจะตรวจต่อในรอบถัดไป"
+      );
+
+      continue;
+    }
+
+    // ถ้า Reply คำว่าอนุมัติ/ยังอยู่ แต่ข้อความที่ Reply ไม่ใช่
+    // removal alert ให้ปล่อย handler อื่นทำงานต่อ
+    // เพื่อไม่ชน flow อื่นใน LINE group
+  } catch (error) {
+    console.error(
+      "GROUP REVIEW REMOVAL REPLY CONFIRMATION FAILED:",
+      {
+        quotedMessageId,
+        command: normalizedGroupText,
+        error: error.message,
+      }
+    );
+
+    await replyLineTextMessage(
+      event.replyToken,
+      `❌ ดำเนินการไม่สำเร็จ: ${error.message}`
+    );
+
+    continue;
+  }
+}
+
+
+// =========================================================
+// REVIEW REMOVAL HUMAN CONFIRMATION — LEGACY COMMAND MODE
+// รองรับคำสั่งเดิมชั่วคราว:
+// ออกแล้ว <JOB_ID>
+// ยังอยู่ <JOB_ID>
 // =========================================================
 {
   const removalCommand =
