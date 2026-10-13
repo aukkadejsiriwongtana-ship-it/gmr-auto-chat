@@ -6256,33 +6256,13 @@ try {
     }
   );
 
-  const botReply =
-    getCustomerText(
-      customer,
-      "ระบบ Google Map ตอบกลับชั่วคราวไม่ได้ครับ รบกวนส่งลิงก์เดิมอีกครั้งในอีกสักครู่นะครับ",
-      "Google Maps is temporarily unavailable. Please send the same link again in a moment."
-    );
-
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason:
+      "MAP_URL_SEARCH_TEMPORARILY_FAILED",
   });
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
 
   return {
     ok: true,
@@ -6299,7 +6279,14 @@ try {
     inputType:
       classification.type,
 
-    botReply,
+    botReply:
+      null,
+
+    salesAttention:
+      true,
+
+    softHandoff:
+      false,
 
     temporaryMapError:
       true,
@@ -6309,35 +6296,13 @@ try {
 
   if (!places.length) {
 
-   const botReply =
-  getCustomerText(
-    customer,
-    "ลิงก์นี้เข้าไม่ได้ครับ รบกวนแจ้งชื่อธุรกิจมาได้เลยครับ",
-    "We couldn't enter this Google Maps link. Please send me the business name instead."
-  );
-
-    await saveMessage({
-      customerId:
-        customer.id,
-
-      platform,
-
-      direction:
-        "outbound",
-
-      messageType:
-        "text",
-
-      messageText:
-        botReply,
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason:
+        "MAP_URL_NOT_RESOLVED",
     });
-
-
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
 
     return {
       ok:
@@ -6361,7 +6326,14 @@ try {
       placeFound:
         false,
 
-      botReply,
+      botReply:
+        null,
+
+      salesAttention:
+        true,
+
+      softHandoff:
+        false,
     };
   }
 
@@ -7467,79 +7439,13 @@ try {
     }
   );
 
-  const botReply =
-    getCustomerText(
-      customer,
-      "ระบบ Google Map ตอบกลับชั่วคราวไม่ได้ครับ รบกวนส่งชื่อธุรกิจหรือส่งข้อความเดิมอีกครั้งในอีกสักครู่นะครับ",
-      "Google Maps is temporarily unavailable. Please send the business name or the same message again in a moment."
-    );
-
-  await saveMessage({
-    customerId:
-      customer.id,
-
-    platform,
-
-    direction:
-      "outbound",
-
-    messageType:
-      "text",
-
-    messageText:
-      botReply,
-  });
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
-
-  return {
-    ok: true,
-
-    customerId:
-      customer.id,
-
-    stateBefore:
-      conversation.state,
-
-    stateAfter:
-      conversation.state,
-
-    inputType:
-      classification.type,
-
-    botReply,
-
-    temporaryMapError:
-      true,
-  };
-}
-
-  if (!places.length) {
-  const botReply =
-  getCustomerText(
+  await triggerHumanAttention({
     customer,
-    "ยังหา Google Map จากชื่อนี้ไม่เจอครับ รบกวนส่งชื่อธุรกิจให้ละเอียดขึ้น หรือส่งลิงก์ Google Map มาได้เลยครับ",
-    "I couldn't find the Google Maps listing from this business name. Please send the full business name or the Google Maps link."
-  );
-
-if (
-  shouldSuppressDuplicateBotReply({
     conversation,
-    botReply,
-  })
-) {
-  console.log(
-    "DUPLICATE BOT REPLY SUPPRESSED:",
-    {
-      customerId:
-        customer.id,
-
-      botReply,
-    }
-  );
+    message,
+    reason:
+      "BUSINESS_NAME_SEARCH_TEMPORARILY_FAILED",
+  });
 
   return {
     ok: true,
@@ -7559,61 +7465,56 @@ if (
     botReply:
       null,
 
-    placeFound:
+    salesAttention:
+      true,
+
+    softHandoff:
       false,
 
-    duplicateSuppressed:
+    temporaryMapError:
       true,
   };
 }
 
-    
-  await saveMessage({
-    customerId:
-      customer.id,
+  if (!places.length) {
 
-    platform,
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason:
+        "BUSINESS_NAME_NOT_FOUND_OR_UNSCRIPTED_MESSAGE",
+    });
 
-    direction:
-      "outbound",
+    return {
+      ok:
+        true,
 
-    messageType:
-      "text",
+      customerId:
+        customer.id,
 
-    messageText:
-      botReply,
-  });
+      stateBefore:
+        conversation.state,
 
+      stateAfter:
+        conversation.state,
 
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
+      inputType:
+        classification.type,
 
+      botReply:
+        null,
 
-  return {
-    ok:
-      true,
+      placeFound:
+        false,
 
-    customerId:
-      customer.id,
+      salesAttention:
+        true,
 
-    stateBefore:
-      conversation.state,
-
-    stateAfter:
-      conversation.state,
-
-    inputType:
-      classification.type,
-
-    botReply,
-
-    placeFound:
-      false,
-  };
-}
-
+      softHandoff:
+        false,
+    };
+  }
 
   // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
 const place = places[0];
