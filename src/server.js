@@ -5657,6 +5657,62 @@ if (
     GMR_STATES.WAITING_MAP
   ) {
 
+    if (
+  conversation.state ===
+  GMR_STATES.WAITING_MAP
+) {
+
+  if (
+    isServiceInquiryMessage(message)
+  ) {
+    const template =
+      await getTemplate(
+        "welcome",
+        customer.language || "th"
+      );
+
+    if (!template) {
+      throw new Error(
+        "Welcome template not found"
+      );
+    }
+
+    const botReply =
+      template.content;
+
+    await saveMessage({
+      customerId:
+        customer.id,
+      platform,
+      direction:
+        "outbound",
+      messageType:
+        "text",
+      messageText:
+        botReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      botReply
+    );
+
+    return {
+      ok: true,
+      customerId:
+        customer.id,
+      stateBefore:
+        conversation.state,
+      stateAfter:
+        conversation.state,
+      serviceInquiry:
+        true,
+      botReply,
+    };
+  }
+
+  // logic WAITING_MAP เดิมต่อจากนี้
+
 // =========================================================
 // EXISTING CUSTOMER
 // CONFIRM ALL BATCH
