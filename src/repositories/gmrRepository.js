@@ -4552,6 +4552,42 @@ export async function findCustomersByPlatformAndDisplayName({
     return [];
   }
 
+
+  // =========================================
+  // NORMALIZE DISPLAY NAME
+  //
+  // ตัวอย่าง:
+  // "<Robert Marchese"
+  // "Robert Marchese"
+  // " Robert Marchese "
+  //
+  // → robert marchese
+  // =========================================
+
+  const normalizeName = (value) =>
+    String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(
+        /^[^a-z0-9\u0E00-\u0E7F]+/gi,
+        ""
+      )
+      .replace(
+        /[^a-z0-9\u0E00-\u0E7F]+$/gi,
+        ""
+      )
+      .replace(/\s+/g, " ")
+      .trim();
+
+
+  const normalizedTarget =
+    normalizeName(
+      safeDisplayName
+    );
+
+
+  // ใช้ contains เพื่อดึง candidate ก่อน
+  // แล้ว filter ด้วย normalized exact name อีกชั้น
   const {
     data,
     error,
@@ -4564,7 +4600,7 @@ export async function findCustomersByPlatformAndDisplayName({
     )
     .ilike(
       "display_name",
-      safeDisplayName
+      `%${safeDisplayName}%`
     )
     .order(
       "created_at",
@@ -4573,14 +4609,21 @@ export async function findCustomersByPlatformAndDisplayName({
       }
     );
 
+
   if (error) {
     throw error;
   }
 
-  return data || [];
+
+  return (
+    data || []
+  ).filter(
+    (customer) =>
+      normalizeName(
+        customer.display_name
+      ) === normalizedTarget
+  );
 }
-
-
 // =========================================================
 // MANUAL CUSTOMER / SHEET EDITABLE SYNC HELPERS
 // =========================================================
