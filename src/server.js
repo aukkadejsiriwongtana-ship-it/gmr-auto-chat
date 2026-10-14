@@ -20613,14 +20613,55 @@ app.post(
 // =========================================================
 // MONTHLY OUTREACH — SAFE PREVIEW ENDPOINT
 //
-// ตอนนี้เป็น PREVIEW ONLY
-// ยังไม่ส่งข้อความหาลูกค้าจริง
-// =========================================================
-
-
 // =========================================================
 // MONTHLY OUTREACH — REAL SEND
 // =========================================================
+
+function isLastDayOfMonthBangkok() {
+  const now = new Date();
+
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-CA",
+      {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }
+    ).formatToParts(now);
+
+  const year =
+    Number(
+      parts.find(
+        (part) => part.type === "year"
+      )?.value
+    );
+
+  const month =
+    Number(
+      parts.find(
+        (part) => part.type === "month"
+      )?.value
+    );
+
+  const day =
+    Number(
+      parts.find(
+        (part) => part.type === "day"
+      )?.value
+    );
+
+  const lastDay =
+    new Date(
+      year,
+      month,
+      0
+    ).getDate();
+
+  return day === lastDay;
+}
+
 
 app.post(
   "/monthly-outreach/run",
@@ -20643,6 +20684,17 @@ app.post(
         });
       }
 
+if (
+  req.body?.scheduled === true &&
+  !isLastDayOfMonthBangkok()
+) {
+  return res.json({
+    ok: true,
+    skipped: true,
+    reason: "not_last_day_of_month",
+  });
+}
+      
       const result =
         await runMonthlyExistingCustomerOutreach();
 
