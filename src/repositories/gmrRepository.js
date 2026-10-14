@@ -4602,7 +4602,9 @@ export async function getMonthlyOutreachCandidates({
     error: paymentsError,
   } = await supabase
     .from("gmr_payments")
-    .select("job_id, verified_at, created_at")
+    .select(
+      "job_id, verified_at, created_at"
+    )
     .eq(
       "payment_verified",
       true
@@ -4628,79 +4630,21 @@ export async function getMonthlyOutreachCandidates({
     ...new Set(
       verifiedPayments
         .map(
-          (item) =>
-            item.job_id
+          (payment) =>
+            payment.job_id
         )
         .filter(Boolean)
     ),
   ];
 
-// =======================================================
-// COOLDOWN 30 DAYS AFTER LATEST VERIFIED PAYMENT
-// ลูกค้าที่เพิ่งชำระเงินภายใน 30 วัน
-// ยังไม่ควรได้รับ Monthly Outreach
-// =======================================================
-
-const paymentCooldownCutoff =
-  Date.now() -
-  30 * 24 * 60 * 60 * 1000;
-
-const recentPaidJobIds =
-  new Set(
-    (verifiedPayments || [])
-      .filter(
-        (payment) => {
-          const paidAt =
-            payment?.verified_at ||
-            payment?.created_at;
-
-          if (!paidAt) {
-            return false;
-          }
-
-          const paidTime =
-            new Date(
-              paidAt
-            ).getTime();
-
-          return (
-            Number.isFinite(
-              paidTime
-            ) &&
-            paidTime >=
-              paymentCooldownCutoff
-          );
-        }
-      )
-      .map(
-        (payment) =>
-          payment.job_id
-      )
-      .filter(Boolean)
-  );
-
-const recentPaidCustomerIds =
-  new Set(
-    (paidJobs || [])
-      .filter(
-        (job) =>
-          recentPaidJobIds.has(
-            job.id
-          )
-      )
-      .map(
-        (job) =>
-          job.customer_id
-      )
-      .filter(Boolean)
-  );
-  
-  if (paidJobIds.length === 0) {
+  if (
+    paidJobIds.length === 0
+  ) {
     return [];
   }
 
   // =======================================================
-  // 2. หา CUSTOMER ที่เคยจ่ายจริง
+  // 2. หา CUSTOMER ที่เคยจ่ายเงินจริง
   // =======================================================
 
   const {
@@ -4738,7 +4682,68 @@ const recentPaidCustomerIds =
   }
 
   // =======================================================
-  // 3. ตัดลูกค้าที่มีงานค้าง / งานกำลังดำเนินการ
+  // 3. COOLDOWN 30 DAYS AFTER VERIFIED PAYMENT
+  //
+  // ถ้าลูกค้าเพิ่งชำระเงินจริงภายใน 30 วัน
+  // ยังไม่ส่ง Monthly Outreach
+  // =======================================================
+
+  const paymentCooldownCutoff =
+    Date.now() -
+    30 * 24 * 60 * 60 * 1000;
+
+  const recentPaidJobIds =
+    new Set(
+      (verifiedPayments || [])
+        .filter(
+          (payment) => {
+            const paidAt =
+              payment?.verified_at ||
+              payment?.created_at;
+
+            if (!paidAt) {
+              return false;
+            }
+
+            const paidTime =
+              new Date(
+                paidAt
+              ).getTime();
+
+            return (
+              Number.isFinite(
+                paidTime
+              ) &&
+              paidTime >=
+                paymentCooldownCutoff
+            );
+          }
+        )
+        .map(
+          (payment) =>
+            payment.job_id
+        )
+        .filter(Boolean)
+    );
+
+  const recentPaidCustomerIds =
+    new Set(
+      (paidJobs || [])
+        .filter(
+          (job) =>
+            recentPaidJobIds.has(
+              job.id
+            )
+        )
+        .map(
+          (job) =>
+            job.customer_id
+        )
+        .filter(Boolean)
+    );
+
+  // =======================================================
+  // 4. ตัดลูกค้าที่มีงานค้าง / งานกำลังดำเนินการ
   // =======================================================
 
   const activeStatuses = [
@@ -4792,7 +4797,7 @@ const recentPaidCustomerIds =
     );
 
   // =======================================================
-  // 4. เช็กว่าเดือนนี้ส่งหาใครไปแล้ว
+  // 5. เดือนนี้เคยส่ง / เคย claim แล้วหรือยัง
   // =======================================================
 
   const {
@@ -4825,7 +4830,7 @@ const recentPaidCustomerIds =
     );
 
   // =======================================================
-  // 5. ดึงข้อมูล CUSTOMER
+  // 6. CUSTOMER DATA
   // =======================================================
 
   const {
@@ -4846,7 +4851,7 @@ const recentPaidCustomerIds =
   }
 
   // =======================================================
-  // 6. FILTER FINAL
+  // 7. FINAL FILTER
   // =======================================================
 
   return (
@@ -4858,7 +4863,7 @@ const recentPaidCustomerIds =
         return false;
       }
 
-      // มีงานกำลังดำเนินการ
+      // มีงานค้าง/กำลังดำเนินการ
       if (
         activeCustomerIds.has(
           customer.id
@@ -4868,15 +4873,15 @@ const recentPaidCustomerIds =
       }
 
       // เพิ่งชำระเงินภายใน 30 วัน
-if (
-  recentPaidCustomerIds.has(
-    customer.id
-  )
-) {
-  return false;
-}
+      if (
+        recentPaidCustomerIds.has(
+          customer.id
+        )
+      ) {
+        return false;
+      }
 
-      // เดือนนี้เคยส่ง/เคย claim แล้ว
+      // เดือนนี้เคยส่งหรือ claim แล้ว
       if (
         alreadyProcessedCustomerIds.has(
           customer.id
@@ -4897,7 +4902,6 @@ if (
     }
   );
 }
-
 
 // =========================================================
 // CLAIM MONTHLY OUTREACH
