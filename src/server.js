@@ -20617,6 +20617,11 @@ app.post(
 // ยังไม่ส่งข้อความหาลูกค้าจริง
 // =========================================================
 
+
+// =========================================================
+// MONTHLY OUTREACH — REAL SEND
+// =========================================================
+
 app.post(
   "/monthly-outreach/run",
   async (req, res) => {
@@ -20638,76 +20643,18 @@ app.post(
         });
       }
 
-      // หาเดือนปัจจุบันตามเวลาไทย
-      const parts =
-        new Intl.DateTimeFormat(
-          "en-CA",
-          {
-            timeZone:
-              "Asia/Bangkok",
-
-            year:
-              "numeric",
-
-            month:
-              "2-digit",
-          }
-        ).formatToParts(
-          new Date()
-        );
-
-      const year =
-        parts.find(
-          (item) =>
-            item.type === "year"
-        )?.value;
-
-      const month =
-        parts.find(
-          (item) =>
-            item.type === "month"
-        )?.value;
-
-      const outreachMonth =
-        `${year}-${month}`;
-
-      const candidates =
-        await getMonthlyOutreachCandidates({
-          outreachMonth,
-        });
+      const result =
+        await runMonthlyExistingCustomerOutreach();
 
       return res.json({
-        ok: true,
-
+        ...result,
         mode:
-          "PREVIEW_ONLY",
-
-        outreachMonth,
-
-        totalCandidates:
-          candidates.length,
-
-        customers:
-          candidates.map(
-            (customer) => ({
-              id:
-                customer.id,
-
-              name:
-                customer.display_name,
-
-              platform:
-                customer.platform,
-
-              language:
-                customer.language,
-            })
-          ),
+          "REAL_SEND",
       });
 
     } catch (error) {
       console.error(
-        "MONTHLY OUTREACH PREVIEW ERROR:",
+        "MONTHLY OUTREACH RUN ERROR:",
         error
       );
 
@@ -20720,6 +20667,7 @@ app.post(
     }
   }
 );
+  
 
 app.listen(PORT, () => {
   console.log(
