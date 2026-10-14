@@ -122,6 +122,10 @@ updateJobEditableFields,
 logSheetSyncChange,
 upsertCustomerMapRecord,
 updateCustomerTransportMetadata,
+
+getMonthlyOutreachCandidates,
+claimMonthlyOutreach,
+completeMonthlyOutreach,
   
 } from "./repositories/gmrRepository.js";
 
