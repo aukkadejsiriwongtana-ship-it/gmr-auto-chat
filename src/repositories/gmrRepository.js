@@ -2829,6 +2829,7 @@ export async function createLegacyCustomerFromSheet({
   legacyCustomerId = null,
   displayName,
   businessName = null,
+  mapUrl = null,
   phone = null,
   email = null,
 
@@ -2841,7 +2842,7 @@ export async function createLegacyCustomerFromSheet({
   hasVerifiedPayment = false,
   note = null,
 }) {
-  
+
   const normalizedDisplayName =
     String(displayName || "").trim();
 
@@ -2851,48 +2852,99 @@ export async function createLegacyCustomerFromSheet({
     );
   }
 
-// -------------------------------------------------------
-// ถ้ามี legacy_customer_id แล้ว
-// ใช้ ID เป็นตัวอ้างอิงหลัก
-// ไม่สร้าง record ใหม่
-// -------------------------------------------------------
+  const normalizedMapUrl =
+    String(mapUrl || "").trim() || null;
 
-const normalizedLegacyCustomerId =
-  String(
-    legacyCustomerId || ""
-  ).trim();
 
-if (normalizedLegacyCustomerId) {
-  const {
-    data: existingById,
-    error: existingByIdError,
-  } =
-    await supabase
-      .from("gmr_legacy_customers")
-      .select("*")
-      .eq(
-        "id",
-        normalizedLegacyCustomerId
-      )
-      .maybeSingle();
+  // -------------------------------------------------------
+  // ถ้ามี legacy_customer_id แล้ว
+  // ใช้ ID เป็นตัวอ้างอิงหลัก
+  //
+  // ถ้า Sheet มี map_url ใหม่
+  // ให้อัปเดต record เดิมด้วย
+  // -------------------------------------------------------
 
-  if (existingByIdError) {
-    throw existingByIdError;
+  const normalizedLegacyCustomerId =
+    String(
+      legacyCustomerId || ""
+    ).trim();
+
+  if (normalizedLegacyCustomerId) {
+
+    const {
+      data: existingById,
+      error: existingByIdError,
+    } =
+      await supabase
+        .from("gmr_legacy_customers")
+        .select("*")
+        .eq(
+          "id",
+          normalizedLegacyCustomerId
+        )
+        .maybeSingle();
+
+    if (existingByIdError) {
+      throw existingByIdError;
+    }
+
+    if (!existingById) {
+      throw new Error(
+        `Legacy customer not found: ${normalizedLegacyCustomerId}`
+      );
+    }
+
+
+    let customer =
+      existingById;
+
+
+    // ========================================
+    // UPDATE MAP URL ของ record เดิม
+    // ========================================
+
+    if (
+      normalizedMapUrl &&
+      normalizedMapUrl !==
+        String(
+          existingById.map_url || ""
+        ).trim()
+    ) {
+
+      const {
+        data: updatedCustomer,
+        error: updateError,
+      } =
+        await supabase
+          .from("gmr_legacy_customers")
+          .update({
+            map_url:
+              normalizedMapUrl,
+          })
+          .eq(
+            "id",
+            normalizedLegacyCustomerId
+          )
+          .select()
+          .single();
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      customer =
+        updatedCustomer;
+    }
+
+
+    return {
+      created: false,
+      duplicate: true,
+      customer,
+    };
   }
 
-  if (!existingById) {
-    throw new Error(
-      `Legacy customer not found: ${normalizedLegacyCustomerId}`
-    );
-  }
 
-  return {
-    created: false,
-    duplicate: true,
-    customer:
-      existingById,
-  };
-}
   // -------------------------------------------------------
   // กันกด Import ซ้ำ
   // -------------------------------------------------------
@@ -2928,14 +2980,15 @@ if (normalizedLegacyCustomerId) {
   const {
     data: existingRows,
     error: existingError,
-  } = await existingQuery
-    .order(
-      "created_at",
-      {
-        ascending: false,
-      }
-    )
-    .limit(1);
+  } =
+    await existingQuery
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      )
+      .limit(1);
 
 
   if (existingError) {
@@ -2947,11 +3000,54 @@ if (normalizedLegacyCustomerId) {
     Array.isArray(existingRows) &&
     existingRows.length > 0
   ) {
+
+    let customer =
+      existingRows[0];
+
+
+    // ========================================
+    // DUPLICATE แต่มี map_url ใหม่
+    // → update record เดิม
+    // ========================================
+
+    if (
+      normalizedMapUrl &&
+      normalizedMapUrl !==
+        String(
+          customer.map_url || ""
+        ).trim()
+    ) {
+
+      const {
+        data: updatedCustomer,
+        error: updateError,
+      } =
+        await supabase
+          .from("gmr_legacy_customers")
+          .update({
+            map_url:
+              normalizedMapUrl,
+          })
+          .eq(
+            "id",
+            customer.id
+          )
+          .select()
+          .single();
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      customer =
+        updatedCustomer;
+    }
+
+
     return {
       created: false,
       duplicate: true,
-      customer:
-        existingRows[0],
+      customer,
     };
   }
 
@@ -2985,8 +3081,13 @@ if (normalizedLegacyCustomerId) {
 
         business_name:
           businessName
-            ? String(businessName).trim()
+            ? String(
+                businessName
+              ).trim()
             : null,
+
+        map_url:
+          normalizedMapUrl,
 
         phone:
           phone
@@ -3003,11 +3104,14 @@ if (normalizedLegacyCustomerId) {
           newReviewRate === undefined ||
           newReviewRate === ""
             ? null
-            : Number(newReviewRate),
+            : Number(
+                newReviewRate
+              ),
 
         new_review_currency:
           String(
-            newReviewCurrency || "THB"
+            newReviewCurrency ||
+              "THB"
           )
             .trim()
             .toUpperCase(),
@@ -3017,17 +3121,21 @@ if (normalizedLegacyCustomerId) {
           oldReviewRate === undefined ||
           oldReviewRate === ""
             ? null
-            : Number(oldReviewRate),
+            : Number(
+                oldReviewRate
+              ),
 
         old_review_currency:
           String(
-            oldReviewCurrency || "THB"
+            oldReviewCurrency ||
+              "THB"
           )
             .trim()
             .toUpperCase(),
 
         has_verified_payment:
-          hasVerifiedPayment === true,
+          hasVerifiedPayment ===
+          true,
 
         note:
           note
@@ -3053,7 +3161,6 @@ if (normalizedLegacyCustomerId) {
       data,
   };
 }
-
 export async function getPendingLegacyCustomersByDisplayName(
   displayName,
   platform = null,
