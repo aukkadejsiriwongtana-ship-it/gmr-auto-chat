@@ -2960,6 +2960,157 @@ async function sendReactivationAlertToLineGroup({
   };
 }
 
+async function sendLegacyAutoMatchAmbiguousToLine({
+  legacyCustomer,
+  customers = [],
+}) {
+  const token =
+    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+
+  const groupId =
+    process.env.LINE_GROUP_ID;
+
+
+  if (!token || !groupId) {
+    console.error(
+      "LEGACY AMBIGUOUS ALERT FAILED: Missing LINE config"
+    );
+
+    return {
+      sent: false,
+    };
+  }
+
+
+  const candidateText =
+    customers
+      .map(
+        (customer, index) =>
+          `${index + 1}. ${
+            customer.display_name ||
+            "-"
+          }
+ID: ${
+            customer.id
+          }
+Platform User ID: ${
+            customer.platform_user_id ||
+            "-"
+          }`
+      )
+      .join("\n\n");
+
+
+  const text = [
+    "⚠️ Legacy Customer พบชื่อซ้ำ",
+    "",
+    `Legacy Name: ${
+      legacyCustomer?.display_name ||
+      "-"
+    }`,
+    `Business: ${
+      legacyCustomer?.business_name ||
+      "-"
+    }`,
+    `Platform: ${
+      legacyCustomer?.platform ||
+      "-"
+    }`,
+    "",
+    `พบ Customer ตรงกัน ${customers.length} ราย`,
+    "",
+    candidateText,
+    "",
+    "ระบบยังไม่ Match อัตโนมัติ",
+    "กรุณาตรวจสอบว่าเป็น Account ใดก่อนครับ",
+  ].join("\n");
+
+
+  try {
+
+    const response =
+      await fetch(
+        "https://api.line.me/v2/bot/message/push",
+        {
+          method: "POST",
+
+          headers: {
+            Authorization:
+              `Bearer ${token}`,
+
+            "Content-Type":
+              "application/json",
+          },
+
+          body:
+            JSON.stringify({
+              to:
+                groupId,
+
+              messages: [
+                {
+                  type:
+                    "text",
+
+                  text,
+                },
+              ],
+            }),
+        }
+      );
+
+
+    if (!response.ok) {
+
+      const errorText =
+        await response.text();
+
+      throw new Error(
+        `LINE push failed: ${response.status} ${errorText}`
+      );
+    }
+
+
+    console.log(
+      "LEGACY AUTO MATCH AMBIGUOUS ALERT SENT:",
+      {
+        legacyCustomerId:
+          legacyCustomer?.id ||
+          null,
+
+        matchCount:
+          customers.length,
+      }
+    );
+
+
+    return {
+      sent: true,
+    };
+
+
+  } catch (error) {
+
+    console.error(
+      "LEGACY AUTO MATCH AMBIGUOUS ALERT FAILED:",
+      {
+        legacyCustomerId:
+          legacyCustomer?.id ||
+          null,
+
+        error:
+          error?.message ||
+          String(error),
+      }
+    );
+
+
+    return {
+      sent: false,
+    };
+  }
+}
+
 // =========================================================
 // LEGACY CUSTOMER MATCH REQUEST
 //
@@ -19302,6 +19453,14 @@ if (alreadyMatchedCustomerId) {
       autoMatchStatus =
         "ambiguous";
 
+await sendLegacyAutoMatchAmbiguousToLine({
+  legacyCustomer:
+    importedLegacyForMatch,
+
+  customers:
+    customerMatches,
+});
+      
       console.warn(
         "LEGACY AUTO MATCH AMBIGUOUS:",
         {
