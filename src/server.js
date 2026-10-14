@@ -19960,7 +19960,14 @@ if (
   }
 }
           
-      results.push({
+     const finalLegacyCustomer =
+  autoMatchedLegacy ||
+  importedLegacy ||
+  result.customer ||
+  null;
+
+
+results.push({
   row:
     i + 2,
 
@@ -19974,28 +19981,32 @@ if (
     result.duplicate,
 
   legacyCustomerId:
-    result.customer?.id || null,
+    finalLegacyCustomer?.id ||
+    null,
 
   displayName:
-    result.customer
+    finalLegacyCustomer
       ?.display_name ||
     item.displayName ||
     null,
 
   matchStatus:
-    result.customer
+    finalLegacyCustomer
       ?.match_status ||
     null,
 
   matchedCustomerId:
-    result.customer
+    finalLegacyCustomer
       ?.matched_customer_id ||
     null,
 
   matchedAt:
-    result.customer
+    finalLegacyCustomer
       ?.matched_at ||
     null,
+
+  autoMatchStatus:
+    autoMatchStatus,
 });
           
 
