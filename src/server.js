@@ -19360,6 +19360,490 @@ if (alreadyMatchedCustomerId) {
     "unknown_status";
 }
 
+  // ========================================================
+// COMPLETE LEGACY AUTO MATCH
+//
+// claimed
+// → ตรวจ verified payment
+// → สร้าง historical NEW/OLD jobs
+// → สร้าง verified payment
+// → mark Legacy = matched
+//
+// Resume-safe:
+// ใช้ legacy_source_id + review_case กันงานซ้ำ
+// ========================================================
+
+let autoMatchedLegacy =
+  null;
+
+if (
+  autoMatchStatus === "claimed" &&
+  autoMatchClaim &&
+  autoMatchCustomer
+) {
+
+  try {
+
+    // ====================================================
+    // SAFETY:
+    // Legacy ต้องยืนยันว่าเคยจ่ายเงินจริง
+    // ====================================================
+
+    if (
+      autoMatchClaim.has_verified_payment !== true
+    ) {
+
+      await rollbackLegacyCustomerAutoMatch(
+        autoMatchClaim.id
+      );
+
+      autoMatchStatus =
+        "payment_unverified";
+
+      console.warn(
+        "LEGACY AUTO MATCH BLOCKED: PAYMENT NOT VERIFIED",
+        {
+          legacyCustomerId:
+            autoMatchClaim.id,
+
+          customerId:
+            autoMatchCustomer.id,
+        }
+      );
+
+    } else {
+
+      const verifiedAt =
+        new Date().toISOString();
+
+      const importedJobs = [];
+
+
+      // ==================================================
+      // NEW REVIEW HISTORY
+      // ==================================================
+
+      const newReviewRate =
+        Number(
+          autoMatchClaim
+            .new_review_rate ||
+          0
+        );
+
+
+      if (
+        Number.isFinite(
+          newReviewRate
+        ) &&
+        newReviewRate > 0
+      ) {
+
+        const newCurrency =
+          String(
+            autoMatchClaim
+              .new_review_currency ||
+            "THB"
+          ).toUpperCase();
+
+
+        let historicalNewJob =
+          await getLegacyImportedJob({
+            legacySourceId:
+              autoMatchClaim.id,
+
+            reviewCase:
+              "legacy_import_new",
+          });
+
+
+        if (!historicalNewJob) {
+
+          historicalNewJob =
+            await createJob({
+              customerId:
+                autoMatchCustomer.id,
+
+              businessName:
+                autoMatchClaim
+                  .business_name ||
+                null,
+
+              reviewCase:
+                "legacy_import_new",
+
+              status:
+                "paid",
+
+              legacySourceId:
+                autoMatchClaim.id,
+            });
+
+        } else if (
+          historicalNewJob.customer_id !==
+          autoMatchCustomer.id
+        ) {
+
+          throw new Error(
+            "Legacy NEW history is already linked to another customer"
+          );
+        }
+
+
+        historicalNewJob =
+          await updateJob(
+            historicalNewJob.id,
+            {
+              price:
+                newReviewRate,
+
+              currency:
+                newCurrency,
+
+              status:
+                "paid",
+            }
+          );
+
+
+        const existingNewReviews =
+          await getReviewsByJobId(
+            historicalNewJob.id
+          );
+
+
+        if (
+          !existingNewReviews ||
+          existingNewReviews.length === 0
+        ) {
+
+          await saveReviewCandidate({
+            customerId:
+              autoMatchCustomer.id,
+
+            jobId:
+              historicalNewJob.id,
+
+            businessName:
+              autoMatchClaim
+                .business_name ||
+              null,
+
+            reviewerName:
+              "LEGACY_IMPORT",
+
+            reviewText:
+              "Imported historical NEW review rate",
+
+            isRecent:
+              true,
+
+            isVisible:
+              null,
+
+            hasText:
+              null,
+          });
+        }
+
+
+        const existingNewPayment =
+          await getVerifiedPaymentByJobId(
+            historicalNewJob.id
+          );
+
+
+        if (!existingNewPayment) {
+
+          await createPayment({
+            jobId:
+              historicalNewJob.id,
+
+            amount:
+              newReviewRate,
+
+            paymentMethod:
+              "LEGACY_IMPORT",
+
+            slipReceived:
+              false,
+
+            paymentVerified:
+              true,
+
+            verifiedAt,
+          });
+        }
+
+
+        importedJobs.push(
+          historicalNewJob.id
+        );
+      }
+
+
+      // ==================================================
+      // OLD REVIEW HISTORY
+      // ==================================================
+
+      const oldReviewRate =
+        Number(
+          autoMatchClaim
+            .old_review_rate ||
+          0
+        );
+
+
+      if (
+        Number.isFinite(
+          oldReviewRate
+        ) &&
+        oldReviewRate > 0
+      ) {
+
+        const oldCurrency =
+          String(
+            autoMatchClaim
+              .old_review_currency ||
+            "THB"
+          ).toUpperCase();
+
+
+        let historicalOldJob =
+          await getLegacyImportedJob({
+            legacySourceId:
+              autoMatchClaim.id,
+
+            reviewCase:
+              "legacy_import_old",
+          });
+
+
+        if (!historicalOldJob) {
+
+          historicalOldJob =
+            await createJob({
+              customerId:
+                autoMatchCustomer.id,
+
+              businessName:
+                autoMatchClaim
+                  .business_name ||
+                null,
+
+              reviewCase:
+                "legacy_import_old",
+
+              status:
+                "paid",
+
+              legacySourceId:
+                autoMatchClaim.id,
+            });
+
+        } else if (
+          historicalOldJob.customer_id !==
+          autoMatchCustomer.id
+        ) {
+
+          throw new Error(
+            "Legacy OLD history is already linked to another customer"
+          );
+        }
+
+
+        historicalOldJob =
+          await updateJob(
+            historicalOldJob.id,
+            {
+              price:
+                oldReviewRate,
+
+              currency:
+                oldCurrency,
+
+              status:
+                "paid",
+            }
+          );
+
+
+        const existingOldReviews =
+          await getReviewsByJobId(
+            historicalOldJob.id
+          );
+
+
+        if (
+          !existingOldReviews ||
+          existingOldReviews.length === 0
+        ) {
+
+          await saveReviewCandidate({
+            customerId:
+              autoMatchCustomer.id,
+
+            jobId:
+              historicalOldJob.id,
+
+            businessName:
+              autoMatchClaim
+                .business_name ||
+              null,
+
+            reviewerName:
+              "LEGACY_IMPORT",
+
+            reviewText:
+              "Imported historical OLD review rate",
+
+            isRecent:
+              false,
+
+            isVisible:
+              null,
+
+            hasText:
+              null,
+          });
+        }
+
+
+        const existingOldPayment =
+          await getVerifiedPaymentByJobId(
+            historicalOldJob.id
+          );
+
+
+        if (!existingOldPayment) {
+
+          await createPayment({
+            jobId:
+              historicalOldJob.id,
+
+            amount:
+              oldReviewRate,
+
+            paymentMethod:
+              "LEGACY_IMPORT",
+
+            slipReceived:
+              false,
+
+            paymentVerified:
+              true,
+
+            verifiedAt,
+          });
+        }
+
+
+        importedJobs.push(
+          historicalOldJob.id
+        );
+      }
+
+
+      // ==================================================
+      // ต้องมีอย่างน้อย 1 historical rate
+      // ==================================================
+
+      if (
+        importedJobs.length === 0
+      ) {
+
+        throw new Error(
+          "Legacy customer has no valid historical rate"
+        );
+      }
+
+
+      // ==================================================
+      // MARK MATCHED
+      // ==================================================
+
+      autoMatchedLegacy =
+        await markLegacyCustomerMatched({
+          legacyCustomerId:
+            autoMatchClaim.id,
+
+          customerId:
+            autoMatchCustomer.id,
+        });
+
+
+      autoMatchStatus =
+        "matched";
+
+
+      console.log(
+        "LEGACY AUTO MATCH COMPLETE:",
+        {
+          legacyCustomerId:
+            autoMatchClaim.id,
+
+          customerId:
+            autoMatchCustomer.id,
+
+          importedJobs,
+
+          displayName:
+            autoMatchClaim
+              .display_name ||
+            null,
+        }
+      );
+    }
+
+
+  } catch (autoMatchError) {
+
+    console.error(
+      "LEGACY AUTO MATCH FAILED:",
+      {
+        legacyCustomerId:
+          autoMatchClaim?.id ||
+          null,
+
+        customerId:
+          autoMatchCustomer?.id ||
+          null,
+
+        error:
+          autoMatchError?.message ||
+          String(autoMatchError),
+      }
+    );
+
+
+    try {
+
+      await rollbackLegacyCustomerAutoMatch(
+        autoMatchClaim.id
+      );
+
+    } catch (rollbackError) {
+
+      console.error(
+        "LEGACY AUTO MATCH ROLLBACK FAILED:",
+        {
+          legacyCustomerId:
+            autoMatchClaim?.id ||
+            null,
+
+          error:
+            rollbackError?.message ||
+            String(
+              rollbackError
+            ),
+        }
+      );
+    }
+
+
+    throw autoMatchError;
+  }
+}        
+          
 // ================================================
 // LEGACY MAP AUTO-LINK FOR ALREADY MATCHED CUSTOMER
 //
@@ -19369,7 +19853,9 @@ if (alreadyMatchedCustomerId) {
 // ================================================
 
 const importedLegacy =
-  result?.customer || null;
+  autoMatchedLegacy ||
+  result?.customer ||
+  null;
 
 const matchedCustomerId =
   String(
