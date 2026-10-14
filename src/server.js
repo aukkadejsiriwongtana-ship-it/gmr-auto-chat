@@ -20493,6 +20493,57 @@ app.post(
   }
 );
 
+// =========================================================
+// MANUAL TEST — MONTHLY EXISTING CUSTOMER OUTREACH
+//
+// ใช้ทดสอบก่อนเปิด schedule จริง
+// ป้องกันด้วย SHEET_CONTROL_SECRET
+// =========================================================
+
+app.post(
+  "/monthly-outreach/run",
+  async (req, res) => {
+    try {
+      const {
+        secret,
+      } = req.body || {};
+
+      const expectedSecret =
+        process.env.SHEET_CONTROL_SECRET;
+
+      if (
+        !expectedSecret ||
+        secret !== expectedSecret
+      ) {
+        return res.status(401).json({
+          ok: false,
+          error: "Unauthorized",
+        });
+      }
+
+      const result =
+        await runMonthlyExistingCustomerOutreach();
+
+      return res.json(
+        result
+      );
+
+    } catch (error) {
+      console.error(
+        "MONTHLY OUTREACH RUN ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+);
+
 app.listen(PORT, () => {
   console.log(
     `GMR Auto Chat running on port ${PORT}`
