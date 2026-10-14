@@ -6609,11 +6609,69 @@ if (
   // ยังไม่เคยจ่าย
   // → เช็กว่าเคยมี Map เดิมหรือไม่
   const previousMapJob =
-    await getLatestJobWithMapByCustomerId(
-      customer.id
-    );
+  await getLatestJobWithMapByCustomerId(
+    customer.id
+  );
 
-  if (previousMapJob) {
+
+const freshConversationForMap =
+  await getConversationByCustomerId(
+    customer.id
+  );
+
+
+const lastBotMessageForMap =
+  String(
+    freshConversationForMap
+      ?.last_bot_message ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+
+
+const welcomeWasSent =
+  lastBotMessageForMap.includes(
+    "ส่งลิงก์"
+  ) ||
+  lastBotMessageForMap.includes(
+    "google maps"
+  ) ||
+  lastBotMessageForMap.includes(
+    "send"
+  );
+
+
+const wantsToStartService =
+  isServiceInquiryMessage(
+    message
+  ) ||
+  [
+    "yes",
+    "yes please",
+    "interested",
+    "start",
+    "start now",
+    "can you start",
+    "please start",
+    "สนใจ",
+    "เริ่มเลย",
+    "เริ่มงาน",
+    "ดำเนินการ",
+  ].some(
+    (word) =>
+      normalizedMessage === word ||
+      normalizedMessage.startsWith(
+        `${word} `
+      )
+  );
+
+
+if (
+  previousMapJob &&
+  welcomeWasSent &&
+  wantsToStartService
+) {
     console.log(
       "EXISTING CUSTOMER - MAP HISTORY:",
       {
@@ -6719,20 +6777,37 @@ return {
   // -------------------------------------------------------
 
   if (
-    conversation.handoff === true ||
-    conversation.state === GMR_STATES.HANDOFF
-  ) {
-    return {
-      ok: true,
-      customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      handoff: true,
-      botReply: null,
-      note:
-        "Conversation is currently in human handoff mode",
-    };
+  conversation.handoff === true ||
+  conversation.state === GMR_STATES.HANDOFF
+) {
+
+  try {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason:
+        "CUSTOMER_FOLLOWUP_WHILE_HANDOFF",
+    });
+  } catch (error) {
+    console.error(
+      "HANDOFF FOLLOWUP HUMAN ATTENTION FAILED:",
+      error
+    );
   }
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    handoff: true,
+    botReply: null,
+    softHandoff: true,
+    note:
+      "Conversation is in human handoff mode. Latest customer message forwarded to Sales.",
+  };
+}
 
 
   // -------------------------------------------------------
