@@ -5284,14 +5284,16 @@ app.post(
         paidJobs.length > 0
       ) {
 
-        const paymentReceivedReply =
-          getCustomerText(
-            customer,
+       const paymentReceivedReply =
+  getCustomerText(
+    customer,
 
-            "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ ✅",
+    "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ ✅\n\n" +
+    "หากมีรีวิวอื่นที่ต้องการให้เราช่วยตรวจสอบเพิ่มเติม สามารถส่งมาให้เราได้เลยครับ",
 
-            "Thank you. Your payment has been received successfully. ✅"
-          );
+    "Received with thanks. Our work is now completed. ✅\n\n" +
+    "Please let us know if there are any other bad reviews you would like us to check."
+  );
 
 
         try {
@@ -21644,72 +21646,77 @@ if (
   let botReply;
 
 
-  if (
-    paymentCurrency ===
-    "THB"
-  ) {
+ if (
+  paymentCurrency ===
+  "THB"
+) {
 
-    botReply =
-      getCustomerText(
-        customer,
+  botReply =
+    getCustomerText(
+      customer,
 
-        "รีวิวถูกนำออกเรียบร้อยครับ ✅\n\n" +
+      "ยินดีด้วยครับ 🎉 รีวิวของคุณได้รับการพิจารณาจาก Google เรียบร้อยแล้ว และขณะนี้ลิงก์รีวิวดังกล่าวไม่สามารถเข้าถึงได้แล้ว\n\n" +
 
-        `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+      "รีวิวจะถูกนำออกจากหน้า Google Maps ของคุณภายในเวลา 20:00 น. ของวันนี้ หรือไม่เกิน 20:00 น. ของวันพรุ่งนี้\n\n" +
 
-        "รายละเอียด:\n" +
-        `${breakdownText}\n\n` +
+      `จำนวนรีวิวที่ดำเนินการสำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
-        `ยอดที่ต้องชำระทั้งหมด: ${formattedTotal} บาท\n\n` +
+      "สรุปรายการ:\n" +
+      `${breakdownText}\n\n` +
 
-        "สามารถสแกน QR ด้านล่างเพื่อชำระได้เลยครับ\n\n" +
+      `ยอดชำระทั้งหมด: ${formattedTotal} บาท\n\n` +
 
-        "หลังชำระแล้ว รบกวนส่งสลิปเข้ามาในแชทนี้ได้เลยครับ",
+      "🔥 สามารถชำระผ่านการสแกน QR ด้านล่างได้เลยครับ",
 
-        "The completed reviews have been successfully processed. ✅\n\n" +
+      "Good news 🎉 Your review case has been successfully processed by Google, and the review link is now no longer accessible.\n\n" +
 
-        `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+      "The review is expected to disappear from your Google Maps profile by 8:00 PM today, or no later than 8:00 PM tomorrow.\n\n" +
 
-        "Breakdown:\n" +
-        `${breakdownText}\n\n` +
+      `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
 
-        `Total amount due: THB ${formattedTotal}\n\n` +
+      "Summary:\n" +
+      `${breakdownText}\n\n` +
 
-        "Please use the QR code below to make payment, then send the payment slip in this chat."
-      );
+      `Total amount due: THB ${formattedTotal}\n\n` +
 
-  } else {
+      "🔥 Please complete your payment by scanning the QR code below."
+    );
 
-    botReply =
-      getCustomerText(
-        customer,
+} else {
 
-        "รีวิวที่ให้ดำเนินการ ออกแล้วนะครับ ✅\n\n" +
+  botReply =
+    getCustomerText(
+      customer,
 
-        `จำนวนที่สำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
+      "ยินดีด้วยครับ 🎉 รีวิวลูกค้าได้รับการพิจารณาจาก Google เรียบร้อยแล้ว ตอนนี้ลิงก์รีวิวดังกล่าวไม่สามารถเข้าถึงได้แล้ว\n\n" +
 
-        "รายละเอียด:\n" +
-        `${breakdownText}\n\n` +
+      "รีวิวจะถูกนำออกจากหน้า Maps ภายในเวลา 20:00 น. วันนี้ หรือไม่เกิน 20:00 น. ของวันพรุ่งนี้\n\n" +
 
-        `ยอดที่ต้องชำระทั้งหมด: $${formattedTotal} USD\n\n` +
+      `จำนวนรีวิวที่ดำเนินการสำเร็จและรอชำระ: ${paymentSummary.totalReviews} รีวิว\n\n` +
 
-        "สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ\n" +
-        `${stripePaymentLink}`,
+      "สรุปรายการ:\n" +
+      `${breakdownText}\n\n` +
 
-        "The assigned reviews have been successfully processed. ✅\n\n" +
+      `ยอดชำระทั้งหมด: $${formattedTotal} USD\n\n` +
 
-        `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
+      "🔥 สามารถชำระผ่านลิงก์ด้านล่างได้เลยครับ:\n\n" +
+      `${stripePaymentLink}`,
 
-        "Breakdown:\n" +
-        `${breakdownText}\n\n` +
+      "Good news 🎉 Your review case has been successfully processed by Google, and the review link is now no longer accessible.\n\n" +
 
-        `Total amount due: $${formattedTotal} USD\n\n` +
+      "The review is expected to disappear from your Google Maps profile by 8:00 PM today, or no later than 8:00 PM tomorrow.\n\n" +
 
-        "Please complete payment using the link below:\n" +
-        `${stripePaymentLink}`
-      );
-  }
+      `Completed and awaiting payment: ${paymentSummary.totalReviews} review(s)\n\n` +
 
+      "Summary:\n" +
+      `${breakdownText}\n\n` +
+
+      `Total amount due: $${formattedTotal} USD\n\n` +
+
+      "🔥 Complete your payment using the link below:\n\n" +
+      `${stripePaymentLink}`
+    );
+}
 
   // ========================================
   // 5. CONVERSATION
