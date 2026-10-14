@@ -4568,3 +4568,429 @@ export async function updateCustomerTransportMetadata({
   if (error) throw error;
   return data;
 }
+
+// =========================================================
+// MONTHLY EXISTING CUSTOMER OUTREACH
+//
+// Existing customer = เคยมี payment_verified = true
+//
+// หลักการ:
+// 1. ดึงลูกค้าที่เคยจ่ายเงินจริง
+// 2. ตัดลูกค้าที่มีงานค้าง/กำลังดำเนินการ
+// 3. ตัดลูกค้าที่ส่ง Monthly Outreach เดือนนี้แล้ว
+// 4. ใช้ claim ก่อนส่งจริง เพื่อกันระบบยิงซ้ำ
+// =========================================================
+
+export async function getMonthlyOutreachCandidates({
+  outreachMonth,
+}) {
+  const safeMonth =
+    String(outreachMonth || "").trim();
+
+  if (!safeMonth) {
+    throw new Error(
+      "Missing outreachMonth in getMonthlyOutreachCandidates"
+    );
+  }
+
+  // =======================================================
+  // 1. VERIFIED PAYMENTS
+  // =======================================================
+
+  const {
+    data: verifiedPayments,
+    error: paymentsError,
+  } = await supabase
+    .from("gmr_payments")
+    .select("job_id")
+    .eq(
+      "payment_verified",
+      true
+    )
+    .not(
+      "job_id",
+      "is",
+      null
+    );
+
+  if (paymentsError) {
+    throw paymentsError;
+  }
+
+  if (
+    !verifiedPayments ||
+    verifiedPayments.length === 0
+  ) {
+    return [];
+  }
+
+  const paidJobIds = [
+    ...new Set(
+      verifiedPayments
+        .map(
+          (item) =>
+            item.job_id
+        )
+        .filter(Boolean)
+    ),
+  ];
+
+  if (paidJobIds.length === 0) {
+    return [];
+  }
+
+  // =======================================================
+  // 2. หา CUSTOMER ที่เคยจ่ายจริง
+  // =======================================================
+
+  const {
+    data: paidJobs,
+    error: paidJobsError,
+  } = await supabase
+    .from("gmr_jobs")
+    .select(
+      "id, customer_id"
+    )
+    .in(
+      "id",
+      paidJobIds
+    );
+
+  if (paidJobsError) {
+    throw paidJobsError;
+  }
+
+  const paidCustomerIds = [
+    ...new Set(
+      (paidJobs || [])
+        .map(
+          (job) =>
+            job.customer_id
+        )
+        .filter(Boolean)
+    ),
+  ];
+
+  if (
+    paidCustomerIds.length === 0
+  ) {
+    return [];
+  }
+
+  // =======================================================
+  // 3. ตัดลูกค้าที่มีงานค้าง / งานกำลังดำเนินการ
+  // =======================================================
+
+  const activeStatuses = [
+    "draft",
+    "waiting_price",
+    "waiting_confirm",
+    "waiting_phone",
+    "waiting_credit_approval",
+
+    "existing_evidence_pending",
+    "existing_evidence_failed",
+    "existing_batch_draft",
+
+    "queued",
+    "dispatching",
+    "processing",
+    "removed",
+    "waiting_payment",
+    "removed_waiting_payment",
+  ];
+
+  const {
+    data: activeJobs,
+    error: activeJobsError,
+  } = await supabase
+    .from("gmr_jobs")
+    .select(
+      "customer_id, status"
+    )
+    .in(
+      "customer_id",
+      paidCustomerIds
+    )
+    .in(
+      "status",
+      activeStatuses
+    );
+
+  if (activeJobsError) {
+    throw activeJobsError;
+  }
+
+  const activeCustomerIds =
+    new Set(
+      (activeJobs || [])
+        .map(
+          (job) =>
+            job.customer_id
+        )
+        .filter(Boolean)
+    );
+
+  // =======================================================
+  // 4. เช็กว่าเดือนนี้ส่งหาใครไปแล้ว
+  // =======================================================
+
+  const {
+    data: monthlyLogs,
+    error: monthlyLogsError,
+  } = await supabase
+    .from(
+      "gmr_monthly_outreach_log"
+    )
+    .select(
+      "customer_id, outreach_month, status"
+    )
+    .eq(
+      "outreach_month",
+      safeMonth
+    );
+
+  if (monthlyLogsError) {
+    throw monthlyLogsError;
+  }
+
+  const alreadyProcessedCustomerIds =
+    new Set(
+      (monthlyLogs || [])
+        .map(
+          (item) =>
+            item.customer_id
+        )
+        .filter(Boolean)
+    );
+
+  // =======================================================
+  // 5. ดึงข้อมูล CUSTOMER
+  // =======================================================
+
+  const {
+    data: customers,
+    error: customersError,
+  } = await supabase
+    .from("gmr_customers")
+    .select(
+      "id, platform, platform_user_id, display_name, language"
+    )
+    .in(
+      "id",
+      paidCustomerIds
+    );
+
+  if (customersError) {
+    throw customersError;
+  }
+
+  // =======================================================
+  // 6. FILTER FINAL
+  // =======================================================
+
+  return (
+    customers || []
+  ).filter(
+    (customer) => {
+
+      if (!customer?.id) {
+        return false;
+      }
+
+      // มีงานกำลังดำเนินการ
+      if (
+        activeCustomerIds.has(
+          customer.id
+        )
+      ) {
+        return false;
+      }
+
+      // เดือนนี้เคยส่ง/เคย claim แล้ว
+      if (
+        alreadyProcessedCustomerIds.has(
+          customer.id
+        )
+      ) {
+        return false;
+      }
+
+      // ต้องมีช่องทางติดต่อ
+      if (
+        !customer.platform ||
+        !customer.platform_user_id
+      ) {
+        return false;
+      }
+
+      return true;
+    }
+  );
+}
+
+
+// =========================================================
+// CLAIM MONTHLY OUTREACH
+//
+// ต้อง Claim ก่อนส่งจริง
+// UNIQUE(customer_id, outreach_month)
+// จะช่วยกัน Cron/Request ซ้อนกันยิงลูกค้าซ้ำ
+// =========================================================
+
+export async function claimMonthlyOutreach({
+  customerId,
+  outreachMonth,
+  platform,
+  language,
+  messageText,
+}) {
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in claimMonthlyOutreach"
+    );
+  }
+
+  const safeMonth =
+    String(outreachMonth || "").trim();
+
+  if (!safeMonth) {
+    throw new Error(
+      "Missing outreachMonth in claimMonthlyOutreach"
+    );
+  }
+
+  try {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from(
+        "gmr_monthly_outreach_log"
+      )
+      .insert({
+        customer_id:
+          customerId,
+
+        outreach_month:
+          safeMonth,
+
+        platform:
+          platform || null,
+
+        language:
+          language === "en"
+            ? "en"
+            : "th",
+
+        message_text:
+          messageText || null,
+
+        status:
+          "processing",
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return {
+      claimed: true,
+      log: data,
+    };
+
+  } catch (error) {
+
+    // UNIQUE:
+    // customer_id + outreach_month
+    //
+    // ถ้ามี request อื่น claim ไปก่อนแล้ว
+    // ให้ข้าม ไม่ถือเป็น error
+
+    if (
+      error?.code === "23505"
+    ) {
+      return {
+        claimed: false,
+        reason:
+          "already_claimed_this_month",
+        log:
+          null,
+      };
+    }
+
+    throw error;
+  }
+}
+
+
+// =========================================================
+// COMPLETE MONTHLY OUTREACH
+// =========================================================
+
+export async function completeMonthlyOutreach({
+  logId,
+  status = "sent",
+  errorMessage = null,
+}) {
+  if (!logId) {
+    throw new Error(
+      "Missing logId in completeMonthlyOutreach"
+    );
+  }
+
+  const safeStatus =
+    String(status || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    ![
+      "sent",
+      "failed",
+      "skipped",
+    ].includes(
+      safeStatus
+    )
+  ) {
+    throw new Error(
+      "Invalid monthly outreach status"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from(
+      "gmr_monthly_outreach_log"
+    )
+    .update({
+      status:
+        safeStatus,
+
+      error_message:
+        errorMessage
+          ? String(errorMessage)
+          : null,
+
+      sent_at:
+        safeStatus === "sent"
+          ? new Date().toISOString()
+          : null,
+    })
+    .eq(
+      "id",
+      logId
+    )
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
