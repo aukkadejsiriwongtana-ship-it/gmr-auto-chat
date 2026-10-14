@@ -2117,6 +2117,363 @@ await markDispatchStuckAlerted({
   }
 }
 
+// =========================================================
+// MONTHLY EXISTING CUSTOMER OUTREACH
+//
+// ตอนนี้เปิดส่งเฉพาะ LINE ก่อน
+// Facebook TH / EN จะต่อผ่าน ManyChat ภายหลัง
+//
+// Existing customer = เคย payment_verified = true
+// ไม่มี active job
+// และยังไม่เคยส่งในเดือนนี้
+// =========================================================
+
+async function runMonthlyExistingCustomerOutreach() {
+
+  // =======================================================
+  // 1. หาเดือนปัจจุบันตามเวลาไทย
+  // เช่น 2026-10
+  // =======================================================
+
+  const monthParts =
+    new Intl.DateTimeFormat(
+      "en-CA",
+      {
+        timeZone:
+          "Asia/Bangkok",
+
+        year:
+          "numeric",
+
+        month:
+          "2-digit",
+      }
+    ).formatToParts(
+      new Date()
+    );
+
+  const year =
+    monthParts.find(
+      (part) =>
+        part.type === "year"
+    )?.value;
+
+  const month =
+    monthParts.find(
+      (part) =>
+        part.type === "month"
+    )?.value;
+
+  const outreachMonth =
+    `${year}-${month}`;
+
+  console.log(
+    "MONTHLY OUTREACH START:",
+    {
+      outreachMonth,
+    }
+  );
+
+
+  // =======================================================
+  // 2. ดึงลูกค้าที่เข้าเงื่อนไข
+  // =======================================================
+
+  const candidates =
+    await getMonthlyOutreachCandidates({
+      outreachMonth,
+    });
+
+
+  const results = [];
+
+
+  // =======================================================
+  // 3. ไล่ส่งทีละคน
+  // =======================================================
+
+  for (
+    const customer of
+    candidates
+  ) {
+
+    const platform =
+      String(
+        customer?.platform || ""
+      )
+        .trim()
+        .toLowerCase();
+
+
+    // =====================================================
+    // ตอนนี้ส่งเฉพาะ LINE
+    //
+    // Facebook จะไม่ claim
+    // เพื่อให้เราเอาไปต่อ ManyChat ภายหลังได้
+    // =====================================================
+
+    if (
+      platform !== "line"
+    ) {
+      results.push({
+        customerId:
+          customer?.id,
+
+        platform,
+
+        sent:
+          false,
+
+        reason:
+          "facebook_manychat_pending",
+      });
+
+      continue;
+    }
+
+
+    const language =
+      customer?.language === "en"
+        ? "en"
+        : "th";
+
+
+    const messageText =
+      language === "en"
+        ? "Hi, do you have any other reviews you'd like us to help you with?"
+        : "สวัสดีครับ ยังมีรีวิวไหนสนใจให้ช่วยจัดการอีกไหมครับ";
+
+
+    let claim =
+      null;
+
+
+    try {
+
+      // ===================================================
+      // 4. Claim ก่อนส่ง
+      // กันยิงซ้ำเดือนเดียวกัน
+      // ===================================================
+
+      claim =
+        await claimMonthlyOutreach({
+          customerId:
+            customer.id,
+
+          outreachMonth,
+
+          platform:
+            customer.platform,
+
+          language,
+
+          messageText,
+        });
+
+
+      if (
+        claim?.claimed !== true
+      ) {
+        results.push({
+          customerId:
+            customer.id,
+
+          platform,
+
+          sent:
+            false,
+
+          reason:
+            claim?.reason ||
+            "not_claimed",
+        });
+
+        continue;
+      }
+
+
+      // ===================================================
+      // 5. ส่งข้อความหา LINE ลูกค้า
+      // ===================================================
+
+      await sendMessageToCustomer({
+        platform:
+          customer.platform,
+
+        platformUserId:
+          customer.platform_user_id,
+
+        text:
+          messageText,
+      });
+
+
+      // ===================================================
+      // 6. เก็บ Message History
+      // ===================================================
+
+      await saveMessage({
+        customerId:
+          customer.id,
+
+        platform:
+          customer.platform,
+
+        direction:
+          "outbound",
+
+        messageType:
+          "text",
+
+        messageText,
+
+        metadata: {
+          source:
+            "monthly_existing_customer_outreach",
+
+          outreachMonth,
+        },
+      });
+
+
+      await updateLastBotMessage(
+        customer.id,
+        messageText
+      );
+
+
+      // ===================================================
+      // 7. Mark สำเร็จ
+      // ===================================================
+
+      await completeMonthlyOutreach({
+        logId:
+          claim.log.id,
+
+        status:
+          "sent",
+      });
+
+
+      results.push({
+        customerId:
+          customer.id,
+
+        platform,
+
+        language,
+
+        sent:
+          true,
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "MONTHLY OUTREACH CUSTOMER FAILED:",
+        {
+          customerId:
+            customer?.id,
+
+          platform,
+
+          error:
+            error?.message ||
+            String(error),
+        }
+      );
+
+
+      // ถ้า claim ไปแล้วแต่ส่งไม่สำเร็จ
+      // บันทึก failed ไว้
+      if (
+        claim?.claimed === true &&
+        claim?.log?.id
+      ) {
+        try {
+          await completeMonthlyOutreach({
+            logId:
+              claim.log.id,
+
+            status:
+              "failed",
+
+            errorMessage:
+              error?.message ||
+              String(error),
+          });
+
+        } catch (
+          logError
+        ) {
+          console.error(
+            "MONTHLY OUTREACH FAILED LOG UPDATE ERROR:",
+            logError
+          );
+        }
+      }
+
+
+      results.push({
+        customerId:
+          customer?.id,
+
+        platform,
+
+        sent:
+          false,
+
+        reason:
+          "send_failed",
+
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+
+
+  const sentCount =
+    results.filter(
+      (item) =>
+        item.sent === true
+    ).length;
+
+
+  console.log(
+    "MONTHLY OUTREACH COMPLETE:",
+    {
+      outreachMonth,
+
+      candidates:
+        candidates.length,
+
+      sent:
+        sentCount,
+
+      results,
+    }
+  );
+
+
+  return {
+    ok:
+      true,
+
+    outreachMonth,
+
+    candidates:
+      candidates.length,
+
+    sent:
+      sentCount,
+
+    results,
+  };
+}
+
 
 async function getCustomerStage({
   customer,
