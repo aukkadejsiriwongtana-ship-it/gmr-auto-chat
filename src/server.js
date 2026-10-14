@@ -1392,6 +1392,641 @@ async function sendRemovalConfirmationToLineGroup({
   };
 }
 
+
+// =========================================================
+// REVIEW REMOVED KPI → INTERNAL LINE GROUP ONLY
+//
+// Review ที่ถูกตรวจพบว่าหายใน timestamp เดียวกัน
+// = ถือเป็น review set / KPI round เดียวกัน
+//
+// หลัง CONFIRM_REMOVED:
+// - รวม T0/T2
+// - debounce 30 วินาที
+// - ส่ง LINE ภายในเพียงข้อความเดียวต่อรอบ
+//
+// ข้อมูลนี้ห้ามส่งให้ลูกค้า
+// =========================================================
+
+const removalKpiBatchQueue =
+  new Map();
+
+
+async function getRemovalKpiWorkType(
+  job
+) {
+
+  // ========================================
+  // 1. ใช้ Department ก่อน
+  // เพราะ KPI จ่ายตามแผนกจริง
+  // ========================================
+
+  try {
+
+    const jobDepartmentId =
+      String(
+        job?.department_id ||
+        job?.departmentId ||
+        ""
+      ).trim();
+
+
+    if (jobDepartmentId) {
+
+      const departments =
+        await getActiveDepartments();
+
+
+      const department =
+        (departments || []).find(
+          (item) =>
+            String(
+              item?.id || ""
+            ) ===
+            jobDepartmentId
+        );
+
+
+      const code =
+        String(
+          department?.code || ""
+        )
+          .trim()
+          .toUpperCase();
+
+
+      if (
+        code === "T0" ||
+        code === "T2"
+      ) {
+        return code;
+      }
+    }
+
+  } catch (error) {
+
+    console.error(
+      "KPI DEPARTMENT LOOKUP FAILED:",
+      {
+        jobId:
+          job?.id || null,
+
+        error:
+          error?.message ||
+          String(error),
+      }
+    );
+  }
+
+
+  // ========================================
+  // 2. Fallback → review.is_recent
+  // ========================================
+
+  try {
+
+    const reviews =
+      await getReviewsByJobId(
+        job.id
+      );
+
+
+    const review =
+      Array.isArray(reviews)
+        ? (
+            reviews.find(
+              (item) =>
+                item
+                  ?.selected_by_customer ===
+                true
+            ) ||
+            reviews[0] ||
+            null
+          )
+        : null;
+
+
+    if (
+      review?.is_recent === true
+    ) {
+      return "T0";
+    }
+
+
+    if (
+      review?.is_recent === false
+    ) {
+      return "T2";
+    }
+
+  } catch (error) {
+
+    console.error(
+      "KPI REVIEW TYPE LOOKUP FAILED:",
+      {
+        jobId:
+          job?.id || null,
+
+        error:
+          error?.message ||
+          String(error),
+      }
+    );
+  }
+
+
+  return null;
+}
+
+
+// =========================================================
+// ส่ง KPI batch จริงเข้า LINE
+// =========================================================
+
+async function flushRemovalKpiBatch(
+  batchKey
+) {
+
+  const batch =
+    removalKpiBatchQueue.get(
+      batchKey
+    );
+
+
+  if (!batch) {
+    return;
+  }
+
+
+  // ลบออกก่อนส่ง
+  // ป้องกันส่งซ้ำจาก timer เดิม
+  removalKpiBatchQueue.delete(
+    batchKey
+  );
+
+
+  const token =
+    String(
+      process.env
+        .LINE_CHANNEL_ACCESS_TOKEN ||
+      ""
+    ).trim();
+
+
+  const groupId =
+    String(
+      process.env
+        .LINE_GROUP_ID ||
+      ""
+    ).trim();
+
+
+  if (!token || !groupId) {
+    throw new Error(
+      "Missing LINE configuration for removal KPI"
+    );
+  }
+
+
+  const eventDate =
+    new Date(
+      batch.removedAt
+    );
+
+
+  const safeDate =
+    Number.isNaN(
+      eventDate.getTime()
+    )
+      ? new Date()
+      : eventDate;
+
+
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        timeZone:
+          "Asia/Bangkok",
+
+        day:
+          "2-digit",
+
+        month:
+          "2-digit",
+
+        year:
+          "numeric",
+
+        hour:
+          "2-digit",
+
+        minute:
+          "2-digit",
+
+        second:
+          "2-digit",
+
+        hour12:
+          false,
+      }
+    ).formatToParts(
+      safeDate
+    );
+
+
+  const getPart =
+    (type) =>
+      parts.find(
+        (part) =>
+          part.type === type
+      )?.value || "";
+
+
+  const thaiDate =
+    `${getPart("day")}/${getPart("month")}/${getPart("year")}`;
+
+
+  const thaiTime =
+    `${getPart("hour")}:${getPart("minute")}:${getPart("second")}`;
+
+
+  const total =
+    batch.t0Count +
+    batch.t2Count +
+    batch.unknownCount;
+
+
+  const lines = [
+    "✅ REVIEW REMOVED — KPI",
+    "",
+    `วันที่: ${thaiDate}`,
+    `เวลารีวิวออก: ${thaiTime} น.`,
+    "",
+    `T0: ${batch.t0Count} รีวิว`,
+    `T2: ${batch.t2Count} รีวิว`,
+    "",
+    `รอบนี้สำเร็จทั้งหมด: ${total} รีวิว`,
+  ];
+
+
+  if (
+    batch.unknownCount > 0
+  ) {
+
+    lines.push(
+      "",
+      `⚠️ ไม่สามารถระบุ T0/T2: ${batch.unknownCount} รีวิว`
+    );
+  }
+
+
+  if (
+    batch.jobs.size > 0
+  ) {
+
+    lines.push(
+      "",
+      "Job ในรอบนี้:"
+    );
+
+
+    let index =
+      1;
+
+
+    for (
+      const item of
+      batch.jobs.values()
+    ) {
+
+      lines.push(
+        `${index}. ${item.workType || "UNKNOWN"} | ` +
+        `${item.businessName || "-"} | ` +
+        `${item.jobId}`
+      );
+
+
+      index +=
+        1;
+    }
+  }
+
+
+  const text =
+    lines.join("\n");
+
+
+  const response =
+    await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method:
+          "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json",
+
+          Authorization:
+            `Bearer ${token}`,
+        },
+
+        body:
+          JSON.stringify({
+            to:
+              groupId,
+
+            messages: [
+              {
+                type:
+                  "text",
+
+                text,
+              },
+            ],
+          }),
+      }
+    );
+
+
+  const responseText =
+    await response.text();
+
+
+  if (!response.ok) {
+
+    throw new Error(
+      `LINE KPI push failed: ${response.status} ${responseText}`
+    );
+  }
+
+
+  console.log(
+    "REMOVAL KPI BATCH SENT:",
+    {
+      batchKey,
+
+      removedAt:
+        batch.removedAt,
+
+      t0Count:
+        batch.t0Count,
+
+      t2Count:
+        batch.t2Count,
+
+      unknownCount:
+        batch.unknownCount,
+
+      total,
+    }
+  );
+}
+
+
+// =========================================================
+// QUEUE KPI
+// =========================================================
+
+async function sendRemovalKpiToLineGroup({
+  job,
+  customer,
+  removedAt,
+}) {
+
+  const eventTime =
+    String(
+      removedAt ||
+      job?.review_removed_detected_at ||
+      new Date().toISOString()
+    ).trim();
+
+
+  const workType =
+    await getRemovalKpiWorkType(
+      job
+    );
+
+
+  // ========================================
+  // ใช้เวลาที่ระบบตรวจพบว่ารีวิวหาย
+  // เป็น Batch Key
+  //
+  // งานจาก monitor รอบเดียวกัน
+  // จะใช้ checkedAt เดียวกัน
+  // ========================================
+
+  const batchKey =
+    eventTime;
+
+
+  let batch =
+    removalKpiBatchQueue.get(
+      batchKey
+    );
+
+
+  if (!batch) {
+
+    batch = {
+      removedAt:
+        eventTime,
+
+      t0Count:
+        0,
+
+      t2Count:
+        0,
+
+      unknownCount:
+        0,
+
+      jobs:
+        new Map(),
+
+      timer:
+        null,
+    };
+
+
+    removalKpiBatchQueue.set(
+      batchKey,
+      batch
+    );
+  }
+
+
+  // ========================================
+  // กัน job เดิมถูก CONFIRM ซ้ำ
+  // ========================================
+
+  const jobId =
+    String(
+      job?.id || ""
+    ).trim();
+
+
+  if (
+    jobId &&
+    batch.jobs.has(
+      jobId
+    )
+  ) {
+
+    console.log(
+      "REMOVAL KPI DUPLICATE JOB SUPPRESSED:",
+      {
+        batchKey,
+        jobId,
+      }
+    );
+
+
+    return {
+      ok:
+        true,
+
+      queued:
+        true,
+
+      duplicate:
+        true,
+
+      batchKey,
+    };
+  }
+
+
+  if (
+    workType === "T0"
+  ) {
+
+    batch.t0Count +=
+      1;
+
+  } else if (
+    workType === "T2"
+  ) {
+
+    batch.t2Count +=
+      1;
+
+  } else {
+
+    batch.unknownCount +=
+      1;
+  }
+
+
+  if (jobId) {
+
+    batch.jobs.set(
+      jobId,
+      {
+        jobId,
+
+        workType,
+
+        customerName:
+          customer?.display_name ||
+          null,
+
+        businessName:
+          job?.business_name ||
+          null,
+      }
+    );
+  }
+
+
+  // ========================================
+  // มี Job ใหม่ใน set เดียวกัน
+  // → เลื่อนเวลาส่งออกไปอีก 30 วินาที
+  //
+  // เพื่อรวมหลาย CONFIRM_REMOVED
+  // ให้เป็นข้อความ KPI เดียว
+  // ========================================
+
+  if (
+    batch.timer
+  ) {
+
+    clearTimeout(
+      batch.timer
+    );
+  }
+
+
+  batch.timer =
+    setTimeout(
+      async () => {
+
+        try {
+
+          await flushRemovalKpiBatch(
+            batchKey
+          );
+
+        } catch (error) {
+
+          console.error(
+            "REMOVAL KPI BATCH FLUSH FAILED:",
+            {
+              batchKey,
+
+              error:
+                error?.message ||
+                String(error),
+            }
+          );
+        }
+
+      },
+      30 * 1000
+    );
+
+
+  console.log(
+    "REMOVAL KPI JOB QUEUED:",
+    {
+      batchKey,
+
+      jobId,
+
+      workType,
+
+      t0Count:
+        batch.t0Count,
+
+      t2Count:
+        batch.t2Count,
+
+      unknownCount:
+        batch.unknownCount,
+    }
+  );
+
+
+  return {
+    ok:
+      true,
+
+    queued:
+      true,
+
+    batchKey,
+
+    workType,
+
+    t0Count:
+      batch.t0Count,
+
+    t2Count:
+      batch.t2Count,
+  };
+}
+
+
 async function callSheetControlInternally({ jobId, value }) {
   const secret = process.env.SHEET_CONTROL_SECRET;
 
@@ -6620,27 +7255,45 @@ const freshConversationForMap =
   );
 
 
-const lastBotMessageForMap =
-  String(
-    freshConversationForMap
-      ?.last_bot_message ||
-    ""
-  )
-    .trim()
-    .toLowerCase();
-
-
-const welcomeWasSent =
-  lastBotMessageForMap.includes(
-    "ส่งลิงก์"
-  ) ||
-  lastBotMessageForMap.includes(
-    "google maps"
-  ) ||
-  lastBotMessageForMap.includes(
-    "send"
+const welcomeTemplateForMap =
+  await getTemplate(
+    "welcome",
+    customer.language || "th"
   );
 
+
+const normalizeConversationText =
+  (value) =>
+    String(value || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .trim()
+      .toLowerCase();
+
+
+const lastBotMessageForMap =
+  normalizeConversationText(
+    freshConversationForMap
+      ?.last_bot_message
+  );
+
+
+const welcomeTextForMap =
+  normalizeConversationText(
+    welcomeTemplateForMap
+      ?.content
+  );
+
+
+// สำคัญ:
+// Reconfirm Map ได้เฉพาะเมื่อ
+// ข้อความล่าสุดของ Bot คือ Welcome จริง ๆ
+const welcomeWasSent =
+  Boolean(
+    welcomeTextForMap
+  ) &&
+  lastBotMessageForMap ===
+    welcomeTextForMap;
 
 const wantsToStartService =
   isServiceInquiryMessage(
@@ -21575,6 +22228,31 @@ app.post("/sheet-control", async (req, res) => {
     }
   );
 
+            // ========================================
+// INTERNAL KPI NOTIFICATION
+// แจ้งภายในองค์กรเท่านั้น
+// ห้ามส่งข้อมูล T0/T2 ให้ลูกค้า
+// ========================================
+
+try {
+  await sendRemovalKpiToLineGroup({
+    job,
+    customer,
+    removedAt,
+  });
+} catch (kpiError) {
+  console.error(
+    "REMOVAL KPI NOTIFICATION FAILED:",
+    {
+      jobId:
+        job.id,
+
+      error:
+        kpiError?.message ||
+        String(kpiError),
+    }
+  );
+}
 
   // ========================================
   // 2. ดึงทุกงานของลูกค้าคนนี้
