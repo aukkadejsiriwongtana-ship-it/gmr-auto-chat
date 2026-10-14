@@ -624,7 +624,7 @@ function extractGoogleMapsUrl(
 
   const match =
     text.match(
-      /https?:\/\/(?:www\.)?(?:maps\.google\.com|google\.[^\s/]+\/maps|maps\.app\.goo\.gl)\/?[^\s]*/i
+      /https?:\/\/(?:www\.)?(?:maps\.google\.com|google\.[^\s/]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps)\/?[^\s]*/i
     );
 
   return match
@@ -4963,41 +4963,34 @@ const forceEnglishPage =
   normalizedPlatform === "facebook_en" ||
   normalizedPlatform === "fb_en";
 
-const forceThaiPage =
-  normalizedPlatform === "facebook_th" ||
-  normalizedPlatform === "fb_th";
-
 const thaiLocked =
   existingCustomer?.language_locked === true;
 
 let detectedLanguage;
 
 // =========================================================
-// PAGE LANGUAGE POLICY
+// LANGUAGE POLICY
 //
 // Facebook EN = English 100%
-// Facebook TH = Thai 100%
-// LINE / platform อื่น = Auto detect ตามเดิม
+// Facebook TH = Auto detect
+// LINE        = Auto detect
 // =========================================================
 
 if (forceEnglishPage) {
+
   detectedLanguage = "en";
 
-} else if (forceThaiPage) {
-  detectedLanguage = "th";
-
-} else if (thaiLocked) {
-  detectedLanguage = "th";
-
 } else if (messageHasThai) {
+
   detectedLanguage = "th";
 
 } else {
+
   detectedLanguage =
     detectCustomerLanguage(
       message,
       existingCustomer?.language ||
-        "th"
+        "en"
     );
 }
 
@@ -5013,7 +5006,7 @@ let customer =
 
 
 // =========================================================
-// FORCE PAGE LANGUAGE INTO CUSTOMER RECORD
+// UPDATE CUSTOMER LANGUAGE
 // =========================================================
 
 if (forceEnglishPage) {
@@ -5028,44 +5021,33 @@ if (forceEnglishPage) {
       );
   }
 
-} else if (forceThaiPage) {
-
-  if (
-    customer.language !== "th" ||
-    customer.language_locked !== true
-  ) {
-    customer =
-      await lockCustomerLanguageToThai(
-        customer.id
-      );
-  }
-
 } else if (messageHasThai) {
 
   if (
-    customer.language !== "th" ||
-    customer.language_locked !== true
+    customer.language !== "th"
   ) {
     customer =
-      await lockCustomerLanguageToThai(
-        customer.id
+      await updateCustomerLanguage(
+        customer.id,
+        "th"
       );
   }
 
-} else if (
-  customer.language_locked !== true &&
-  customer.language !==
-    detectedLanguage
-) {
+} else {
 
-  customer =
-    await updateCustomerLanguage(
-      customer.id,
+  if (
+    customer.language !==
       detectedLanguage
-    );
+  ) {
+    customer =
+      await updateCustomerLanguage(
+        customer.id,
+        detectedLanguage
+      );
+  }
 }
 
-
+  
 console.log(
   "CUSTOMER LANGUAGE:",
   {
@@ -6099,23 +6081,41 @@ if (
   // ให้ตอบ Welcome เดิม ไม่ส่ง Human Attention
   // =========================================================
 
-  if (
-    isServiceInquiryMessage(message)
-  ) {
-    const template =
-      await getTemplate(
-        "welcome",
-        customer.language || "th"
-      );
+  // =========================================================
+// SERVICE INQUIRY WHILE WAITING_MAP
+//
+// EXISTING CUSTOMER
+// → ไม่ถาม Google Map ซ้ำ
+// → ให้ส่ง Review Link ได้ทันที
+//
+// NEW CUSTOMER
+// → ใช้ Welcome Flow เดิม
+// =========================================================
 
-    if (!template) {
-      throw new Error(
-        "Welcome template not found"
-      );
-    }
+if (
+  isServiceInquiryMessage(message)
+) {
+
+  // =======================================================
+  // EXISTING CUSTOMER
+  // =======================================================
+
+  if (isExistingCustomer) {
 
     const botReply =
-      template.content;
+      getCustomerText(
+        customer,
+
+        `ได้เลยครับ ส่งลิงก์รีวิวที่ต้องการดำเนินการมาได้เลยครับ
+
+สามารถส่งได้หลายลิงก์
+เมื่อส่งครบแล้ว พิมพ์ “ยืนยัน” เพื่อยืนยันรายการทั้งหมดครับ`,
+
+        `Sure. Please send the review link(s) you'd like us to process.
+
+You can send multiple links.
+When you're finished, reply "Confirm all" to confirm the full batch.`
+      );
 
     await saveMessage({
       customerId:
@@ -6144,6 +6144,9 @@ if (
       customerId:
         customer.id,
 
+      customerType:
+        "EXISTING_CUSTOMER",
+
       stateBefore:
         conversation.state,
 
@@ -6153,9 +6156,75 @@ if (
       serviceInquiry:
         true,
 
+      existingCustomerReadyForReview:
+        true,
+
       botReply,
     };
   }
+
+
+  // =======================================================
+  // NEW CUSTOMER
+  // =======================================================
+
+  const template =
+    await getTemplate(
+      "welcome",
+      customer.language || "th"
+    );
+
+  if (!template) {
+    throw new Error(
+      "Welcome template not found"
+    );
+  }
+
+  const botReply =
+    template.content;
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform,
+
+    direction:
+      "outbound",
+
+    messageType:
+      "text",
+
+    messageText:
+      botReply,
+  });
+
+  await updateLastBotMessage(
+    customer.id,
+    botReply
+  );
+
+  return {
+    ok: true,
+
+    customerId:
+      customer.id,
+
+    customerType:
+      "NEW_CUSTOMER",
+
+    stateBefore:
+      conversation.state,
+
+    stateAfter:
+      conversation.state,
+
+    serviceInquiry:
+      true,
+
+    botReply,
+  };
+}
 
   // =========================================================
   // EXISTING CUSTOMER
@@ -18878,10 +18947,13 @@ app.post(
                 item.displayName,
 
               businessName:
-                item.businessName,
+  item.businessName,
 
-              phone:
-                item.phone,
+mapUrl:
+  item.mapUrl,
+
+phone:
+  item.phone,
 
               email:
                 item.email,
