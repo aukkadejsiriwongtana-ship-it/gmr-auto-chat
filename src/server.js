@@ -20500,6 +20500,13 @@ app.post(
 // ป้องกันด้วย SHEET_CONTROL_SECRET
 // =========================================================
 
+// =========================================================
+// MONTHLY OUTREACH — SAFE PREVIEW ENDPOINT
+//
+// ตอนนี้เป็น PREVIEW ONLY
+// ยังไม่ส่งข้อความหาลูกค้าจริง
+// =========================================================
+
 app.post(
   "/monthly-outreach/run",
   async (req, res) => {
@@ -20521,16 +20528,76 @@ app.post(
         });
       }
 
-      const result =
-        await runMonthlyExistingCustomerOutreach();
+      // หาเดือนปัจจุบันตามเวลาไทย
+      const parts =
+        new Intl.DateTimeFormat(
+          "en-CA",
+          {
+            timeZone:
+              "Asia/Bangkok",
 
-      return res.json(
-        result
-      );
+            year:
+              "numeric",
+
+            month:
+              "2-digit",
+          }
+        ).formatToParts(
+          new Date()
+        );
+
+      const year =
+        parts.find(
+          (item) =>
+            item.type === "year"
+        )?.value;
+
+      const month =
+        parts.find(
+          (item) =>
+            item.type === "month"
+        )?.value;
+
+      const outreachMonth =
+        `${year}-${month}`;
+
+      const candidates =
+        await getMonthlyOutreachCandidates({
+          outreachMonth,
+        });
+
+      return res.json({
+        ok: true,
+
+        mode:
+          "PREVIEW_ONLY",
+
+        outreachMonth,
+
+        totalCandidates:
+          candidates.length,
+
+        customers:
+          candidates.map(
+            (customer) => ({
+              id:
+                customer.id,
+
+              name:
+                customer.display_name,
+
+              platform:
+                customer.platform,
+
+              language:
+                customer.language,
+            })
+          ),
+      });
 
     } catch (error) {
       console.error(
-        "MONTHLY OUTREACH RUN ERROR:",
+        "MONTHLY OUTREACH PREVIEW ERROR:",
         error
       );
 
