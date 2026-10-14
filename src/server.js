@@ -13358,7 +13358,147 @@ if (
           matchedCustomer.id,
       });
 
+// ========================================
+// LEGACY MAP -> CUSTOMER MAP
+//
+// ถ้า Legacy Customer มี map_url
+// หลัง Match สำเร็จ:
+// 1. Resolve Google Place
+// 2. เก็บ place_id + map_url
+// 3. พร้อมเข้า 1-Star Reactivation Monitor
+//
+// ถ้า resolve ไม่ได้:
+// - ไม่ทำให้ Legacy Import ล้ม
+// - log ไว้ให้ตรวจภายหลัง
+// ========================================
 
+const legacyMapUrl =
+  String(
+    legacyCustomer.map_url || ""
+  ).trim();
+
+if (legacyMapUrl) {
+
+  try {
+
+    const legacyPlaces =
+      await searchPlaceByText(
+        legacyMapUrl
+      );
+
+    if (
+      Array.isArray(legacyPlaces) &&
+      legacyPlaces.length > 0
+    ) {
+
+      const legacyPlace =
+        legacyPlaces[0];
+
+      const legacyPlaceId =
+        String(
+          legacyPlace?.placeId || ""
+        ).trim();
+
+      if (legacyPlaceId) {
+
+        await upsertCustomerMapRecord({
+          customerId:
+            matchedCustomer.id,
+
+          businessName:
+            legacyPlace.businessName ||
+            legacyCustomer.business_name ||
+            null,
+
+          placeId:
+            legacyPlaceId,
+
+          mapUrl:
+            legacyPlace.mapUrl ||
+            legacyMapUrl,
+
+          sourceReviewUrl:
+            null,
+        });
+
+        console.log(
+          "LEGACY CUSTOMER MAP LINKED:",
+          {
+            legacyCustomerId:
+              legacyCustomer.id,
+
+            customerId:
+              matchedCustomer.id,
+
+            placeId:
+              legacyPlaceId,
+
+            mapUrl:
+              legacyPlace.mapUrl ||
+              legacyMapUrl,
+          }
+        );
+
+      } else {
+
+        console.warn(
+          "LEGACY MAP PLACE ID MISSING:",
+          {
+            legacyCustomerId:
+              legacyCustomer.id,
+
+            customerId:
+              matchedCustomer.id,
+
+            mapUrl:
+              legacyMapUrl,
+          }
+        );
+      }
+
+    } else {
+
+      console.warn(
+        "LEGACY MAP NOT RESOLVED:",
+        {
+          legacyCustomerId:
+            legacyCustomer.id,
+
+          customerId:
+            matchedCustomer.id,
+
+          mapUrl:
+            legacyMapUrl,
+        }
+      );
+    }
+
+  } catch (legacyMapError) {
+
+    // Map resolve fail ไม่ควรทำให้
+    // Legacy Customer Import ทั้งก้อนล้ม
+
+    console.error(
+      "LEGACY MAP LINK ERROR:",
+      {
+        legacyCustomerId:
+          legacyCustomer.id,
+
+        customerId:
+          matchedCustomer.id,
+
+        mapUrl:
+          legacyMapUrl,
+
+        error:
+          legacyMapError?.message ||
+          String(legacyMapError),
+      }
+    );
+  }
+}
+
+      
       // ========================================
       // ปลด HANDOFF
       // พร้อมรับ Review ใหม่
