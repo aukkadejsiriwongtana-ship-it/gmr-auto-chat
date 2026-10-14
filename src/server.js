@@ -14393,6 +14393,116 @@ if (
     event.message.text || "";
 }
 
+// =========================================================
+// LINE STICKER → HUMAN ATTENTION
+//
+// Sticker มีหลายความหมาย
+// Bot ห้ามตีความเอง
+// ส่งให้ Sales ดูใน LINE Group
+// State ลูกค้าคงเดิม
+// =========================================================
+
+if (
+  messageType === "sticker"
+) {
+  const customer =
+    await getOrCreateCustomer({
+      platform:
+        "line",
+
+      platformUserId,
+
+      displayName:
+        lineDisplayName,
+
+      language:
+        "th",
+    });
+
+  const conversation =
+    await getOrCreateConversation(
+      customer.id
+    );
+
+  const packageId =
+    event.message?.packageId ||
+    null;
+
+  const stickerId =
+    event.message?.stickerId ||
+    null;
+
+  const stickerText =
+    [
+      "[LINE STICKER]",
+      packageId
+        ? `Package ID: ${packageId}`
+        : null,
+      stickerId
+        ? `Sticker ID: ${stickerId}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+
+  await saveMessage({
+    customerId:
+      customer.id,
+
+    platform:
+      "line",
+
+    direction:
+      "inbound",
+
+    messageType:
+      "sticker",
+
+    messageText:
+      stickerText,
+
+    platformMessageId:
+      event.message?.id ||
+      null,
+
+    metadata: {
+      packageId,
+      stickerId,
+    },
+  });
+
+
+  await triggerHumanAttention({
+    customer,
+    conversation,
+
+    message:
+      stickerText,
+
+    reason:
+      "CUSTOMER_SENT_STICKER",
+  });
+
+
+  console.log(
+    "LINE STICKER SENT TO HUMAN ATTENTION:",
+    {
+      customerId:
+        customer.id,
+
+      platformUserId,
+
+      packageId,
+      stickerId,
+    }
+  );
+
+
+  // ห้ามเข้า Bot flow ต่อ
+  continue;
+}
+      
 // ========================================
 // BOT PAUSE GATE
 // รับข้อความเข้า + บันทึกไว้
