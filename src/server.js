@@ -16272,6 +16272,404 @@ try {
   }
 });
 
+// =========================================================
+// MANYCHAT -> GMR CORE BRIDGE
+// รองรับทั้ง Facebook Page TH / EN
+//
+// TH  page_key = gmr_th
+// ENG page_key = gmr_en
+//
+// ManyChat Header:
+// x-manychat-secret = MANYCHAT_WEBHOOK_SECRET
+// =========================================================
+app.post("/manychat/inbound", async (req, res) => {
+  try {
+    // ========================================
+    // 1. VERIFY MANYCHAT SECRET
+    // ========================================
+
+    const expectedSecret =
+      String(
+        process.env.MANYCHAT_WEBHOOK_SECRET || ""
+      ).trim();
+
+    const suppliedSecret =
+      String(
+        req.get("x-manychat-secret") || ""
+      ).trim();
+
+
+    if (!expectedSecret) {
+      console.error(
+        "MANYCHAT_WEBHOOK_SECRET NOT CONFIGURED"
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "MANYCHAT_WEBHOOK_SECRET not configured",
+      });
+    }
+
+
+    if (
+      !suppliedSecret ||
+      suppliedSecret !== expectedSecret
+    ) {
+      console.error(
+        "MANYCHAT UNAUTHORIZED"
+      );
+
+      return res.status(401).json({
+        ok: false,
+        error: "Unauthorized",
+      });
+    }
+
+
+    // ========================================
+    // 2. READ MANYCHAT PAYLOAD
+    // ========================================
+
+    const body =
+      req.body || {};
+
+
+    const pageKey =
+      String(
+        body.page_key ||
+        body.pageKey ||
+        "gmr_th"
+      )
+        .trim()
+        .toLowerCase();
+
+
+    if (
+      ![
+        "gmr_th",
+        "gmr_en",
+      ].includes(pageKey)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid page_key",
+      });
+    }
+
+
+    const platformUserId =
+      String(
+        body.subscriber_id ||
+        body.contact_id ||
+        body.platform_user_id ||
+        body.user_id ||
+        ""
+      ).trim();
+
+
+    const message =
+      String(
+        body.message ||
+        body.text ||
+        ""
+      ).trim();
+
+
+    const firstName =
+      String(
+        body.first_name || ""
+      ).trim();
+
+
+    const lastName =
+      String(
+        body.last_name || ""
+      ).trim();
+
+
+    const displayName =
+      String(
+        body.display_name ||
+        [firstName, lastName]
+          .filter(Boolean)
+          .join(" ") ||
+        "Facebook User"
+      ).trim();
+
+
+    const messageId =
+      String(
+        body.message_id ||
+        body.messageId ||
+        ""
+      ).trim() || null;
+
+
+    // ========================================
+    // 3. VALIDATE
+    // ========================================
+
+    if (!platformUserId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing subscriber_id",
+      });
+    }
+
+
+    if (!message) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing message",
+      });
+    }
+
+
+    // ========================================
+    // 4. SEPARATE TH / ENG PAGE IDENTITIES
+    // ========================================
+
+    const platform =
+      `facebook:${pageKey}`;
+
+
+    console.log(
+      "MANYCHAT INBOUND:",
+      {
+        pageKey,
+        platform,
+        platformUserId,
+        displayName,
+        message,
+      }
+    );
+
+
+    // ========================================
+    // 5. OPTIONAL IDEMPOTENCY
+    // ถ้า ManyChat ส่ง message_id มา
+    // กัน request ซ้ำ
+    // ========================================
+
+    if (messageId) {
+      const claim =
+        await claimWebhookEvent({
+          platform,
+          eventId:
+            messageId,
+
+          payload: {
+            transport:
+              "manychat",
+
+            pageKey,
+            platformUserId,
+          },
+        });
+
+
+      if (
+        claim?.claimed === false
+      ) {
+        console.log(
+          "DUPLICATE MANYCHAT EVENT SUPPRESSED:",
+          {
+            messageId,
+            platformUserId,
+          }
+        );
+
+
+        return res.status(200).json({
+          ok: true,
+          duplicate: true,
+
+          reply: null,
+          should_reply: false,
+        });
+      }
+    }
+
+
+    // ========================================
+    // 6. BOT CONTROL
+    // ถ้าปิด Bot
+    // เก็บข้อความไว้ แต่ไม่ตอบ
+    // ========================================
+
+    const botControl =
+      await getBotControl();
+
+
+    if (
+      botControl.enabled !== true
+    ) {
+
+      const pausedCustomer =
+        await getOrCreateCustomer({
+          platform,
+
+          platformUserId,
+
+          displayName,
+
+          language:
+            pageKey === "gmr_en"
+              ? "en"
+              : detectCustomerLanguage(
+                  message,
+                  "th"
+                ),
+        });
+
+
+      await saveMessage({
+        customerId:
+          pausedCustomer.id,
+
+        platform,
+
+        direction:
+          "inbound",
+
+        messageType:
+          "text",
+
+        messageText:
+          message,
+
+        platformMessageId:
+          messageId,
+
+        metadata: {
+          transport:
+            "manychat",
+
+          page_key:
+            pageKey,
+        },
+      });
+
+
+      return res.status(200).json({
+        ok: true,
+
+        paused: true,
+
+        reply: null,
+
+        should_reply: false,
+      });
+    }
+
+
+    // ========================================
+    // 7. SEND INTO EXISTING GMR CORE
+    // ใช้ State Machine เดิมทั้งหมด
+    // ========================================
+
+    const result =
+      await processTestMessage({
+        platform,
+
+        platformUserId,
+
+        message,
+
+        messageType:
+          "text",
+
+        displayName,
+      });
+
+
+    // ========================================
+    // 8. RETURN REPLY TO MANYCHAT
+    // ========================================
+
+    const reply =
+      result?.alreadySent === true
+        ? null
+        : (
+            result?.botReply ||
+            null
+          );
+
+
+    console.log(
+      "MANYCHAT FLOW RESULT:",
+      {
+        pageKey,
+
+        platformUserId,
+
+        stateBefore:
+          result?.stateBefore ||
+          null,
+
+        stateAfter:
+          result?.stateAfter ||
+          null,
+
+        shouldReply:
+          Boolean(reply),
+
+        alreadySent:
+          result?.alreadySent === true,
+      }
+    );
+
+
+    return res.status(200).json({
+      ok: true,
+
+      page_key:
+        pageKey,
+
+      reply,
+
+      should_reply:
+        Boolean(reply),
+
+      customer_id:
+        result?.customerId ||
+        null,
+
+      state_before:
+        result?.stateBefore ||
+        null,
+
+      state_after:
+        result?.stateAfter ||
+        null,
+
+      soft_handoff:
+        result?.softHandoff === true,
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      "MANYCHAT INBOUND ERROR:",
+      error
+    );
+
+
+    return res.status(500).json({
+      ok: false,
+
+      error:
+        error.message,
+
+      reply: null,
+
+      should_reply: false,
+    });
+  }
+});
+
 
 
 // =========================================================
