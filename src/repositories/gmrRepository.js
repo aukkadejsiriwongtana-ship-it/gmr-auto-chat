@@ -3409,6 +3409,55 @@ export async function rollbackLegacyCustomerImport(
   return data;
 }
 
+// =========================================================
+// ROLLBACK LEGACY CUSTOMER AUTO MATCH
+//
+// importing -> pending
+//
+// ใช้เฉพาะ Auto Match จาก Google Sheet
+// ถ้าระหว่างสร้าง historical job/payment/map เกิด error
+// ให้กลับมา pending เพื่อ Import ใหม่ได้
+// =========================================================
+
+export async function rollbackLegacyCustomerAutoMatch(
+  legacyCustomerId
+) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in rollbackLegacyCustomerAutoMatch"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      match_status:
+        "pending",
+
+      pending_customer_id:
+        null,
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .eq(
+      "match_status",
+      "importing"
+    )
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function markLegacyCustomerMatched({
   legacyCustomerId,
   customerId,
