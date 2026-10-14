@@ -1,0 +1,28 @@
+name: Monthly Existing Customer Outreach
+
+on:
+  schedule:
+    - cron: "0 3 28-31 * *"
+  workflow_dispatch:
+
+jobs:
+  run-monthly-outreach:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger monthly outreach
+        run: |
+          RESPONSE=$(curl -sS -w "\n%{http_code}" \
+            -X POST "https://gmr-auto-chat.onrender.com/monthly-outreach/run" \
+            -H "Content-Type: application/json" \
+            -d "{\"secret\":\"${{ secrets.SHEET_CONTROL_SECRET }}\",\"scheduled\":true}")
+
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "HTTP Status: $STATUS"
+          echo "Response: $BODY"
+
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            exit 1
+          fi
