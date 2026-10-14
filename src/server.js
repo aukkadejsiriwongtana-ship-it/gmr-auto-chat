@@ -4770,6 +4770,633 @@ app.use(
     },
   })
 );
+
+// =========================================================
+// STRIPE CHECKOUT RESULT PAGES
+// =========================================================
+
+app.get(
+  "/stripe/success",
+  async (req, res) => {
+    res
+      .status(200)
+      .send(
+        "Payment completed successfully. You may now return to the chat."
+      );
+  }
+);
+
+
+app.get(
+  "/stripe/cancel",
+  async (req, res) => {
+    res
+      .status(200)
+      .send(
+        "Payment was not completed. You may return to the chat and use the payment link again."
+      );
+  }
+);
+
+
+// =========================================================
+// STRIPE WEBHOOK
+//
+// checkout.session.completed
+// → ตรวจ Stripe signature
+// → อ่าน job_ids จาก metadata
+// → waiting_payment -> paid
+// → สร้าง verified payment
+// → update Google Sheet
+// → แจ้งลูกค้าว่ารับเงินแล้ว
+// =========================================================
+
+app.post(
+  "/stripe/webhook",
+  async (req, res) => {
+
+    try {
+
+      const webhookSecret =
+        String(
+          process.env
+            .STRIPE_WEBHOOK_SECRET ||
+          ""
+        ).trim();
+
+
+      if (!webhookSecret) {
+        throw new Error(
+          "STRIPE_WEBHOOK_SECRET is not configured"
+        );
+      }
+
+
+      const signatureHeader =
+        String(
+          req.get(
+            "stripe-signature"
+          ) || ""
+        ).trim();
+
+
+      if (!signatureHeader) {
+        return res
+          .status(400)
+          .send(
+            "Missing Stripe signature"
+          );
+      }
+
+
+      if (!req.rawBody) {
+        return res
+          .status(400)
+          .send(
+            "Missing raw request body"
+          );
+      }
+
+
+      // ========================================
+      // VERIFY STRIPE SIGNATURE
+      // ========================================
+
+      const signatureParts =
+        signatureHeader
+          .split(",")
+          .map(
+            (part) =>
+              part.trim()
+          );
+
+
+      const timestampPart =
+        signatureParts.find(
+          (part) =>
+            part.startsWith(
+              "t="
+            )
+        );
+
+
+      const v1Parts =
+        signatureParts
+          .filter(
+            (part) =>
+              part.startsWith(
+                "v1="
+              )
+          )
+          .map(
+            (part) =>
+              part.slice(3)
+          );
+
+
+      const stripeTimestamp =
+        timestampPart
+          ? Number(
+              timestampPart.slice(2)
+            )
+          : 0;
+
+
+      if (
+        !stripeTimestamp ||
+        v1Parts.length === 0
+      ) {
+        return res
+          .status(400)
+          .send(
+            "Invalid Stripe signature header"
+          );
+      }
+
+
+      // 5-minute replay protection
+      const nowSeconds =
+        Math.floor(
+          Date.now() / 1000
+        );
+
+
+      if (
+        Math.abs(
+          nowSeconds -
+          stripeTimestamp
+        ) > 300
+      ) {
+        return res
+          .status(400)
+          .send(
+            "Stripe signature timestamp expired"
+          );
+      }
+
+
+      const signedPayload =
+        `${stripeTimestamp}.${req.rawBody.toString("utf8")}`;
+
+
+      const expectedSignature =
+        crypto
+          .createHmac(
+            "sha256",
+            webhookSecret
+          )
+          .update(
+            signedPayload,
+            "utf8"
+          )
+          .digest("hex");
+
+
+      const signatureValid =
+        v1Parts.some(
+          (providedSignature) => {
+
+            try {
+
+              const expectedBuffer =
+                Buffer.from(
+                  expectedSignature,
+                  "hex"
+                );
+
+              const providedBuffer =
+                Buffer.from(
+                  providedSignature,
+                  "hex"
+                );
+
+
+              return (
+                expectedBuffer.length ===
+                  providedBuffer.length &&
+                crypto.timingSafeEqual(
+                  expectedBuffer,
+                  providedBuffer
+                )
+              );
+
+            } catch {
+              return false;
+            }
+          }
+        );
+
+
+      if (!signatureValid) {
+        return res
+          .status(400)
+          .send(
+            "Invalid Stripe signature"
+          );
+      }
+
+
+      const event =
+        req.body || {};
+
+
+      // ========================================
+      // ONLY HANDLE SUCCESSFUL CHECKOUT
+      // ========================================
+
+      if (
+        event.type !==
+        "checkout.session.completed"
+      ) {
+
+        return res
+          .status(200)
+          .json({
+            received:
+              true,
+
+            ignored:
+              true,
+
+            type:
+              event.type ||
+              null,
+          });
+      }
+
+
+      const session =
+        event.data?.object ||
+        null;
+
+
+      if (
+        !session ||
+        session.payment_status !==
+          "paid"
+      ) {
+
+        return res
+          .status(200)
+          .json({
+            received:
+              true,
+
+            ignored:
+              true,
+
+            reason:
+              "checkout_not_paid",
+          });
+      }
+
+
+      // ========================================
+      // READ METADATA
+      // ========================================
+
+      const customerId =
+        String(
+          session.metadata
+            ?.customer_id ||
+          ""
+        ).trim();
+
+
+      const jobIds =
+        String(
+          session.metadata
+            ?.job_ids ||
+          ""
+        )
+          .split(",")
+          .map(
+            (value) =>
+              value.trim()
+          )
+          .filter(Boolean);
+
+
+      if (
+        !customerId ||
+        jobIds.length === 0
+      ) {
+        throw new Error(
+          "Stripe session metadata is incomplete"
+        );
+      }
+
+
+      const verifiedAt =
+        new Date().toISOString();
+
+
+      const paidJobs = [];
+
+
+      // ========================================
+      // MARK EVERY JOB PAID
+      // ========================================
+
+      for (
+        const jobId of jobIds
+      ) {
+
+        const paymentJob =
+          await getJobById(
+            jobId
+          );
+
+
+        if (!paymentJob) {
+          console.error(
+            "STRIPE JOB NOT FOUND:",
+            {
+              jobId,
+              sessionId:
+                session.id,
+            }
+          );
+
+          continue;
+        }
+
+
+        // Safety:
+        // ห้าม Stripe session ของ customer หนึ่ง
+        // ไปจ่าย job ของ customer อีกคน
+        if (
+          String(
+            paymentJob.customer_id ||
+            ""
+          ) !== customerId
+        ) {
+          console.error(
+            "STRIPE CUSTOMER/JOB MISMATCH:",
+            {
+              jobId,
+              sessionCustomerId:
+                customerId,
+
+              jobCustomerId:
+                paymentJob.customer_id,
+            }
+          );
+
+          continue;
+        }
+
+
+        // Webhook อาจถูก Stripe retry
+        // ถ้า paid อยู่แล้วให้ข้าม
+        if (
+          paymentJob.status ===
+          "paid"
+        ) {
+          paidJobs.push(
+            jobId
+          );
+
+          continue;
+        }
+
+
+        const allowedStatus =
+          [
+            "waiting_payment",
+            "removed_waiting_payment",
+          ].includes(
+            paymentJob.status
+          );
+
+
+        if (!allowedStatus) {
+          console.warn(
+            "STRIPE JOB NOT WAITING PAYMENT:",
+            {
+              jobId,
+              status:
+                paymentJob.status,
+            }
+          );
+
+          continue;
+        }
+
+
+        const existingPayment =
+          await getVerifiedPaymentByJobId(
+            paymentJob.id
+          );
+
+
+        if (!existingPayment) {
+
+          await createPayment({
+            jobId:
+              paymentJob.id,
+
+            amount:
+              Number(
+                paymentJob.price ||
+                0
+              ),
+
+            paymentMethod:
+              "STRIPE",
+
+            slipReceived:
+              false,
+
+            paymentVerified:
+              true,
+
+            verifiedAt,
+
+            transactionReference:
+              session.payment_intent ||
+              session.id,
+          });
+        }
+
+
+        await updateJob(
+          paymentJob.id,
+          {
+            status:
+              "paid",
+
+            paid_at:
+              verifiedAt,
+          }
+        );
+
+
+        try {
+
+          await updateJobInGoogleSheet({
+            jobId:
+              paymentJob.id,
+
+            status:
+              "paid",
+
+            paidAt:
+              verifiedAt,
+          });
+
+        } catch (sheetError) {
+
+          console.error(
+            "STRIPE PAID SHEET UPDATE FAILED:",
+            {
+              jobId:
+                paymentJob.id,
+
+              error:
+                sheetError?.message ||
+                String(
+                  sheetError
+                ),
+            }
+          );
+        }
+
+
+        paidJobs.push(
+          paymentJob.id
+        );
+      }
+
+
+      // ========================================
+      // CUSTOMER
+      // ========================================
+
+      const customer =
+        await getCustomerById(
+          customerId
+        );
+
+
+      if (
+        customer &&
+        paidJobs.length > 0
+      ) {
+
+        const paymentReceivedReply =
+          getCustomerText(
+            customer,
+
+            "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ ✅",
+
+            "Thank you. Your payment has been received successfully. ✅"
+          );
+
+
+        try {
+
+          await sendMessageToCustomer({
+            platform:
+              customer.platform,
+
+            platformUserId:
+              customer.platform_user_id,
+
+            text:
+              paymentReceivedReply,
+          });
+
+
+          await saveMessage({
+            customerId:
+              customer.id,
+
+            platform:
+              customer.platform,
+
+            direction:
+              "outbound",
+
+            messageType:
+              "text",
+
+            messageText:
+              paymentReceivedReply,
+          });
+
+
+          await updateLastBotMessage(
+            customer.id,
+            paymentReceivedReply
+          );
+
+
+        } catch (notifyError) {
+
+          // Payment ต้องถือว่าสำเร็จ
+          // แม้ส่งข้อความหาลูกค้าไม่ได้
+          console.error(
+            "STRIPE PAID CUSTOMER NOTIFICATION FAILED:",
+            notifyError
+          );
+        }
+      }
+
+
+      console.log(
+        "STRIPE PAYMENT COMPLETED:",
+        {
+          sessionId:
+            session.id,
+
+          customerId,
+
+          jobIds,
+
+          paidJobs,
+
+          amountTotal:
+            session.amount_total,
+
+          currency:
+            session.currency,
+        }
+      );
+
+
+      return res
+        .status(200)
+        .json({
+          received:
+            true,
+
+          paidJobs,
+        });
+
+
+    } catch (error) {
+
+      console.error(
+        "STRIPE WEBHOOK ERROR:",
+        error
+      );
+
+
+      return res
+        .status(500)
+        .json({
+          received:
+            false,
+
+          error:
+            error?.message ||
+            String(error),
+        });
+    }
+  }
+);
+
 // =========================================================
 // HEALTH CHECK
 // =========================================================
