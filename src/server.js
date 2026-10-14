@@ -421,6 +421,175 @@ function getCurrencyFromUnitPrice({
   );
 }
 
+// =========================================================
+// STRIPE DYNAMIC CHECKOUT
+//
+// สร้าง Checkout Session ตามยอดจริง
+// เช่น:
+// $250  -> 25000 cents
+// $500  -> 50000 cents
+// =========================================================
+
+async function createStripeCheckoutSession({
+  amount,
+  currency = "USD",
+  customerId = null,
+  jobIds = [],
+  customerName = null,
+}) {
+  const stripeSecretKey =
+    String(
+      process.env.STRIPE_SECRET_KEY || ""
+    ).trim();
+
+  if (!stripeSecretKey) {
+    throw new Error(
+      "STRIPE_SECRET_KEY is not configured"
+    );
+  }
+
+  const safeAmount =
+    Number(amount || 0);
+
+  if (
+    !Number.isFinite(safeAmount) ||
+    safeAmount <= 0
+  ) {
+    throw new Error(
+      "Invalid Stripe checkout amount"
+    );
+  }
+
+  const safeCurrency =
+    String(currency || "USD")
+      .trim()
+      .toLowerCase();
+
+  const unitAmount =
+    Math.round(
+      safeAmount * 100
+    );
+
+
+  const body =
+    new URLSearchParams();
+
+  body.set(
+    "mode",
+    "payment"
+  );
+
+  body.set(
+    "line_items[0][price_data][currency]",
+    safeCurrency
+  );
+
+  body.set(
+    "line_items[0][price_data][unit_amount]",
+    String(unitAmount)
+  );
+
+  body.set(
+    "line_items[0][price_data][product_data][name]",
+    "Google Review Service"
+  );
+
+  body.set(
+    "line_items[0][quantity]",
+    "1"
+  );
+
+  body.set(
+    "success_url",
+    "https://gmr-auto-chat.onrender.com/stripe/success?session_id={CHECKOUT_SESSION_ID}"
+  );
+
+  body.set(
+    "cancel_url",
+    "https://gmr-auto-chat.onrender.com/stripe/cancel"
+  );
+
+
+  if (customerId) {
+    body.set(
+      "metadata[customer_id]",
+      String(customerId)
+    );
+  }
+
+
+  if (
+    Array.isArray(jobIds) &&
+    jobIds.length > 0
+  ) {
+    body.set(
+      "metadata[job_ids]",
+      jobIds.join(",")
+    );
+  }
+
+
+  if (customerName) {
+    body.set(
+      "metadata[customer_name]",
+      String(customerName)
+    );
+  }
+
+
+  const response =
+    await fetch(
+      "https://api.stripe.com/v1/checkout/sessions",
+      {
+        method:
+          "POST",
+
+        headers: {
+          Authorization:
+            `Bearer ${stripeSecretKey}`,
+
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+        },
+
+        body:
+          body.toString(),
+      }
+    );
+
+
+  const data =
+    await response.json();
+
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+      "Stripe checkout creation failed"
+    );
+  }
+
+
+  if (!data?.url) {
+    throw new Error(
+      "Stripe checkout URL missing"
+    );
+  }
+
+
+  return {
+    id:
+      data.id,
+
+    url:
+      data.url,
+
+    paymentStatus:
+      data.payment_status ||
+      null,
+  };
+}
+
 
 function formatMoney(
   amount,
@@ -20674,36 +20843,8 @@ app.post("/sheet-control", async (req, res) => {
     ).trim();
 
 
-  const stripePaymentLink =
-    String(
-      process.env
-        .STRIPE_PAYMENT_LINK ||
-      ""
-    ).trim();
-
-
-  if (
-    paymentCurrency ===
-      "THB" &&
-    !thbPaymentQrUrl
-  ) {
-
-    throw new Error(
-      "THB_PAYMENT_QR_URL is not configured"
-    );
-  }
-
-
-  if (
-    paymentCurrency ===
-      "USD" &&
-    !stripePaymentLink
-  ) {
-
-    throw new Error(
-      "STRIPE_PAYMENT_LINK is not configured"
-    );
-  }
+  let stripePaymentLink =
+  null;
 
 
   // ========================================
@@ -20784,6 +20925,90 @@ app.post("/sheet-control", async (req, res) => {
     paymentSummary.lines
       .join("\n");
 
+// ========================================
+// USD → CREATE DYNAMIC STRIPE CHECKOUT
+// ========================================
+
+if (
+  paymentCurrency === "USD"
+) {
+
+  const stripeJobs =
+    waitingPaymentJobs.filter(
+      (waitingJob) => {
+
+        const jobPrice =
+          Number(
+            waitingJob.price || 0
+          );
+
+        const jobCurrency =
+          getCurrencyFromUnitPrice({
+            price:
+              jobPrice,
+
+            currency:
+              waitingJob.currency,
+          });
+
+        return (
+          jobCurrency === "USD"
+        );
+      }
+    );
+
+
+  const stripeCheckout =
+    await createStripeCheckoutSession({
+      amount:
+        paymentSummary.total,
+
+      currency:
+        "USD",
+
+      customerId:
+        customer.id,
+
+      jobIds:
+        stripeJobs.map(
+          (waitingJob) =>
+            waitingJob.id
+        ),
+
+      customerName:
+        customer.display_name ||
+        null,
+    });
+
+
+  stripePaymentLink =
+    stripeCheckout.url;
+
+
+  console.log(
+    "STRIPE CHECKOUT CREATED:",
+    {
+      customerId:
+        customer.id,
+
+      sessionId:
+        stripeCheckout.id,
+
+      amount:
+        paymentSummary.total,
+
+      currency:
+        "USD",
+
+      jobIds:
+        stripeJobs.map(
+          (waitingJob) =>
+            waitingJob.id
+        ),
+    }
+  );
+}
+            
 
   // ========================================
   // 4. สร้างข้อความเก็บเงิน
