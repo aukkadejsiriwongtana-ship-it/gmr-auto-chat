@@ -19078,16 +19078,19 @@ app.post(
     item.platformAccount,
 
   legacyCustomerId:
-    item.legacyCustomerId,
+  item.legacyCustomerId,
 
-  displayName:
-    item.displayName,
+displayName:
+  item.displayName,
 
-              displayName:
-                item.displayName,
-
-              businessName:
+businessName:
   item.businessName,
+
+mapUrl:
+  item.mapUrl,
+
+phone:
+  item.phone,
 
 mapUrl:
   item.mapUrl,
@@ -19117,6 +19120,120 @@ phone:
                 item.note,
             });
 
+// ================================================
+// LEGACY MAP AUTO-LINK FOR ALREADY MATCHED CUSTOMER
+//
+// กรณีลูกค้า Legacy ถูก Match ไปแล้ว
+// แต่เพิ่งเพิ่ม map_url ภายหลังใน Google Sheet
+// → Import ซ้ำแล้วผูก Map ให้ทันที
+// ================================================
+
+const importedLegacy =
+  result?.customer || null;
+
+const matchedCustomerId =
+  String(
+    importedLegacy?.matched_customer_id || ""
+  ).trim();
+
+const importedMapUrl =
+  String(
+    importedLegacy?.map_url ||
+    item.mapUrl ||
+    ""
+  ).trim();
+
+if (
+  matchedCustomerId &&
+  importedMapUrl
+) {
+
+  try {
+
+    const places =
+      await searchPlaceByText(
+        importedMapUrl
+      );
+
+    if (
+      Array.isArray(places) &&
+      places.length > 0
+    ) {
+
+      const place =
+        places[0];
+
+      const placeId =
+        String(
+          place?.placeId || ""
+        ).trim();
+
+      if (placeId) {
+
+        await upsertCustomerMapRecord({
+          customerId:
+            matchedCustomerId,
+
+          businessName:
+            place.businessName ||
+            importedLegacy?.business_name ||
+            item.businessName ||
+            null,
+
+          placeId,
+
+          mapUrl:
+            place.mapUrl ||
+            importedMapUrl,
+
+          sourceReviewUrl:
+            null,
+        });
+
+        console.log(
+          "LEGACY IMPORT MAP AUTO-LINKED:",
+          {
+            legacyCustomerId:
+              importedLegacy?.id ||
+              null,
+
+            customerId:
+              matchedCustomerId,
+
+            placeId,
+
+            mapUrl:
+              place.mapUrl ||
+              importedMapUrl,
+          }
+        );
+      }
+    }
+
+  } catch (mapLinkError) {
+
+    // ห้ามทำให้ Import ลูกค้าเก่าทั้งแถวล้ม
+    console.error(
+      "LEGACY IMPORT MAP AUTO-LINK FAILED:",
+      {
+        legacyCustomerId:
+          importedLegacy?.id ||
+          null,
+
+        customerId:
+          matchedCustomerId,
+
+        mapUrl:
+          importedMapUrl,
+
+        error:
+          mapLinkError?.message ||
+          String(mapLinkError),
+      }
+    );
+  }
+}
+          
       results.push({
   row:
     i + 2,
