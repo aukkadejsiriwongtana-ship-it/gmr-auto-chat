@@ -16430,8 +16430,10 @@ app.post("/manychat/inbound", async (req, res) => {
     // 4. SEPARATE TH / ENG PAGE IDENTITIES
     // ========================================
 
-    const platform =
-      `facebook:${pageKey}`;
+  const platform =
+  pageKey === "gmr_en"
+    ? "facebook_en"
+    : "facebook_th";
 
 
     console.log(
