@@ -19073,55 +19073,292 @@ app.post(
 
         try {
           const result =
-           await createLegacyCustomerFromSheet({
-  platform:
-    item.platform,
+  await createLegacyCustomerFromSheet({
+    platform:
+      item.platform,
 
-  platformAccount:
-    item.platformAccount,
+    platformAccount:
+      item.platformAccount,
 
-  legacyCustomerId:
-  item.legacyCustomerId,
+    legacyCustomerId:
+      item.legacyCustomerId,
 
-displayName:
-  item.displayName,
+    displayName:
+      item.displayName,
 
-businessName:
-  item.businessName,
+    businessName:
+      item.businessName,
 
-mapUrl:
-  item.mapUrl,
+    mapUrl:
+      item.mapUrl,
 
-phone:
-  item.phone,
+    phone:
+      item.phone,
 
-mapUrl:
-  item.mapUrl,
+    email:
+      item.email,
 
-phone:
-  item.phone,
+    newReviewRate:
+      item.newReviewRate,
 
-              email:
-                item.email,
+    newReviewCurrency:
+      item.newReviewCurrency,
 
-              newReviewRate:
-                item.newReviewRate,
+    oldReviewRate:
+      item.oldReviewRate,
 
-              newReviewCurrency:
-                item.newReviewCurrency,
+    oldReviewCurrency:
+      item.oldReviewCurrency,
 
-              oldReviewRate:
-                item.oldReviewRate,
+    hasVerifiedPayment:
+      item.hasVerifiedPayment,
 
-              oldReviewCurrency:
-                item.oldReviewCurrency,
+    note:
+      item.note,
+  });
 
-              hasVerifiedPayment:
-                item.hasVerifiedPayment,
 
-              note:
-                item.note,
-            });
+// ========================================================
+// LEGACY AUTO MATCH ON SHEET IMPORT
+//
+// หลักการ:
+// 1. Legacy ที่ matched แล้ว → ไม่ยุ่ง
+// 2. Legacy pending → หา customer เดิมจาก
+//    platform + display_name
+// 3. เจอ 1 คน → claim สำหรับ Auto Match
+// 4. เจอ >1 คน → ห้ามเดา
+// 5. ไม่เจอ → pending ต่อไป
+// ========================================================
+
+let autoMatchCustomer =
+  null;
+
+let autoMatchClaim =
+  null;
+
+let autoMatchStatus =
+  "not_checked";
+
+const importedLegacyForMatch =
+  result?.customer || null;
+
+const currentMatchStatus =
+  String(
+    importedLegacyForMatch
+      ?.match_status ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+
+const alreadyMatchedCustomerId =
+  String(
+    importedLegacyForMatch
+      ?.matched_customer_id ||
+    ""
+  ).trim();
+
+
+if (alreadyMatchedCustomerId) {
+
+  autoMatchStatus =
+    "already_matched";
+
+} else if (
+  currentMatchStatus === "pending"
+) {
+
+  const legacyPlatform =
+    String(
+      importedLegacyForMatch
+        ?.platform ||
+      item.platform ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const legacyDisplayName =
+    String(
+      importedLegacyForMatch
+        ?.display_name ||
+      item.displayName ||
+      ""
+    ).trim();
+
+
+  if (
+    legacyPlatform &&
+    legacyDisplayName
+  ) {
+
+    const customerMatches =
+      await findCustomersByPlatformAndDisplayName({
+        platform:
+          legacyPlatform,
+
+        displayName:
+          legacyDisplayName,
+      });
+
+
+    console.log(
+      "LEGACY IMPORT AUTO MATCH SEARCH:",
+      {
+        legacyCustomerId:
+          importedLegacyForMatch?.id ||
+          null,
+
+        platform:
+          legacyPlatform,
+
+        displayName:
+          legacyDisplayName,
+
+        matchCount:
+          customerMatches.length,
+
+        customerIds:
+          customerMatches.map(
+            (customer) =>
+              customer.id
+          ),
+      }
+    );
+
+
+    // ====================================================
+    // EXACTLY 1 CUSTOMER
+    // ====================================================
+
+    if (
+      customerMatches.length === 1
+    ) {
+
+      autoMatchCustomer =
+        customerMatches[0];
+
+
+      autoMatchClaim =
+        await claimLegacyCustomerAutoMatch({
+          legacyCustomerId:
+            importedLegacyForMatch.id,
+
+          customerId:
+            autoMatchCustomer.id,
+        });
+
+
+      if (autoMatchClaim) {
+
+        autoMatchStatus =
+          "claimed";
+
+        console.log(
+          "LEGACY AUTO MATCH CLAIMED:",
+          {
+            legacyCustomerId:
+              importedLegacyForMatch.id,
+
+            customerId:
+              autoMatchCustomer.id,
+
+            platform:
+              legacyPlatform,
+
+            displayName:
+              legacyDisplayName,
+          }
+        );
+
+      } else {
+
+        autoMatchStatus =
+          "claim_skipped";
+
+        console.log(
+          "LEGACY AUTO MATCH CLAIM SKIPPED:",
+          {
+            legacyCustomerId:
+              importedLegacyForMatch.id,
+
+            customerId:
+              autoMatchCustomer.id,
+          }
+        );
+      }
+
+
+    // ====================================================
+    // MORE THAN 1 CUSTOMER
+    // ห้าม Auto Match
+    // รอบถัดไปเราจะให้ส่ง LINE มาถามทีม
+    // ====================================================
+
+    } else if (
+      customerMatches.length > 1
+    ) {
+
+      autoMatchStatus =
+        "ambiguous";
+
+      console.warn(
+        "LEGACY AUTO MATCH AMBIGUOUS:",
+        {
+          legacyCustomerId:
+            importedLegacyForMatch.id,
+
+          platform:
+            legacyPlatform,
+
+          displayName:
+            legacyDisplayName,
+
+          customerIds:
+            customerMatches.map(
+              (customer) =>
+                customer.id
+            ),
+        }
+      );
+
+
+    // ====================================================
+    // NOT FOUND
+    // ====================================================
+
+    } else {
+
+      autoMatchStatus =
+        "not_found";
+
+      console.log(
+        "LEGACY AUTO MATCH CUSTOMER NOT FOUND:",
+        {
+          legacyCustomerId:
+            importedLegacyForMatch.id,
+
+          platform:
+            legacyPlatform,
+
+          displayName:
+            legacyDisplayName,
+        }
+      );
+    }
+
+  } else {
+
+    autoMatchStatus =
+      "missing_match_data";
+  }
+
+} else {
+
+  autoMatchStatus =
+    currentMatchStatus ||
+    "unknown_status";
+}
 
 // ================================================
 // LEGACY MAP AUTO-LINK FOR ALREADY MATCHED CUSTOMER
