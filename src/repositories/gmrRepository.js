@@ -4602,7 +4602,7 @@ export async function getMonthlyOutreachCandidates({
     error: paymentsError,
   } = await supabase
     .from("gmr_payments")
-    .select("job_id")
+    .select("job_id, verified_at, created_at")
     .eq(
       "payment_verified",
       true
@@ -4635,6 +4635,66 @@ export async function getMonthlyOutreachCandidates({
     ),
   ];
 
+// =======================================================
+// COOLDOWN 30 DAYS AFTER LATEST VERIFIED PAYMENT
+// ลูกค้าที่เพิ่งชำระเงินภายใน 30 วัน
+// ยังไม่ควรได้รับ Monthly Outreach
+// =======================================================
+
+const paymentCooldownCutoff =
+  Date.now() -
+  30 * 24 * 60 * 60 * 1000;
+
+const recentPaidJobIds =
+  new Set(
+    (verifiedPayments || [])
+      .filter(
+        (payment) => {
+          const paidAt =
+            payment?.verified_at ||
+            payment?.created_at;
+
+          if (!paidAt) {
+            return false;
+          }
+
+          const paidTime =
+            new Date(
+              paidAt
+            ).getTime();
+
+          return (
+            Number.isFinite(
+              paidTime
+            ) &&
+            paidTime >=
+              paymentCooldownCutoff
+          );
+        }
+      )
+      .map(
+        (payment) =>
+          payment.job_id
+      )
+      .filter(Boolean)
+  );
+
+const recentPaidCustomerIds =
+  new Set(
+    (paidJobs || [])
+      .filter(
+        (job) =>
+          recentPaidJobIds.has(
+            job.id
+          )
+      )
+      .map(
+        (job) =>
+          job.customer_id
+      )
+      .filter(Boolean)
+  );
+  
   if (paidJobIds.length === 0) {
     return [];
   }
@@ -4806,6 +4866,15 @@ export async function getMonthlyOutreachCandidates({
       ) {
         return false;
       }
+
+      // เพิ่งชำระเงินภายใน 30 วัน
+if (
+  recentPaidCustomerIds.has(
+    customer.id
+  )
+) {
+  return false;
+}
 
       // เดือนนี้เคยส่ง/เคย claim แล้ว
       if (
