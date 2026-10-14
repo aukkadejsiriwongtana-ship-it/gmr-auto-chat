@@ -3243,6 +3243,75 @@ export async function getPendingLegacyCustomersByDisplayName(
 }
 
 // =========================================================
+// CLAIM LEGACY CUSTOMER AUTO MATCH
+//
+// ใช้ตอน Import จาก Google Sheet
+//
+// pending -> importing
+//
+// เจอ customer เดิมตรงกันเพียง 1 คน
+// → claim สิทธิ์ก่อนสร้าง payment history
+//
+// ป้องกัน:
+// - Import ซ้ำ
+// - Request ซ้อน
+// - จับ Legacy เดียวกันเข้าหลาย customer
+// =========================================================
+
+export async function claimLegacyCustomerAutoMatch({
+  legacyCustomerId,
+  customerId,
+}) {
+  if (!legacyCustomerId) {
+    throw new Error(
+      "Missing legacyCustomerId in claimLegacyCustomerAutoMatch"
+    );
+  }
+
+  if (!customerId) {
+    throw new Error(
+      "Missing customerId in claimLegacyCustomerAutoMatch"
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_legacy_customers")
+    .update({
+      pending_customer_id:
+        customerId,
+
+      match_status:
+        "importing",
+    })
+    .eq(
+      "id",
+      legacyCustomerId
+    )
+    .eq(
+      "match_status",
+      "pending"
+    )
+    .is(
+      "matched_customer_id",
+      null
+    )
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  // null =
+  // มี request อื่น claim ไปแล้ว
+  // หรือ Legacy ถูก match ไปแล้ว
+  return data;
+}
+
+// =========================================================
 // CLAIM LEGACY CUSTOMER IMPORT
 //
 // pending_confirmation -> importing
