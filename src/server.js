@@ -5647,20 +5647,20 @@ if (
   }
 }
 
+// -------------------------------------------------------
+// 6. WAITING_MAP
+// -------------------------------------------------------
 
-  // -------------------------------------------------------
-  // 6. WAITING_MAP
-  // -------------------------------------------------------
-
-  if (
-    conversation.state ===
-    GMR_STATES.WAITING_MAP
-  ) {
-
-    if (
+if (
   conversation.state ===
   GMR_STATES.WAITING_MAP
 ) {
+
+  // =========================================================
+  // SERVICE INQUIRY WHILE WAITING_MAP
+  // เช่น สนใจ / สอบถาม / อยากลบรีวิว
+  // ให้ตอบ Welcome เดิม ไม่ส่ง Human Attention
+  // =========================================================
 
   if (
     isServiceInquiryMessage(message)
@@ -5683,11 +5683,15 @@ if (
     await saveMessage({
       customerId:
         customer.id,
+
       platform,
+
       direction:
         "outbound",
+
       messageType:
         "text",
+
       messageText:
         botReply,
     });
@@ -5699,24 +5703,27 @@ if (
 
     return {
       ok: true,
+
       customerId:
         customer.id,
+
       stateBefore:
         conversation.state,
+
       stateAfter:
         conversation.state,
+
       serviceInquiry:
         true,
+
       botReply,
     };
   }
 
-  // logic WAITING_MAP เดิมต่อจากนี้
-
-// =========================================================
-// EXISTING CUSTOMER
-// CONFIRM ALL BATCH
-// =========================================================
+  // =========================================================
+  // EXISTING CUSTOMER
+  // CONFIRM ALL BATCH
+  // =========================================================
 
 const confirmAllWords = [
   "ยืนยัน",
@@ -6757,7 +6764,7 @@ console.log(
       directReviewDepartmentId,
   }
 );
-  // =========================================================
+// =========================================================
 // EXISTING CUSTOMER - DIRECT REVIEW AUTO PRICE
 // =========================================================
 
