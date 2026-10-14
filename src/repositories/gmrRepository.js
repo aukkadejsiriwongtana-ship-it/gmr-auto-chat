@@ -4399,6 +4399,69 @@ export async function getCustomerMapById(customerMapId) {
   return data || null;
 }
 
+// =========================================================
+// FIND EXISTING CUSTOMERS FOR LEGACY AUTO MATCH
+//
+// ใช้:
+// platform + display_name
+//
+// ไม่ใช้ platform_account เป็นเงื่อนไขบังคับ
+// เพราะ customer เก่าบางรายอาจยังไม่มีค่า platform_account
+//
+// คืนเป็น array:
+// 0 คน = ยังไม่เคยมี customer ในระบบ
+// 1 คน = Auto Match ได้
+// >1 คน = ต้องให้ทีมเลือก
+// =========================================================
+
+export async function findCustomersByPlatformAndDisplayName({
+  platform,
+  displayName,
+}) {
+  const safePlatform =
+    String(platform || "")
+      .trim()
+      .toLowerCase();
+
+  const safeDisplayName =
+    String(displayName || "")
+      .trim();
+
+  if (
+    !safePlatform ||
+    !safeDisplayName
+  ) {
+    return [];
+  }
+
+  const {
+    data,
+    error,
+  } = await supabase
+    .from("gmr_customers")
+    .select("*")
+    .eq(
+      "platform",
+      safePlatform
+    )
+    .ilike(
+      "display_name",
+      safeDisplayName
+    )
+    .order(
+      "created_at",
+      {
+        ascending: false,
+      }
+    );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 
 // =========================================================
 // MANUAL CUSTOMER / SHEET EDITABLE SYNC HELPERS
