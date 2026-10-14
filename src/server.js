@@ -4949,21 +4949,49 @@ const existingCustomer =
     platformUserId
   );
 
-
 const messageHasThai =
   /[\u0E00-\u0E7F]/.test(
     String(message || "")
   );
+
+const normalizedPlatform =
+  String(platform || "")
+    .trim()
+    .toLowerCase();
+
+const forceEnglishPage =
+  normalizedPlatform === "facebook_en" ||
+  normalizedPlatform === "fb_en";
+
+const forceThaiPage =
+  normalizedPlatform === "facebook_th" ||
+  normalizedPlatform === "fb_th";
 
 const thaiLocked =
   existingCustomer?.language_locked === true;
 
 let detectedLanguage;
 
-if (thaiLocked) {
+// =========================================================
+// PAGE LANGUAGE POLICY
+//
+// Facebook EN = English 100%
+// Facebook TH = Thai 100%
+// LINE / platform อื่น = Auto detect ตามเดิม
+// =========================================================
+
+if (forceEnglishPage) {
+  detectedLanguage = "en";
+
+} else if (forceThaiPage) {
   detectedLanguage = "th";
+
+} else if (thaiLocked) {
+  detectedLanguage = "th";
+
 } else if (messageHasThai) {
   detectedLanguage = "th";
+
 } else {
   detectedLanguage =
     detectCustomerLanguage(
@@ -4984,7 +5012,24 @@ let customer =
   });
 
 
-if (messageHasThai) {
+// =========================================================
+// FORCE PAGE LANGUAGE INTO CUSTOMER RECORD
+// =========================================================
+
+if (forceEnglishPage) {
+
+  if (
+    customer.language !== "en"
+  ) {
+    customer =
+      await updateCustomerLanguage(
+        customer.id,
+        "en"
+      );
+  }
+
+} else if (forceThaiPage) {
+
   if (
     customer.language !== "th" ||
     customer.language_locked !== true
@@ -4994,11 +5039,25 @@ if (messageHasThai) {
         customer.id
       );
   }
+
+} else if (messageHasThai) {
+
+  if (
+    customer.language !== "th" ||
+    customer.language_locked !== true
+  ) {
+    customer =
+      await lockCustomerLanguageToThai(
+        customer.id
+      );
+  }
+
 } else if (
   customer.language_locked !== true &&
   customer.language !==
     detectedLanguage
 ) {
+
   customer =
     await updateCustomerLanguage(
       customer.id,
@@ -5583,28 +5642,36 @@ if (
   // เคยมี payment แล้ว
   // → ถือเป็นลูกค้าเก่า
   // → ตอนนี้ AI ยังไม่ตอบ
-  if (hasPayment) {
-    console.log(
-      "OLD CUSTOMER - PAYMENT HISTORY:",
-      {
-        customerId: customer.id,
-        platformUserId,
-      }
-    );
-
-    return {
-      ok: true,
+ if (hasPayment) {
+  console.log(
+    "OLD CUSTOMER - PAYMENT HISTORY:",
+    {
       customerId: customer.id,
-      stateBefore: conversation.state,
-      stateAfter: conversation.state,
-      oldCustomer: true,
-      hasPayment: true,
-      botReply: null,
-      note:
-        "Existing customer with payment history. Old-customer flow not implemented yet.",
-    };
-  }
+      platformUserId,
+    }
+  );
 
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason:
+      "EXISTING_CUSTOMER_PAYMENT_HISTORY_UNHANDLED",
+  });
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    oldCustomer: true,
+    hasPayment: true,
+    botReply: null,
+    softHandoff: true,
+    note:
+      "Existing customer with payment history. Sales notified.",
+  };
+}
   // ยังไม่เคยจ่าย
   // → เช็กว่าเคยมี Map เดิมหรือไม่
   const previousMapJob =
@@ -5688,18 +5755,27 @@ if (
     }
   );
 
-  return {
-    ok: true,
-    customerId: customer.id,
-    stateBefore: conversation.state,
-    stateAfter: conversation.state,
-    oldCustomer: true,
-    hasPayment: false,
-    resumedFromHistory: false,
-    botReply: null,
-    note:
-      "Existing customer without imported history. Bot suppressed to avoid restarting old conversation.",
-  };
+ await triggerHumanAttention({
+  customer,
+  conversation,
+  message,
+  reason:
+    "EXISTING_CUSTOMER_NO_IMPORTED_HISTORY_UNHANDLED",
+});
+
+return {
+  ok: true,
+  customerId: customer.id,
+  stateBefore: conversation.state,
+  stateAfter: conversation.state,
+  oldCustomer: true,
+  hasPayment: false,
+  resumedFromHistory: false,
+  botReply: null,
+  softHandoff: true,
+  note:
+    "Existing customer without imported history. Sales notified.",
+};
   
 }
 
