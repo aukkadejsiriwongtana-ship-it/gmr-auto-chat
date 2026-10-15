@@ -6056,6 +6056,41 @@ function looksLikeSafeBareBusinessName(value) {
   return true;
 }
 
+function looksLikeReviewSelectionPhrase(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?。！？，,]+$/g, "")
+    .replace(/\s+/g, " ");
+
+  if (!text) return false;
+
+  const exactPhrases = new Set([
+    "this one",
+    "this one please",
+    "that one",
+    "that one please",
+    "this review",
+    "this review please",
+    "เอาอันนี้",
+    "เอาตัวนี้",
+    "เอารีวิวนี้",
+    "อันนี้",
+    "ตัวนี้",
+    "รีวิวนี้",
+    "อันนี้ครับ",
+    "อันนี้ค่ะ",
+    "ตัวนี้ครับ",
+    "ตัวนี้ค่ะ",
+    "อันนี้เลย",
+    "ตัวนี้เลย",
+  ]);
+
+  if (exactPhrases.has(text)) return true;
+
+  return /^(?:please\s+)?(?:use|choose|take|do|handle)\s+(?:this|that)(?:\s+one|\s+review)?(?:\s+please)?$/i.test(text);
+}
+
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const text = normalizeInboundUrlText(message).trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
@@ -6073,6 +6108,13 @@ function classifyV2LeadInput(message, messageType = "text", options = {}) {
   // Generic inquiries are never lead payloads by themselves.
   if (looksLikeGenericGmrServiceInquiry(text)) {
     return { actionable: false, inputType: "SERVICE_INQUIRY", payload: null };
+  }
+
+  // Short conversational replies that select a review/screenshot are NOT
+  // business names. Let Sales handle them silently instead of creating a
+  // duplicate lead acknowledgement in the customer chat.
+  if (looksLikeReviewSelectionPhrase(text)) {
+    return { actionable: false, inputType: "REVIEW_SELECTION", payload: null };
   }
 
   const classification = classifyInput({ messageType, text });
@@ -6193,8 +6235,16 @@ async function handleV2NewCustomerInbound({
       });
     }
 
-    const botReply = getLeadReceivedText(customer);
-    await saveV2BotReply({ customer, platform, botReply });
+    // The "choose 1 review" acknowledgement is one-time only.
+    // Once lead info has already been received, subsequent Map/Review URLs
+    // still go to Sales but stay silent in the customer chat.
+    const botReply = lead?.info_received_at
+      ? null
+      : getLeadReceivedText(customer);
+
+    if (botReply) {
+      await saveV2BotReply({ customer, platform, botReply });
+    }
 
     return {
       handled: true,
