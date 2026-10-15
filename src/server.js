@@ -4343,6 +4343,7 @@ app.post("/telegram/webhook", async (req, res) => {
         }
         return res.sendStatus(200);
       }
+    }
 
     // -----------------------------------------------------
     // REACTIVATION TEAM DECISION
