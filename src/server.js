@@ -4293,7 +4293,9 @@ app.post("/telegram/webhook", async (req, res) => {
         }
       }
 
-      // Reply Lead Card -> price + review links -> Preview
+      // Reply Lead Card -> price + review links -> START IMMEDIATELY
+      // The Sales reply itself is the final approval for this new/manual lead.
+      // No second "ยืนยันงาน" step is required here.
       const leadCard = await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
       if (leadCard) {
         try {
@@ -4301,115 +4303,46 @@ app.post("/telegram/webhook", async (req, res) => {
             leadCard,
             groupText,
             lineUserId: actorId,
+            skipPreview: true,
           });
+
           if (prepared?.ok) {
-            const customerQuote = buildV2CustomerQuoteText({
-              customer: prepared.customer,
-              draft: prepared.draft,
-              reviewItems: prepared.reviewItems,
-            });
-
-            let customerQuoteSent = false;
-            let customerQuoteError = null;
-            try {
-              await sendMessageToCustomer({
-                platform: prepared.customer.platform,
-                platformUserId: prepared.customer.platform_user_id,
-                text: customerQuote,
-              });
-              await saveMessage({
-                customerId: prepared.customer.id,
-                platform: prepared.customer.platform,
-                direction: "outbound",
-                messageType: "text",
-                messageText: customerQuote,
-              });
-              await updateLastBotMessage(prepared.customer.id, customerQuote);
-              customerQuoteSent = true;
-            } catch (error) {
-              customerQuoteError = error;
-              console.error("TELEGRAM V2 CUSTOMER QUOTE FAILED:", error);
-            }
-
+            const confirmed = await confirmV2SalesOrderDraft(prepared.draft);
+            const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
             const workLines = prepared.reviewItems.map(
               (item, index) => `${index + 1}. ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน\n   ${item.canonicalUrl}`
             );
 
             await reply([
-              customerQuoteSent
-                ? "✅ ส่งราคาให้ลูกค้าแล้ว"
-                : "⚠️ สร้าง Draft/Preview แล้ว แต่ส่งราคาให้ลูกค้าไม่สำเร็จ",
+              "✅ รับงานและเริ่มดำเนินการแล้ว",
+              `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
+              `Platform: ${getPlatformLabel(confirmed.customer)}`,
               `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
-              `จำนวน: ${prepared.reviewItems.length} รีวิว`,
+              `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
               "",
               ...workLines,
               "",
-              "ระบบจัดประเภทให้อัตโนมัติ: 1–14 วัน = T0 | มากกว่า 14 วัน = T2",
-              "เมื่อเช็กลูกค้ายืนยันแล้ว ให้ Reply Preview ด้วยคำว่า “ยืนยันงาน”",
-              customerQuoteSent ? null : `สาเหตุส่งลูกค้าไม่สำเร็จ: ${customerQuoteError?.message || "unknown"}`,
-            ].filter(Boolean).join("\n"));
+              confirmed.customerNotifyOk
+                ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
+                : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+              failedSheets.length === 0
+                ? "✅ ลง Sheet ครบแล้ว"
+                : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+              "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+            ].join("\n"));
           }
         } catch (error) {
+          console.error("TELEGRAM V2 LEAD START FAILED:", error);
           await reply([
-            `❌ อ่านคำสั่งงานไม่สำเร็จ: ${error.message}`,
+            `❌ รับงาน/เริ่มงานไม่สำเร็จ: ${error.message}`,
             "",
-            "วิธีง่ายที่สุด:",
-            "Reply ข้อความลูกค้า แล้วพิมพ์",
+            "รูปแบบที่ถูกต้อง:",
             "5500",
             "https://google.com/maps/reviews/...",
           ].join("\n"));
         }
         return res.sendStatus(200);
       }
-    }
-
-    // -----------------------------------------------------
-    // MANUAL ASSIGNED WORK
-    // -----------------------------------------------------
-    if (/^\/manual\b/i.test(groupText)) {
-      try {
-        const manualResult = await createManualAssignedWorkFromGroupText(groupText);
-        const lines = manualResult.createdJobs.map(
-          (item, index) => `${index + 1}. ${item.reviewUrl}\n   Job: ${item.jobId}\n   Status: ${item.status}`
-        );
-        await reply([
-          "✅ รับ Manual Assigned Work เข้าระบบแล้ว",
-          `Customer: ${manualResult.customer?.display_name || "-"}`,
-          `Type: ${manualResult.parsed.workType || "AUTO"}`,
-          `Price: ${manualResult.parsed.price} ${manualResult.parsed.currency || ""}/review`,
-          `จำนวน: ${manualResult.createdJobs.length} รีวิว`,
-          "",
-          ...lines,
-          "",
-          "หมายเหตุ: customer_notify=false ระบบจะไม่ทักลูกค้าเอง",
-        ].join("\n"));
-      } catch (error) {
-        await reply(`❌ Manual Assigned Work ไม่สำเร็จ: ${error.message}`);
-      }
-      return res.sendStatus(200);
-    }
-
-    // -----------------------------------------------------
-    // REVIEW REMOVAL HUMAN CONFIRMATION
-    // -----------------------------------------------------
-    if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
-      const monitoringJobs = await getJobsForReviewMonitoring();
-      const removalJob = (monitoringJobs || []).find(
-        (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
-      );
-      if (removalJob) {
-        const value = normalizedGroupText === "อนุมัติ"
-          ? "CONFIRM_REMOVED"
-          : "REVIEW_STILL_VISIBLE";
-        await callSheetControlInternally({ jobId: removalJob.id, value });
-        await reply(
-          value === "CONFIRM_REMOVED"
-            ? "✅ ยืนยันว่ารีวิวออกแล้ว ระบบดำเนินขั้นตอนถัดไปเรียบร้อยครับ"
-            : "✅ รับทราบครับ รีวิวนี้ยังอยู่ ระบบจะตรวจต่อในรอบถัดไป"
-        );
-        return res.sendStatus(200);
-      }
-    }
 
     // -----------------------------------------------------
     // REACTIVATION TEAM DECISION
@@ -6126,7 +6059,7 @@ function buildV2CustomerQuoteText({ customer, draft, reviewItems }) {
   );
 }
 
-async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null }) {
+async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null, skipPreview = false }) {
   const customer = await getCustomerById(leadCard.customer_id);
   if (!customer) throw new Error("ไม่พบลูกค้าที่ผูกกับข้อความนี้");
 
@@ -6229,6 +6162,12 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     `${index + 1}. ${item.canonicalUrl}`,
     `   ประเภท: ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน`,
   ]);
+
+  // Telegram Sales may use price + Review URL as the final authorization
+  // to start immediately. In that mode, do not emit the old pending preview.
+  if (skipPreview) {
+    return { ok: true, customer, draft, reviewItems, previewMessageId: null };
+  }
 
   const previewText = [
     "📋 ตรวจสอบงานก่อนรับเข้าระบบ",
