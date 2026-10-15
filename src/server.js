@@ -4200,7 +4200,18 @@ app.post("/telegram/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const groupText = String(msg.text || msg.caption || "").trim();
+    // Telegram normally keeps pasted URLs inside msg.text/msg.caption.
+    // Also append text_link entity URLs so Sales can paste/click rich links
+    // without the parser losing the underlying Google Maps URL.
+    const baseGroupText = String(msg.text || msg.caption || "").trim();
+    const telegramEntities = Array.isArray(msg.entities)
+      ? msg.entities
+      : (Array.isArray(msg.caption_entities) ? msg.caption_entities : []);
+    const entityUrls = telegramEntities
+      .filter((entity) => entity?.type === "text_link" && entity?.url)
+      .map((entity) => String(entity.url).trim())
+      .filter(Boolean);
+    const groupText = [baseGroupText, ...entityUrls].filter(Boolean).join("\n").trim();
     if (!groupText) return res.sendStatus(200);
 
     const normalizedGroupText = groupText.toLowerCase();
@@ -6036,10 +6047,28 @@ async function handleV2NewCustomerInbound({
 function parseV2SalesOrderText(text) {
   const raw = String(text || "").trim();
   const allUrls = raw.match(/https?:\/\/[^\s]+/gi) || [];
+
+  // Accept all plausible Google Maps URL shapes here, not only /maps/reviews.
+  // Google currently produces several review/share formats such as:
+  // - google.<tld>/maps/reviews/...
+  // - google.<tld>/maps/place/...
+  // - maps.app.goo.gl/...
+  // - goo.gl/maps/...
+  // The next stage (getReviewFromDirectUrl) remains the authority that
+  // verifies whether the URL actually resolves to a specific review.
+  const isPotentialGoogleMapsUrl = (url) => {
+    const value = String(url || "").trim().toLowerCase();
+    if (!value) return false;
+    if (/^https?:\/\/maps\.app\.goo\.gl\//i.test(value)) return true;
+    if (/^https?:\/\/(?:www\.)?goo\.gl\/maps\//i.test(value)) return true;
+    if (/^https?:\/\/(?:www\.)?google\.[^/]+\/maps(?:[/?#]|$)/i.test(value)) return true;
+    return false;
+  };
+
   const reviewUrls = Array.from(new Set(
     allUrls
-      .map((url) => url.replace(/[),.;]+$/g, "").trim())
-      .filter((url) => /google/i.test(url) && /maps\/reviews|maps\.app\.goo\.gl/i.test(url))
+      .map((url) => url.replace(/[)\]}>，。、,.;:!?]+$/g, "").trim())
+      .filter(isPotentialGoogleMapsUrl)
   ));
 
   const nonUrlLines = raw
