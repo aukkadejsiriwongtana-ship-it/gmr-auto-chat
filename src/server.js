@@ -139,6 +139,15 @@ createSalesOrderDraft,
 setSalesOrderDraftPreviewMessage,
 getSalesOrderDraftByPreviewMessageId,
 updateSalesOrderDraft,
+
+getOrCreateLegacyMonitoringCustomer,
+findLegacyMonitoringCustomersByPlatformAndDisplayName,
+attachLegacyMonitoringCustomer,
+upsertRemovalKpiBatch,
+getJobsByRemovalDetectionBatchId,
+claimRemovalKpiBatch,
+completeRemovalKpiBatch,
+releaseRemovalKpiBatch,
   
 } from "./repositories/gmrRepository.js";
 
@@ -1404,267 +1413,293 @@ async function sendRemovalConfirmationToLineGroup({
 
 // =========================================================
 // REVIEW REMOVED KPI → INTERNAL LINE GROUP ONLY
+// Durable batch aggregation by ONE review-monitor run.
+// A KPI message is sent only after every detected job in the
+// same run has been resolved by staff (removed / still visible).
 // =========================================================
 
-async function sendRemovalKpiToLineGroup({
-  job,
-  customer,
-  removedAt,
-}) {
-  const token =
-    String(
-      process.env.LINE_CHANNEL_ACCESS_TOKEN ||
-      ""
-    ).trim();
+async function getRemovalKpiWorkType(job, departmentCodeById = null) {
+  const jobDepartmentId = String(
+    job?.department_id || job?.departmentId || ""
+  );
 
-  const groupId =
-    String(
-      process.env.LINE_GROUP_ID ||
-      ""
-    ).trim();
+  if (departmentCodeById && jobDepartmentId) {
+    const code = String(
+      departmentCodeById.get(jobDepartmentId) || ""
+    )
+      .trim()
+      .toUpperCase();
 
-
-  if (!token || !groupId) {
-    throw new Error(
-      "Missing LINE configuration for removal KPI"
-    );
+    if (code === "T0" || code === "T2") {
+      return code;
+    }
   }
-
-
-  // ========================================
-  // DETERMINE T0 / T2
-  // 1) ใช้ review.is_recent ก่อน
-  // 2) ถ้าไม่มี ใช้ department.code
-  // ========================================
-
-  let workType =
-    null;
-
 
   try {
-    const reviews =
-      await getReviewsByJobId(
-        job.id
-      );
+    const reviews = await getReviewsByJobId(job.id);
+    const review = Array.isArray(reviews) ? reviews[0] : null;
 
-    const review =
-      Array.isArray(reviews)
-        ? reviews[0]
-        : null;
-
-
-    if (
-      review?.is_recent === true
-    ) {
-      workType =
-        "T0";
-    } else if (
-      review?.is_recent === false
-    ) {
-      workType =
-        "T2";
-    }
+    if (review?.is_recent === true) return "T0";
+    if (review?.is_recent === false) return "T2";
   } catch (error) {
-    console.error(
-      "KPI REVIEW TYPE LOOKUP FAILED:",
-      error
-    );
+    console.error("KPI REVIEW TYPE LOOKUP FAILED:", {
+      jobId: job?.id || null,
+      error: error?.message || String(error),
+    });
   }
 
+  return null;
+}
 
-  // Fallback → department
-  if (!workType) {
-    try {
-      const departments =
-        await getActiveDepartments();
+function formatBangkokDateTime(value) {
+  const date = new Date(value || new Date().toISOString());
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Bangkok",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
 
-      const jobDepartmentId =
-        String(
-          job?.department_id ||
-          job?.departmentId ||
-          ""
-        );
-
-      const department =
-        (departments || []).find(
-          (item) =>
-            String(item?.id || "") ===
-            jobDepartmentId
-        );
-
-      const code =
-        String(
-          department?.code || ""
-        )
-          .trim()
-          .toUpperCase();
-
-      if (
-        code === "T0" ||
-        code === "T2"
-      ) {
-        workType =
-          code;
-      }
-    } catch (error) {
-      console.error(
-        "KPI DEPARTMENT LOOKUP FAILED:",
-        error
-      );
-    }
-  }
-
-
-  const eventTime =
-    removedAt ||
-    new Date().toISOString();
-
-
-  const date =
-    new Date(
-      eventTime
-    );
-
-
-  const parts =
-    new Intl.DateTimeFormat(
-      "en-GB",
-      {
-        timeZone:
-          "Asia/Bangkok",
-
-        day:
-          "2-digit",
-
-        month:
-          "2-digit",
-
-        year:
-          "numeric",
-
-        hour:
-          "2-digit",
-
-        minute:
-          "2-digit",
-
-        hour12:
-          false,
-      }
-    ).formatToParts(
-      date
-    );
-
-
-  const getPart =
-    (type) =>
-      parts.find(
-        (part) =>
-          part.type === type
-      )?.value || "";
-
-
-  const thaiDate =
-    `${getPart("day")}/${getPart("month")}/${getPart("year")}`;
-
-  const thaiTime =
-    `${getPart("hour")}:${getPart("minute")}`;
-
-
-  const t0Count =
-    workType === "T0"
-      ? 1
-      : 0;
-
-  const t2Count =
-    workType === "T2"
-      ? 1
-      : 0;
-
-
-  const lines = [
-    "✅ REVIEW REMOVED — KPI",
-    "",
-    `วันที่: ${thaiDate}`,
-    `เวลา: ${thaiTime} น.`,
-    "",
-    `T0: ${t0Count} รีวิว`,
-    `T2: ${t2Count} รีวิว`,
-    "",
-    "รอบนี้สำเร็จทั้งหมด: 1 รีวิว",
-    "",
-    `Customer: ${customer?.display_name || "-"}`,
-    `Business: ${job?.business_name || "-"}`,
-    `Job: ${job?.id || "-"}`,
-  ];
-
-
-  if (!workType) {
-    lines.push(
-      "",
-      "⚠️ ไม่สามารถระบุ T0/T2 ได้ กรุณาตรวจสอบ Job นี้ก่อนจ่าย KPI"
-    );
-  }
-
-
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method:
-          "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json",
-
-          Authorization:
-            `Bearer ${token}`,
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text:
-                  lines.join("\n"),
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `LINE KPI push failed: ${response.status} ${responseText}`
-    );
-  }
-
+  const getPart = (type) =>
+    parts.find((part) => part.type === type)?.value || "";
 
   return {
-    ok:
-      true,
-
-    workType,
-
-    t0Count,
-
-    t2Count,
-
-    removedAt:
-      eventTime,
+    thaiDate: `${getPart("day")}/${getPart("month")}/${getPart("year")}`,
+    thaiTime: `${getPart("hour")}:${getPart("minute")}`,
   };
+}
+
+async function tryFinalizeRemovalKpiBatch(batchId) {
+  const safeBatchId = String(batchId || "").trim();
+  if (!safeBatchId) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "NO_BATCH_ID",
+    };
+  }
+
+  const jobs = await getJobsByRemovalDetectionBatchId(safeBatchId);
+
+  // If every detected review was marked visible, there is no KPI to send.
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    const claimedEmpty = await claimRemovalKpiBatch(safeBatchId);
+    if (claimedEmpty) {
+      await completeRemovalKpiBatch({
+        batchId: safeBatchId,
+        t0Count: 0,
+        t2Count: 0,
+        totalCount: 0,
+        status: "skipped",
+      });
+    }
+
+    return {
+      ok: true,
+      skipped: true,
+      reason: "NO_CONFIRMED_REMOVALS",
+    };
+  }
+
+  const pendingHumanConfirmation = jobs.filter(
+    (item) =>
+      String(item?.status || "").toLowerCase() === "processing" &&
+      Number(item?.review_missing_count || 0) >= 1
+  );
+
+  if (pendingHumanConfirmation.length > 0) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "WAITING_FOR_OTHER_CONFIRMATIONS",
+      pendingCount: pendingHumanConfirmation.length,
+    };
+  }
+
+  const removedJobs = jobs.filter((item) => {
+    const status = String(item?.status || "").toLowerCase();
+    return Boolean(item?.removed_at) || ["waiting_payment", "paid"].includes(status);
+  });
+
+  if (removedJobs.length === 0) {
+    const claimedEmpty = await claimRemovalKpiBatch(safeBatchId);
+    if (claimedEmpty) {
+      await completeRemovalKpiBatch({
+        batchId: safeBatchId,
+        t0Count: 0,
+        t2Count: 0,
+        totalCount: 0,
+        status: "skipped",
+      });
+    }
+
+    return {
+      ok: true,
+      skipped: true,
+      reason: "NO_CONFIRMED_REMOVALS",
+    };
+  }
+
+  // Atomic claim prevents duplicate KPI messages when two staff confirmations
+  // arrive almost simultaneously or Render receives a retry.
+  const claim = await claimRemovalKpiBatch(safeBatchId);
+  if (!claim) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "BATCH_ALREADY_CLAIMED_OR_SENT",
+    };
+  }
+
+  try {
+    const token = String(
+      process.env.LINE_CHANNEL_ACCESS_TOKEN || ""
+    ).trim();
+    const groupId = String(process.env.LINE_GROUP_ID || "").trim();
+
+    if (!token || !groupId) {
+      throw new Error("Missing LINE configuration for removal KPI");
+    }
+
+    const departments = await getActiveDepartments();
+    const departmentCodeById = new Map(
+      (departments || []).map((department) => [
+        String(department?.id || ""),
+        String(department?.code || "").trim().toUpperCase(),
+      ])
+    );
+
+    let t0Count = 0;
+    let t2Count = 0;
+    let unknownCount = 0;
+
+    for (const removedJob of removedJobs) {
+      const workType = await getRemovalKpiWorkType(
+        removedJob,
+        departmentCodeById
+      );
+
+      if (workType === "T0") t0Count += 1;
+      else if (workType === "T2") t2Count += 1;
+      else unknownCount += 1;
+    }
+
+    const eventTime =
+      claim?.detected_at ||
+      removedJobs
+        .map((item) => item?.review_removed_detected_at)
+        .filter(Boolean)
+        .sort()[0] ||
+      new Date().toISOString();
+
+    const { thaiDate, thaiTime } = formatBangkokDateTime(eventTime);
+    const totalCount = removedJobs.length;
+
+    const lines = [
+      "✅ REVIEW REMOVED — KPI",
+      "",
+      `วันที่: ${thaiDate}`,
+      `เวลา: ${thaiTime} น.`,
+      "",
+      `T0: ${t0Count} รีวิว`,
+      `T2: ${t2Count} รีวิว`,
+      "",
+      `รอบนี้สำเร็จทั้งหมด: ${totalCount} รีวิว`,
+    ];
+
+    if (unknownCount > 0) {
+      lines.push(
+        "",
+        `⚠️ ไม่สามารถระบุ T0/T2 ได้ ${unknownCount} รีวิว กรุณาตรวจสอบก่อนจ่าย KPI`
+      );
+    }
+
+    const response = await fetch(
+      "https://api.line.me/v2/bot/message/push",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          to: groupId,
+          messages: [
+            {
+              type: "text",
+              text: lines.join("\n"),
+            },
+          ],
+        }),
+      }
+    );
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `LINE KPI push failed: ${response.status} ${responseText}`
+      );
+    }
+
+    let responseData = {};
+    if (responseText) {
+      try {
+        responseData = JSON.parse(responseText);
+      } catch {
+        responseData = {};
+      }
+    }
+
+    const lineMessageId =
+      responseData?.sentMessages?.[0]?.id || null;
+
+    await completeRemovalKpiBatch({
+      batchId: safeBatchId,
+      t0Count,
+      t2Count,
+      totalCount,
+      lineMessageId,
+      status: "sent",
+    });
+
+    for (const removedJob of removedJobs) {
+      try {
+        await updateJob(removedJob.id, {
+          removal_kpi_notified_at: new Date().toISOString(),
+        });
+      } catch (markError) {
+        console.error("KPI JOB MARK SENT FAILED:", {
+          jobId: removedJob.id,
+          batchId: safeBatchId,
+          error: markError?.message || String(markError),
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      sent: true,
+      batchId: safeBatchId,
+      t0Count,
+      t2Count,
+      totalCount,
+      unknownCount,
+    };
+  } catch (error) {
+    try {
+      await releaseRemovalKpiBatch(safeBatchId);
+    } catch (releaseError) {
+      console.error("KPI BATCH RELEASE FAILED:", {
+        batchId: safeBatchId,
+        error: releaseError?.message || String(releaseError),
+      });
+    }
+
+    throw error;
+  }
 }
 
 async function callSheetControlInternally({ jobId, value }) {
@@ -3354,10 +3389,20 @@ async function sendReactivationAlertToLineGroup({
     alert.review_url ||
     "-";
 
+  const platformUserId =
+    String(customer?.platform_user_id || "").trim();
+
+  const liveChatReady =
+    Boolean(platformUserId) &&
+    !platformUserId.startsWith("legacy:") &&
+    customer?.customer_notify !== false;
+
   const text = [
     "🔎 พบรีวิว 1 ดาวใหม่",
     "",
     `ลูกค้า: ${customerName}`,
+    `Platform: ${customer?.platform || "-"}`,
+    `สถานะแชท: ${liveChatReady ? "✅ ผูกห้องแชทแล้ว" : "⚠️ Legacy ยังไม่ผูกห้องแชทจริง"}`,
     `ธุรกิจ: ${businessName}`,
     `Reviewer: ${reviewerName}`,
     `วันที่รีวิว: ${reviewDate}`,
@@ -6797,11 +6842,63 @@ async function processTestMessage({
   // -------------------------------------------------------
   // 1. CUSTOMER
   // -------------------------------------------------------
-const existingCustomer =
+let existingCustomer =
   await getCustomerByPlatformUserId(
     platform,
     platformUserId
   );
+
+// =========================================================
+// LEGACY MONITORING SHELL → LIVE CHAT ATTACH
+//
+// Nightly Legacy import can create a monitoring-only customer
+// BEFORE that person ever messages the new bot. When the same
+// name later messages on the same platform, attach the shell to
+// the real platform user ID so rates/maps/history stay on one ID.
+// =========================================================
+if (!existingCustomer && String(displayName || "").trim()) {
+  try {
+    const legacyMonitoringMatches =
+      await findLegacyMonitoringCustomersByPlatformAndDisplayName({
+        platform,
+        displayName,
+      });
+
+    if (legacyMonitoringMatches.length === 1) {
+      const attached =
+        await attachLegacyMonitoringCustomer({
+          customerId: legacyMonitoringMatches[0].id,
+          platformUserId,
+          displayName,
+        });
+
+      if (attached) {
+        existingCustomer = attached;
+
+        console.log("LEGACY MONITORING CUSTOMER ATTACHED TO LIVE CHAT:", {
+          customerId: attached.id,
+          platform,
+          platformUserId,
+          displayName,
+        });
+      }
+    } else if (legacyMonitoringMatches.length > 1) {
+      console.warn("LEGACY MONITORING LIVE ATTACH AMBIGUOUS:", {
+        platform,
+        displayName,
+        matchCount: legacyMonitoringMatches.length,
+        customerIds: legacyMonitoringMatches.map((item) => item.id),
+      });
+    }
+  } catch (attachError) {
+    console.error("LEGACY MONITORING LIVE ATTACH FAILED:", {
+      platform,
+      platformUserId,
+      displayName,
+      error: attachError?.message || String(attachError),
+    });
+  }
+}
 
 const messageHasThai =
   /[\u0E00-\u0E7F]/.test(
@@ -6850,6 +6947,7 @@ if (forceEnglishPage) {
 
 
 let customer =
+  existingCustomer ||
   await getOrCreateCustomer({
     platform,
     platformUserId,
@@ -14926,6 +15024,29 @@ if (
       continue;
     }
 
+    const reactPlatformUserId =
+      String(reactCustomer.platform_user_id || "").trim();
+
+    const reactLiveChatReady =
+      Boolean(reactPlatformUserId) &&
+      !reactPlatformUserId.startsWith("legacy:") &&
+      reactCustomer.customer_notify !== false;
+
+    if (!reactLiveChatReady) {
+      await replyLineTextMessage(
+        event.replyToken,
+        [
+          "⚠️ พบลูกค้าเก่าและตรวจ Map ได้แล้ว แต่ยังไม่มี Chat ID จริงสำหรับส่งอัตโนมัติ",
+          `ลูกค้า: ${reactCustomer.display_name || "-"}`,
+          `Platform: ${reactCustomer.platform || "-"}`,
+          "",
+          "ระบบจะเก็บ Alert นี้ไว้ก่อน ไม่ได้ส่งข้อความผิดห้องครับ",
+          "เมื่อบัญชีนี้ถูกผูกกับห้องแชทจริงแล้ว สามารถ Reply ข้อความเดิมว่า “ส่งลูกค้า” อีกครั้งได้",
+        ].join("\n")
+      );
+      continue;
+    }
+
     const reactCustomerText = getCustomerText(
       reactCustomer,
       `ตรวจพบรีวิว 1 ดาวใหม่บน Google Maps ของ ${reactMap?.business_name || "ธุรกิจของคุณ"}\n\nReviewer: ${reactivationAlert.reviewer_name || "-"}\n\nต้องการให้ทางเราตรวจสอบเพื่อดำเนินการรีวิวนี้ไหมครับ?\nหากสนใจ พิมพ์ “สนใจ” ได้เลยครับ`,
@@ -21428,69 +21549,73 @@ if (alreadyMatchedCustomerId) {
 
 
     // ====================================================
-    // MORE THAN 1 CUSTOMER
-    // ห้าม Auto Match
-    // รอบถัดไปเราจะให้ส่ง LINE มาถามทีม
-    // ====================================================
-
-    } else if (
-      customerMatches.length > 1
-    ) {
-
-      autoMatchStatus =
-        "ambiguous";
-
-await sendLegacyAutoMatchAmbiguousToLine({
-  legacyCustomer:
-    importedLegacyForMatch,
-
-  customers:
-    customerMatches,
-});
-      
-      console.warn(
-        "LEGACY AUTO MATCH AMBIGUOUS:",
-        {
-          legacyCustomerId:
-            importedLegacyForMatch.id,
-
-          platform:
-            legacyPlatform,
-
-          displayName:
-            legacyDisplayName,
-
-          customerIds:
-            customerMatches.map(
-              (customer) =>
-                customer.id
-            ),
-        }
-      );
-
-
-    // ====================================================
-    // NOT FOUND
+    // 0 OR >1 LIVE CHAT MATCHES
+    //
+    // Do NOT wait for the customer to message again.
+    // Create a monitoring shell now so historical rates + Maps
+    // are imported immediately and 1-star reactivation can run.
+    //
+    // If an exact platform_user_id is supplied in the Legacy Sheet,
+    // the shell is immediately contactable. Otherwise it uses
+    // legacy:<legacy_id> until the same name messages on that platform.
     // ====================================================
 
     } else {
 
-      autoMatchStatus =
-        "not_found";
+      if (customerMatches.length > 1) {
+        console.warn(
+          "LEGACY LIVE CHAT MATCH AMBIGUOUS — USING MONITORING SHELL:",
+          {
+            legacyCustomerId: importedLegacyForMatch.id,
+            platform: legacyPlatform,
+            displayName: legacyDisplayName,
+            customerIds: customerMatches.map((customer) => customer.id),
+          }
+        );
+      }
 
-      console.log(
-        "LEGACY AUTO MATCH CUSTOMER NOT FOUND:",
-        {
-          legacyCustomerId:
-            importedLegacyForMatch.id,
+      autoMatchCustomer =
+        await getOrCreateLegacyMonitoringCustomer({
+          legacyCustomerId: importedLegacyForMatch.id,
+          platform: legacyPlatform,
+          platformUserId:
+            item.platformUserId ||
+            item.platform_user_id ||
+            null,
+          platformAccount:
+            importedLegacyForMatch.platform_account ||
+            item.platformAccount ||
+            null,
+          displayName: legacyDisplayName,
+          language:
+            legacyPlatform === "facebook_en" || legacyPlatform === "fb_en"
+              ? "en"
+              : "th",
+        });
 
-          platform:
-            legacyPlatform,
+      autoMatchClaim =
+        await claimLegacyCustomerAutoMatch({
+          legacyCustomerId: importedLegacyForMatch.id,
+          customerId: autoMatchCustomer.id,
+        });
 
-          displayName:
-            legacyDisplayName,
-        }
-      );
+      if (autoMatchClaim) {
+        autoMatchStatus = "claimed";
+
+        console.log(
+          "LEGACY MONITORING SHELL CLAIMED:",
+          {
+            legacyCustomerId: importedLegacyForMatch.id,
+            customerId: autoMatchCustomer.id,
+            platform: legacyPlatform,
+            platformUserId: autoMatchCustomer.platform_user_id,
+            displayName: legacyDisplayName,
+            liveMatchCount: customerMatches.length,
+          }
+        );
+      } else {
+        autoMatchStatus = "claim_skipped";
+      }
     }
 
   } else {
@@ -22546,6 +22671,25 @@ app.post("/sheet-control", async (req, res) => {
   "CONFIRM_REMOVED"
 ) {
 
+  // Idempotency: a retry must never charge/notify/KPI twice.
+  if (
+    ["waiting_payment", "paid"].includes(
+      String(job.status || "").trim().toLowerCase()
+    ) ||
+    Boolean(job.removed_at)
+  ) {
+    return res.status(200).json({
+      ok: true,
+      action: "manual_action",
+      value: "CONFIRM_REMOVED",
+      jobId: job.id,
+      customerId: customer.id,
+      alreadyConfirmed: true,
+      status: job.status,
+      removedAt: job.removed_at || job.review_removed_detected_at || null,
+    });
+  }
+
   if (
     Number(
       job.review_missing_count ||
@@ -22623,6 +22767,17 @@ app.post("/sheet-control", async (req, res) => {
   // 1. ยืนยัน CURRENT JOB ก่อน
   // ========================================
 
+  const removalBatchId =
+    String(job.removal_detection_batch_id || "").trim() ||
+    crypto.randomUUID();
+
+  // Old in-flight jobs from before this deployment may not have a batch yet.
+  // Create a one-job durable batch so KPI is still sent exactly once.
+  await upsertRemovalKpiBatch({
+    batchId: removalBatchId,
+    detectedAt: removedAt,
+  });
+
   await updateJob(
     job.id,
     {
@@ -22633,41 +22788,37 @@ app.post("/sheet-control", async (req, res) => {
         removedAt,
 
       review_missing_count:
-        1,
+        0,
 
       review_removed_detected_at:
         removedAt,
+
+      removal_detection_batch_id:
+        removalBatchId,
 
       currency:
         paymentCurrency,
     }
   );
 
-            // ========================================
-// INTERNAL KPI NOTIFICATION
-// แจ้งภายในองค์กรเท่านั้น
-// ห้ามส่งข้อมูล T0/T2 ให้ลูกค้า
-// ========================================
+  // ========================================
+  // INTERNAL KPI — BATCHED + DURABLE
+  // ส่งเมื่อทุกงานที่ตรวจหายจาก monitor run เดียวกัน
+  // ถูก Sales ตัดสินครบแล้วเท่านั้น
+  // ========================================
 
-try {
-  await sendRemovalKpiToLineGroup({
-    job,
-    customer,
-    removedAt,
-  });
-} catch (kpiError) {
-  console.error(
-    "REMOVAL KPI NOTIFICATION FAILED:",
-    {
-      jobId:
-        job.id,
-
-      error:
-        kpiError?.message ||
-        String(kpiError),
-    }
-  );
-}
+  try {
+    await tryFinalizeRemovalKpiBatch(removalBatchId);
+  } catch (kpiError) {
+    console.error(
+      "REMOVAL KPI BATCH FINALIZE FAILED:",
+      {
+        jobId: job.id,
+        batchId: removalBatchId,
+        error: kpiError?.message || String(kpiError),
+      }
+    );
+  }
 
   // ========================================
   // 2. ดึงทุกงานของลูกค้าคนนี้
@@ -23077,6 +23228,9 @@ if (
         "REVIEW_STILL_VISIBLE"
       ) {
 
+        const previousRemovalBatchId =
+          String(job.removal_detection_batch_id || "").trim() || null;
+
         await updateJob(
           job.id,
           {
@@ -23089,6 +23243,9 @@ if (
             review_removed_detected_at:
               null,
 
+            removal_detection_batch_id:
+              null,
+
             removal_team_alerted_at:
               null,
 
@@ -23099,6 +23256,20 @@ if (
               null,
           }
         );
+
+        // If this was the last unresolved item in a KPI batch,
+        // finalize the remaining confirmed removals now.
+        if (previousRemovalBatchId) {
+          try {
+            await tryFinalizeRemovalKpiBatch(previousRemovalBatchId);
+          } catch (kpiError) {
+            console.error("REMOVAL KPI FINALIZE AFTER STILL VISIBLE FAILED:", {
+              jobId: job.id,
+              batchId: previousRemovalBatchId,
+              error: kpiError?.message || String(kpiError),
+            });
+          }
+        }
 
 
         try {
@@ -23474,6 +23645,14 @@ app.post(
       const jobs =
         await getJobsForReviewMonitoring();
 
+      const monitorRunId =
+        crypto.randomUUID();
+
+      const monitorRunStartedAt =
+        new Date().toISOString();
+
+      let removalKpiBatchCreated =
+        false;
 
       const results = [];
 
@@ -23482,6 +23661,7 @@ app.post(
         "REVIEW MONITOR START:",
         {
           monitorVersion,
+          monitorRunId,
 
           jobCount:
             jobs.length,
@@ -23698,6 +23878,9 @@ app.post(
               review_removed_detected_at:
                 null,
 
+              removal_detection_batch_id:
+                null,
+
               removal_team_alerted_at:
                 null,
 
@@ -23740,6 +23923,13 @@ app.post(
         const detectedAt =
           checkedAt;
 
+        if (!removalKpiBatchCreated) {
+          await upsertRemovalKpiBatch({
+            batchId: monitorRunId,
+            detectedAt: monitorRunStartedAt,
+          });
+          removalKpiBatchCreated = true;
+        }
 
         await updateJob(
           job.id,
@@ -23755,6 +23945,12 @@ app.post(
 
             review_removed_detected_at:
               detectedAt,
+
+            removal_detection_batch_id:
+              monitorRunId,
+
+            removal_kpi_notified_at:
+              null,
 
             removed_at:
               null,
@@ -23866,6 +24062,8 @@ app.post(
               lookupReason,
 
             detectedAt,
+            removalBatchId:
+              monitorRunId,
           }
         );
 
@@ -23884,6 +24082,8 @@ app.post(
             lookupReason,
 
           detectedAt,
+          removalBatchId:
+            monitorRunId,
         });
       }
 
