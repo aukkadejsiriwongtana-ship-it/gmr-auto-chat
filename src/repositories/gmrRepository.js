@@ -5570,7 +5570,10 @@ export async function getOrCreateLegacyMonitoringCustomer({
       platform_user_id: targetPlatformUserId,
       display_name: displayName || null,
       language: language === "en" ? "en" : "th",
-      customer_type: "existing",
+      // Keep the DB enum/check-compatible value here.
+      // Business "existing customer" status is derived from verified payment history,
+      // not from gmr_customers.customer_type. Legacy import creates verified history below.
+      customer_type: "new",
       source: "legacy_import",
       customer_notify: Boolean(explicitPlatformUserId),
       transport_metadata: {
