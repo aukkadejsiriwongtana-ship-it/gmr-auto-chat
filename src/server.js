@@ -805,11 +805,52 @@ return (
   };
 }
 
+function unwrapFacebookRedirectUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return raw;
+
+  try {
+    const parsed = new URL(raw);
+    const host = String(parsed.hostname || "").toLowerCase();
+    const isFacebookRedirect =
+      (host === "l.facebook.com" || host === "lm.facebook.com") &&
+      parsed.pathname === "/l.php";
+
+    if (!isFacebookRedirect) return raw;
+
+    const target = parsed.searchParams.get("u");
+    if (!target) return raw;
+
+    let decoded = target;
+    try {
+      decoded = decodeURIComponent(target);
+    } catch (_) {
+      // URLSearchParams already decodes normal cases.
+    }
+
+    return String(decoded || target).trim();
+  } catch (_) {
+    return raw;
+  }
+}
+
+function normalizeInboundUrlText(value) {
+  const text = String(value || "");
+  if (!text) return text;
+
+  return text.replace(/https?:\/\/[^\s]+/gi, (candidate) => {
+    const cleaned = candidate.replace(/[),.;]+$/g, "");
+    const suffix = candidate.slice(cleaned.length);
+    const unwrapped = unwrapFacebookRedirectUrl(cleaned);
+    return `${unwrapped}${suffix}`;
+  });
+}
+
 function extractGoogleMapsUrl(
   message
 ) {
   const text =
-    String(message || "");
+    normalizeInboundUrlText(message);
 
   const match =
     text.match(
@@ -5714,7 +5755,7 @@ app.get("/test-supabase", async (req, res) => {
 // =========================================================
 
 function looksLikeGoogleReviewUrl(value) {
-  const text = String(value || "").trim();
+  const text = normalizeInboundUrlText(value).trim();
   return /https?:\/\/[^\s]*google[^\s]*\/maps\/reviews/i.test(text) ||
     /https?:\/\/maps\.app\.goo\.gl\/[^\s]+/i.test(text) && /review/i.test(text);
 }
@@ -5766,7 +5807,7 @@ function looksLikeExplicitBusinessName(value) {
 }
 
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
-  const text = String(message || "").trim();
+  const text = normalizeInboundUrlText(message).trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
 
   if (looksLikeGoogleReviewUrl(text)) {
