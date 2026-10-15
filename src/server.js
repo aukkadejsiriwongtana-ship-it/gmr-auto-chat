@@ -31,10 +31,8 @@ import {
   updateJobInGoogleSheet,
 } from "./services/googleSheetsService.js";
 
-import {
-  sendJobToLineGroup,
-  sendPaymentReviewToLineGroup,
-} from "./services/lineGroupService.js";
+// Internal team notifications are routed through Telegram in V2.2.
+// Keep the legacy LINE group service untouched in the repository; this server no longer imports it.
 
 import {
   getCustomerByPlatformUserId,
@@ -1328,24 +1326,13 @@ async function sendRemovalConfirmationToLineGroup({
   reason = null,
   detectedAt = null,
 }) {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  const groupId = process.env.LINE_GROUP_ID;
-
-  if (!token || !groupId) {
-    throw new Error("Missing LINE configuration for removal confirmation");
-  }
-
   const currency = String(job?.currency || "THB").toUpperCase();
   const price = Number(job?.price || 0);
-
-  const priceText =
-    price > 0
-      ? (
-          currency === "THB"
-            ? `${price.toLocaleString("th-TH")} บาท`
-            : `$${price.toLocaleString("en-US")} ${currency}`
-        )
-      : "-";
+  const priceText = price > 0
+    ? (currency === "THB"
+        ? `${price.toLocaleString("th-TH")} บาท`
+        : `$${price.toLocaleString("en-US")} ${currency}`)
+    : "-";
 
   const text = [
     "🔎 รีวิวออกแล้ว — รอยืนยัน",
@@ -1362,53 +1349,8 @@ async function sendRemovalConfirmationToLineGroup({
     '❌ "ยังอยู่" = รีวิวยังแสดงอยู่',
   ].join("\n");
 
-  const response = await fetch(
-    "https://api.line.me/v2/bot/message/push",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        to: groupId,
-        messages: [{ type: "text", text }],
-      }),
-    }
-  );
-
-  const responseText = await response.text();
-  let data = {};
-
-  if (responseText) {
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      data = {};
-    }
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `LINE removal confirm push failed: ${response.status} ${responseText}`
-    );
-  }
-
-  const messageId =
-    data?.sentMessages?.[0]?.id
-      ? String(data.sentMessages[0].id)
-      : null;
-
-  if (!messageId) {
-    throw new Error(
-      "LINE removal confirmation push succeeded but no message ID was returned"
-    );
-  }
-
-  return {
-    ok: true,
-    messageId,
-  };
+  const pushed = await pushTelegramSales(text);
+  return { ok: true, messageId: pushed.messageId };
 }
 
 // =========================================================
@@ -1555,15 +1497,6 @@ async function tryFinalizeRemovalKpiBatch(batchId) {
   }
 
   try {
-    const token = String(
-      process.env.LINE_CHANNEL_ACCESS_TOKEN || ""
-    ).trim();
-    const groupId = String(process.env.LINE_GROUP_ID || "").trim();
-
-    if (!token || !groupId) {
-      throw new Error("Missing LINE configuration for removal KPI");
-    }
-
     const departments = await getActiveDepartments();
     const departmentCodeById = new Map(
       (departments || []).map((department) => [
@@ -1617,44 +1550,8 @@ async function tryFinalizeRemovalKpiBatch(batchId) {
       );
     }
 
-    const response = await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          to: groupId,
-          messages: [
-            {
-              type: "text",
-              text: lines.join("\n"),
-            },
-          ],
-        }),
-      }
-    );
-
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new Error(
-        `LINE KPI push failed: ${response.status} ${responseText}`
-      );
-    }
-
-    let responseData = {};
-    if (responseText) {
-      try {
-        responseData = JSON.parse(responseText);
-      } catch {
-        responseData = {};
-      }
-    }
-
-    const lineMessageId =
-      responseData?.sentMessages?.[0]?.id || null;
+    const pushed = await pushTelegramSales(lines.join("\n"));
+    const lineMessageId = pushed.messageId;
 
     await completeRemovalKpiBatch({
       batchId: safeBatchId,
@@ -1735,6 +1632,209 @@ async function callSheetControlInternally({ jobId, value }) {
   return data;
 }
 
+
+// =========================================================
+// TELEGRAM INTERNAL TEAM TRANSPORT — V2.2
+// Customer-facing LINE/Facebook remains unchanged.
+// Internal Sales / T0 / T2 notifications use Telegram.
+// Existing DB column names such as line_group_message_id are retained
+// for backward compatibility; they may contain a Telegram message_id.
+// =========================================================
+
+function getTelegramInternalConfig() {
+  return {
+    token: String(process.env.TELEGRAM_BOT_TOKEN || "").trim(),
+    salesChatId: String(process.env.TELEGRAM_SALES_CHAT_ID || "").trim(),
+    t0ChatId: String(process.env.TELEGRAM_T0_CHAT_ID || "").trim(),
+    t2ChatId: String(process.env.TELEGRAM_T2_CHAT_ID || "").trim(),
+  };
+}
+
+function getTelegramDepartmentChatId(departmentCode) {
+  const cfg = getTelegramInternalConfig();
+  const code = String(departmentCode || "").trim().toUpperCase();
+  if (code === "T0") return cfg.t0ChatId;
+  if (code === "T2") return cfg.t2ChatId;
+  return "";
+}
+
+async function sendTelegramText({ chatId, text, replyToMessageId = null }) {
+  const { token } = getTelegramInternalConfig();
+  const safeChatId = String(chatId || "").trim();
+  const safeText = String(text || "");
+
+  if (!token) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+  if (!safeChatId) throw new Error("Missing Telegram chat id");
+  if (!safeText.trim()) throw new Error("Missing Telegram message text");
+
+  const body = {
+    chat_id: safeChatId,
+    text: safeText.slice(0, 4096),
+    disable_web_page_preview: true,
+  };
+
+  if (replyToMessageId !== null && replyToMessageId !== undefined) {
+    body.reply_parameters = {
+      message_id: Number(replyToMessageId),
+      allow_sending_without_reply: true,
+    };
+  }
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${token}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok || data?.ok !== true) {
+    throw new Error(
+      `TELEGRAM SEND FAILED ${response.status}: ${responseText}`
+    );
+  }
+
+  const messageId = data?.result?.message_id;
+  if (messageId === null || messageId === undefined) {
+    throw new Error("Telegram send succeeded but message_id missing");
+  }
+
+  return {
+    ok: true,
+    messageId: String(messageId),
+    chatId: safeChatId,
+    text: safeText,
+  };
+}
+
+async function pushTelegramSales(text) {
+  const { salesChatId } = getTelegramInternalConfig();
+  if (!salesChatId) throw new Error("Missing TELEGRAM_SALES_CHAT_ID");
+  return sendTelegramText({ chatId: salesChatId, text });
+}
+
+async function replyTelegramInternal(chatId, incomingMessageId, text) {
+  return sendTelegramText({
+    chatId,
+    text,
+    replyToMessageId: incomingMessageId,
+  });
+}
+
+// Compatibility wrappers for old call sites that previously used lineGroupService.
+async function sendJobToLineGroup({
+  jobId,
+  jobType,
+  customerName,
+  businessName,
+  reviewerName,
+  reviewAgeDays,
+  reviewText,
+  reviewUrl,
+  mapUrl,
+  price,
+}) {
+  const lines = [
+    "💰 งานรอ Sales ตรวจ/เสนอราคา",
+    "",
+    `Job: ${jobId || "-"}`,
+    `Type: ${jobType || "-"}`,
+    `Customer: ${customerName || "-"}`,
+    `Business: ${businessName || "-"}`,
+  ];
+
+  if (reviewerName) lines.push(`Reviewer: ${reviewerName}`);
+  if (reviewAgeDays !== null && reviewAgeDays !== undefined) {
+    lines.push(`Review age: ${reviewAgeDays} วัน`);
+  }
+  if (price) lines.push(`Price: ${price}`);
+  if (reviewText) lines.push("", `Review: ${reviewText}`);
+  if (reviewUrl) lines.push("", "Review URL:", reviewUrl);
+  if (mapUrl) lines.push("", "Map URL:", mapUrl);
+  lines.push("", "Reply ข้อความนี้เพื่อดำเนินการต่อ");
+
+  return pushTelegramSales(lines.join("\n"));
+}
+
+async function sendPaymentReviewToLineGroup({
+  paymentId,
+  jobId,
+  slipImageUrl,
+  customerName,
+  businessName,
+  amount,
+  transactionDate,
+  transactionTime,
+  recipientName,
+  recipientCardLast4,
+  reasons = [],
+}) {
+  const lines = [
+    "💳 PAYMENT — รอตรวจสลิป",
+    "",
+    `Payment: ${paymentId || "-"}`,
+    `Job: ${jobId || "-"}`,
+    `Customer: ${customerName || "-"}`,
+    `Business: ${businessName || "-"}`,
+    `Amount: ${amount || "-"}`,
+    `Date: ${transactionDate || "-"}`,
+    `Time: ${transactionTime || "-"}`,
+    `Recipient: ${recipientName || "-"}`,
+    `Card last4: ${recipientCardLast4 || "-"}`,
+  ];
+  if (Array.isArray(reasons) && reasons.length) {
+    lines.push("", "เหตุผลที่ต้องตรวจ:", ...reasons.map((r, i) => `${i + 1}. ${r}`));
+  }
+  if (slipImageUrl) lines.push("", "Slip:", slipImageUrl);
+  lines.push("", "Reply: ยืนยัน / no");
+  return pushTelegramSales(lines.join("\n"));
+}
+
+async function registerTelegramWebhook() {
+  const { token } = getTelegramInternalConfig();
+  if (!token) {
+    console.log("TELEGRAM WEBHOOK SKIPPED: TELEGRAM_BOT_TOKEN missing");
+    return { ok: false, skipped: true, reason: "NO_TOKEN" };
+  }
+
+  const configuredBase = String(process.env.TELEGRAM_WEBHOOK_BASE_URL || "").trim();
+  const renderBase = String(process.env.RENDER_EXTERNAL_URL || "").trim();
+  const baseUrl = (
+    configuredBase ||
+    renderBase ||
+    "https://gmr-auto-chat.onrender.com"
+  ).replace(/\/$/, "");
+
+  const webhookUrl = `${baseUrl}/telegram/webhook`;
+  const response = await fetch(
+    `https://api.telegram.org/bot${token}/setWebhook`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: webhookUrl,
+        allowed_updates: ["message"],
+        drop_pending_updates: false,
+      }),
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+  if (!response.ok || data?.ok !== true) {
+    throw new Error(`TELEGRAM SET WEBHOOK FAILED ${response.status}: ${responseText}`);
+  }
+
+  console.log("TELEGRAM WEBHOOK READY:", webhookUrl);
+  return { ok: true, webhookUrl };
+}
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -1796,92 +1896,29 @@ async function sendDepartmentDispatchToLineGroup({
   jobs,
   dispatchedAt,
 }) {
-  if (!department?.id) {
-    throw new Error(
-      "Missing department in sendDepartmentDispatchToLineGroup"
-    );
+  if (!department?.id) throw new Error("Missing department in sendDepartmentDispatchToLineGroup");
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    throw new Error("No jobs supplied to sendDepartmentDispatchToLineGroup");
   }
 
-  const groupId =
-    String(
-      department.line_group_id || ""
-    ).trim();
-
-  if (!groupId) {
-    throw new Error(
-      `Department ${department.code || department.id} has no line_group_id`
-    );
+  const chatId = getTelegramDepartmentChatId(department.code);
+  if (!chatId) {
+    throw new Error(`Missing Telegram chat id for department ${department.code || department.id}`);
   }
 
-  if (
-    !Array.isArray(jobs) ||
-    jobs.length === 0
-  ) {
-    throw new Error(
-      "No jobs supplied to sendDepartmentDispatchToLineGroup"
-    );
-  }
-
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  if (!token) {
-    throw new Error(
-      "Missing LINE_CHANNEL_ACCESS_TOKEN"
-    );
-  }
-
-
-  const sentAt =
-    dispatchedAt ||
-    new Date().toISOString();
-
-
-  const reviewLines =
-    jobs.map(
-      (
-        job,
-        index
-      ) => {
-        return (
-          `${index + 1}. ` +
-          `${job.review_url}`
-        );
-      }
-    );
-
-
+  const sentAt = dispatchedAt || new Date().toISOString();
+  const reviewLines = jobs.map((job, index) => `${index + 1}. ${job.review_url}`);
   const thaiTime = (() => {
     const date = new Date(sentAt);
-
-    if (Number.isNaN(date.getTime())) {
-      return sentAt;
-    }
-
-    const parts = new Intl.DateTimeFormat(
-      "en-GB",
-      {
-        timeZone: "Asia/Bangkok",
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }
-    ).formatToParts(date);
-
-    const get = (type) =>
-      parts.find(
-        (part) => part.type === type
-      )?.value || "";
-
-    return (
-      `${get("day")}/${get("month")}/${get("year")} ` +
-      `${get("hour")}:${get("minute")}`
-    );
+    if (Number.isNaN(date.getTime())) return sentAt;
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Bangkok",
+      day: "2-digit", month: "2-digit", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(date);
+    const get = (type) => parts.find((part) => part.type === type)?.value || "";
+    return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")}`;
   })();
-
 
   const text = [
     `📦 รอบแจกงาน ${department.code || "-"}`,
@@ -1894,80 +1931,16 @@ async function sendDepartmentDispatchToLineGroup({
     ...reviewLines,
   ].join("\n");
 
+  await sendTelegramText({ chatId, text });
+  console.log("DEPARTMENT DISPATCH TELEGRAM SENT:", {
+    departmentId: department.id,
+    departmentCode: department.code,
+    chatId,
+    jobCount: jobs.length,
+    dispatchedAt: sentAt,
+  });
 
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method:
-          "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `DEPARTMENT LINE PUSH FAILED ${response.status}: ${responseText}`
-    );
-  }
-
-
-  console.log(
-    "DEPARTMENT DISPATCH LINE SENT:",
-    {
-      departmentId:
-        department.id,
-
-      departmentCode:
-        department.code,
-
-      groupId,
-
-      jobCount:
-        jobs.length,
-
-      dispatchedAt:
-        sentAt,
-    }
-  );
-
-
-  return {
-    sent:
-      true,
-
-    text,
-
-    dispatchedAt:
-      sentAt,
-  };
+  return { sent: true, text, dispatchedAt: sentAt };
 }
 
 async function sendDispatchStuckAlertToMainGroup({
@@ -1976,112 +1949,26 @@ async function sendDispatchStuckAlertToMainGroup({
   sendingStartedAt,
   stuckMinutes,
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-
-  if (!token || !groupId) {
-    console.error(
-      "DISPATCH STUCK ALERT FAILED: missing LINE config"
-    );
-
-    return {
-      sent: false,
-      reason: "missing_line_config",
-    };
-  }
-
-
   const text = [
     "⚠️ พบงาน Dispatch ค้าง",
     "",
-    `แผนก: ${
-      department?.code || "-"
-    }`,
-    `ชื่อแผนก: ${
-      department?.name || "-"
-    }`,
-    `Dispatch Round: ${
-      dispatchRoundId || "-"
-    }`,
-    `เริ่มค้างตั้งแต่: ${
-      sendingStartedAt || "-"
-    }`,
-    `ค้างประมาณ: ${
-      Math.floor(
-        Number(stuckMinutes || 0)
-      )
-    } นาที`,
+    `แผนก: ${department?.code || "-"}`,
+    `ชื่อแผนก: ${department?.name || "-"}`,
+    `Dispatch Round: ${dispatchRoundId || "-"}`,
+    `เริ่มค้างตั้งแต่: ${sendingStartedAt || "-"}`,
+    `ค้างประมาณ: ${Math.floor(Number(stuckMinutes || 0))} นาที`,
     "",
     "ระบบจะไม่ส่งงานชุดนี้ซ้ำอัตโนมัติ",
-    "กรุณาตรวจสอบ LINE กลุ่มแผนกและสถานะงานก่อนดำเนินการต่อ",
+    "กรุณาตรวจสอบ Telegram กลุ่มแผนกและสถานะงานก่อนดำเนินการต่อ",
   ].join("\n");
 
-
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method: "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `DISPATCH STUCK ALERT LINE FAILED ${response.status}: ${responseText}`
-    );
+  try {
+    await pushTelegramSales(text);
+    return { sent: true };
+  } catch (error) {
+    console.error("DISPATCH STUCK ALERT TELEGRAM FAILED:", error);
+    return { sent: false, error: error.message };
   }
-
-
-  console.log(
-    "DISPATCH STUCK ALERT SENT:",
-    {
-      departmentCode:
-        department?.code,
-
-      dispatchRoundId,
-
-      sendingStartedAt,
-
-      stuckMinutes,
-    }
-  );
-
-
-  return {
-    sent: true,
-  };
 }
 
 // =========================================================
@@ -3120,23 +3007,12 @@ async function triggerHumanAttention({
   message,
   reason,
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-  if (!token || !groupId) {
-    console.error(
-      "HUMAN ATTENTION FAILED: Missing LINE config"
-    );
-
-    return {
-      sent: false,
-    };
+  const { salesChatId } = getTelegramInternalConfig();
+  if (!salesChatId) {
+    console.error("HUMAN ATTENTION FAILED: Missing TELEGRAM_SALES_CHAT_ID");
+    return { sent: false };
   }
 
-  // กัน Sales alert ซ้ำสำหรับคำถาม/เหตุการณ์เดิม
   const attentionDedupeKey = crypto
     .createHash("sha256")
     .update([
@@ -3164,33 +3040,18 @@ async function triggerHumanAttention({
     return { sent: false, duplicate: true };
   }
 
-  const customerName =
-    customer?.display_name ||
-    "ไม่ทราบชื่อ";
+  const customerName = customer?.display_name || "ไม่ทราบชื่อ";
+  const state = conversation?.state || "UNKNOWN";
+  const platformLabel = getPlatformLabel(customer);
+  const stageLabel = await getCustomerStage({ customer, conversation });
 
-const state =
-  conversation?.state ||
-  "UNKNOWN";
-
-const platformLabel =
-  getPlatformLabel(
-    customer
-  );
-
-const stageLabel =
-  await getCustomerStage({
-    customer,
-    conversation,
-  });
-
-
-const text = [
-  "⚠️ ต้องตรวจแชทลูกค้า",
-  "",
-  `ลูกค้า: ${customerName}`,
-  `Platform: ${platformLabel}`,
-  `Stage: ${stageLabel}`,
-  `State: ${state}`,
+  const text = [
+    "⚠️ ต้องตรวจแชทลูกค้า",
+    "",
+    `ลูกค้า: ${customerName}`,
+    `Platform: ${platformLabel}`,
+    `Stage: ${stageLabel}`,
+    `State: ${state}`,
     "",
     "ข้อความล่าสุด:",
     `"${String(message || "").trim()}"`,
@@ -3203,128 +3064,31 @@ const text = [
   ].join("\n");
 
   try {
-    const response =
-      await fetch(
-        "https://api.line.me/v2/bot/message/push",
-        {
-          method: "POST",
+    const pushed = await pushTelegramSales(text);
+    const messageId = pushed.messageId;
 
-          headers: {
-            Authorization:
-              `Bearer ${token}`,
-
-            "Content-Type":
-              "application/json",
-          },
-
-          body: JSON.stringify({
-            to: groupId,
-
-            messages: [
-              {
-                type: "text",
-                text,
-              },
-            ],
-          }),
-        }
-      );
-
-    const responseText =
-  await response.text();
-
-
-if (!response.ok) {
-  throw new Error(
-    `LINE push failed ${response.status}: ${responseText}`
-  );
-}
-
-
-let responseData = {};
-
-if (responseText) {
-  try {
-    responseData =
-      JSON.parse(responseText);
-  } catch {
-    responseData = {};
-  }
-}
-
-
-const messageId =
-  responseData
-    ?.sentMessages
-    ?.[0]
-    ?.id ||
-  null;
-
-if (messageId && attentionClaim?.row?.id) {
-  try {
-    await setUnknownSalesQuestionLineMessage({
-      questionId: attentionClaim.row.id,
-      lineGroupMessageId: messageId,
-    });
-  } catch (linkError) {
-    console.error("UNKNOWN SALES QUESTION LINK FAILED:", linkError);
-  }
-}
-
-
-// ========================================
-// ถ้าลูกค้ากำลังรอราคา
-// ให้ข้อความ Human Attention นี้
-// สามารถ Reply ราคาได้ทันที
-// ========================================
-
-if (
-  messageId &&
-  conversation?.state ===
-    GMR_STATES.WAITING_PRICE
-) {
-  const latestJob =
-    await getLatestJobByCustomerId(
-      customer.id
-    );
-
-  if (latestJob) {
-    await updateJob(
-      latestJob.id,
-      {
-        line_group_message_id:
-          messageId,
+    if (messageId && attentionClaim?.row?.id) {
+      try {
+        await setUnknownSalesQuestionLineMessage({
+          questionId: attentionClaim.row.id,
+          lineGroupMessageId: messageId,
+        });
+      } catch (linkError) {
+        console.error("UNKNOWN SALES QUESTION LINK FAILED:", linkError);
       }
-    );
+    }
 
-    console.log(
-      "WAITING PRICE ATTENTION LINKED TO JOB:",
-      {
-        jobId:
-          latestJob.id,
-
-        messageId,
+    if (messageId && conversation?.state === GMR_STATES.WAITING_PRICE) {
+      const latestJob = await getLatestJobByCustomerId(customer.id);
+      if (latestJob) {
+        await updateJob(latestJob.id, { line_group_message_id: messageId });
       }
-    );
-  }
-}
+    }
 
-
-return {
-  sent: true,
-  messageId,
-};
+    return { sent: true, messageId };
   } catch (error) {
-    console.error(
-      "HUMAN ATTENTION LINE ERROR:",
-      error
-    );
-
-    return {
-      sent: false,
-      error:
-        error.message,
-    };
+    console.error("HUMAN ATTENTION TELEGRAM ERROR:", error);
+    return { sent: false, error: error.message };
   }
 }
 
@@ -3340,60 +3104,17 @@ async function sendReactivationAlertToLineGroup({
   alert,
   customerMap,
 }) {
-  if (!alert?.id) {
-    throw new Error(
-      "Missing alert in sendReactivationAlertToLineGroup"
-    );
-  }
+  if (!alert?.id) throw new Error("Missing alert in sendReactivationAlertToLineGroup");
 
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-  if (!token || !groupId) {
-    throw new Error(
-      "Missing LINE config for reactivation alert"
-    );
-  }
-
-  const customer =
-    await getCustomerById(
-      alert.customer_id
-    );
-
-  const customerName =
-    customer?.display_name ||
-    "-";
-
-  const businessName =
-    customerMap?.business_name ||
-    "-";
-
-  const reviewerName =
-    alert.reviewer_name ||
-    "-";
-
-  const reviewText =
-    String(
-      alert.review_text || ""
-    ).trim() ||
-    "(ไม่มีข้อความ)";
-
-  const reviewDate =
-    alert.review_date ||
-    "-";
-
-  const reviewUrl =
-    alert.review_url ||
-    "-";
-
-  const platformUserId =
-    String(customer?.platform_user_id || "").trim();
-
-  const liveChatReady =
-    Boolean(platformUserId) &&
+  const customer = await getCustomerById(alert.customer_id);
+  const customerName = customer?.display_name || "-";
+  const businessName = customerMap?.business_name || "-";
+  const reviewerName = alert.reviewer_name || "-";
+  const reviewText = String(alert.review_text || "").trim() || "(ไม่มีข้อความ)";
+  const reviewDate = alert.review_date || "-";
+  const reviewUrl = alert.review_url || "-";
+  const platformUserId = String(customer?.platform_user_id || "").trim();
+  const liveChatReady = Boolean(platformUserId) &&
     !platformUserId.startsWith("legacy:") &&
     customer?.customer_notify !== false;
 
@@ -3420,157 +3141,37 @@ async function sendReactivationAlertToLineGroup({
     "ข้าม",
   ].join("\n");
 
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method:
-          "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-  const responseText =
-    await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `REACTIVATION LINE PUSH FAILED ${response.status}: ${responseText}`
-    );
-  }
-
-  let responseData = {};
-
-  if (responseText) {
-    try {
-      responseData =
-        JSON.parse(
-          responseText
-        );
-    } catch {
-      responseData = {};
-    }
-  }
-
-  const messageId =
-    responseData
-      ?.sentMessages
-      ?.[0]
-      ?.id ||
-    null;
-
-  if (!messageId) {
-    throw new Error(
-      "Reactivation LINE messageId missing"
-    );
-  }
-
+  const pushed = await pushTelegramSales(text);
   await setReactivationAlertLineGroupMessage({
-    alertId:
-      alert.id,
-
-    lineGroupMessageId:
-      messageId,
+    alertId: alert.id,
+    lineGroupMessageId: pushed.messageId,
   });
 
-  console.log(
-    "REACTIVATION LINE ALERT SENT:",
-    {
-      alertId:
-        alert.id,
+  console.log("REACTIVATION TELEGRAM ALERT SENT:", {
+    alertId: alert.id,
+    customerId: alert.customer_id,
+    messageId: pushed.messageId,
+  });
 
-      customerId:
-        alert.customer_id,
-
-      messageId,
-    }
-  );
-
-  return {
-    sent: true,
-    messageId,
-    text,
-  };
+  return { sent: true, messageId: pushed.messageId, text };
 }
 
 async function sendLegacyAutoMatchAmbiguousToLine({
   legacyCustomer,
   customers = [],
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-
-  if (!token || !groupId) {
-    console.error(
-      "LEGACY AMBIGUOUS ALERT FAILED: Missing LINE config"
-    );
-
-    return {
-      sent: false,
-    };
-  }
-
-
-  const candidateText =
-    customers
-      .map(
-        (customer, index) =>
-          `${index + 1}. ${
-            customer.display_name ||
-            "-"
-          }
-ID: ${
-            customer.id
-          }
-Platform User ID: ${
-            customer.platform_user_id ||
-            "-"
-          }`
-      )
-      .join("\n\n");
-
+  const candidateText = customers
+    .map((customer, index) =>
+      `${index + 1}. ${customer.display_name || "-"}\nID: ${customer.id}\nPlatform User ID: ${customer.platform_user_id || "-"}`
+    )
+    .join("\n\n");
 
   const text = [
     "⚠️ Legacy Customer พบชื่อซ้ำ",
     "",
-    `Legacy Name: ${
-      legacyCustomer?.display_name ||
-      "-"
-    }`,
-    `Business: ${
-      legacyCustomer?.business_name ||
-      "-"
-    }`,
-    `Platform: ${
-      legacyCustomer?.platform ||
-      "-"
-    }`,
+    `Legacy Name: ${legacyCustomer?.display_name || "-"}`,
+    `Business: ${legacyCustomer?.business_name || "-"}`,
+    `Platform: ${legacyCustomer?.platform || "-"}`,
     "",
     `พบ Customer ตรงกัน ${customers.length} ราย`,
     "",
@@ -3580,89 +3181,15 @@ Platform User ID: ${
     "กรุณาตรวจสอบว่าเป็น Account ใดก่อนครับ",
   ].join("\n");
 
-
   try {
-
-    const response =
-      await fetch(
-        "https://api.line.me/v2/bot/message/push",
-        {
-          method: "POST",
-
-          headers: {
-            Authorization:
-              `Bearer ${token}`,
-
-            "Content-Type":
-              "application/json",
-          },
-
-          body:
-            JSON.stringify({
-              to:
-                groupId,
-
-              messages: [
-                {
-                  type:
-                    "text",
-
-                  text,
-                },
-              ],
-            }),
-        }
-      );
-
-
-    if (!response.ok) {
-
-      const errorText =
-        await response.text();
-
-      throw new Error(
-        `LINE push failed: ${response.status} ${errorText}`
-      );
-    }
-
-
-    console.log(
-      "LEGACY AUTO MATCH AMBIGUOUS ALERT SENT:",
-      {
-        legacyCustomerId:
-          legacyCustomer?.id ||
-          null,
-
-        matchCount:
-          customers.length,
-      }
-    );
-
-
-    return {
-      sent: true,
-    };
-
-
+    await pushTelegramSales(text);
+    return { sent: true };
   } catch (error) {
-
-    console.error(
-      "LEGACY AUTO MATCH AMBIGUOUS ALERT FAILED:",
-      {
-        legacyCustomerId:
-          legacyCustomer?.id ||
-          null,
-
-        error:
-          error?.message ||
-          String(error),
-      }
-    );
-
-
-    return {
-      sent: false,
-    };
+    console.error("LEGACY AUTO MATCH AMBIGUOUS TELEGRAM FAILED:", {
+      legacyCustomerId: legacyCustomer?.id || null,
+      error: error?.message || String(error),
+    });
+    return { sent: false };
   }
 }
 
@@ -3680,229 +3207,51 @@ async function sendLegacyCustomerMatchRequest({
   message = null,
   messageType = "text",
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  if (!customer?.id) throw new Error("Missing customer in sendLegacyCustomerMatchRequest");
+  if (!legacyCustomer?.id) throw new Error("Missing legacyCustomer in sendLegacyCustomerMatchRequest");
 
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-
-  if (!token || !groupId) {
-    throw new Error(
-      "Missing LINE config for legacy customer match"
-    );
-  }
-
-
-  if (!customer?.id) {
-    throw new Error(
-      "Missing customer in sendLegacyCustomerMatchRequest"
-    );
-  }
-
-
-  if (!legacyCustomer?.id) {
-    throw new Error(
-      "Missing legacyCustomer in sendLegacyCustomerMatchRequest"
-    );
-  }
-
-
-  const newRate =
-    Number(
-      legacyCustomer.new_review_rate || 0
-    );
-
-  const oldRate =
-    Number(
-      legacyCustomer.old_review_rate || 0
-    );
-
-
-  const newCurrency =
-    String(
-      legacyCustomer.new_review_currency ||
-      "THB"
-    ).toUpperCase();
-
-
-  const oldCurrency =
-    String(
-      legacyCustomer.old_review_currency ||
-      "THB"
-    ).toUpperCase();
-
-
-  const formatLegacyRate = (
-    amount,
-    currency
-  ) => {
-    if (
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
-      return "-";
-    }
-
-    if (currency === "USD") {
-      return `$${formatMoney(
-        amount,
-        "USD"
-      )} USD`;
-    }
-
-    return `${formatMoney(
-      amount,
-      "THB"
-    )} บาท`;
+  const newRate = Number(legacyCustomer.new_review_rate || 0);
+  const oldRate = Number(legacyCustomer.old_review_rate || 0);
+  const newCurrency = String(legacyCustomer.new_review_currency || "THB").toUpperCase();
+  const oldCurrency = String(legacyCustomer.old_review_currency || "THB").toUpperCase();
+  const formatLegacyRate = (amount, currency) => {
+    if (!Number.isFinite(amount) || amount <= 0) return "-";
+    return currency === "USD"
+      ? `$${formatMoney(amount, "USD")} USD`
+      : `${formatMoney(amount, "THB")} บาท`;
   };
-
 
   const text = [
     "⚠️ พบลูกค้าที่อาจเป็นลูกค้าเก่า",
     "",
-    `LINE Name: ${
-      customer.display_name ||
-      "-"
-    }`,
-    `Legacy Name: ${
-      legacyCustomer.display_name ||
-      "-"
-    }`,
+    `Current Name: ${customer.display_name || "-"}`,
+    `Legacy Name: ${legacyCustomer.display_name || "-"}`,
+    `Platform: ${customer.platform || legacyCustomer.platform || "-"}`,
     "",
-    `ธุรกิจเดิม: ${
-      legacyCustomer.business_name ||
-      "-"
-    }`,
-    `เบอร์เดิม: ${
-      legacyCustomer.phone ||
-      "-"
-    }`,
+    `ธุรกิจเดิม: ${legacyCustomer.business_name || "-"}`,
+    `เบอร์เดิม: ${legacyCustomer.phone || "-"}`,
     "",
     "ราคาเดิม:",
-    `NEW Review: ${formatLegacyRate(
-      newRate,
-      newCurrency
-    )}`,
-    `OLD Review: ${formatLegacyRate(
-      oldRate,
-      oldCurrency
-    )}`,
+    `NEW Review: ${formatLegacyRate(newRate, newCurrency)}`,
+    `OLD Review: ${formatLegacyRate(oldRate, oldCurrency)}`,
     "",
-    `หมายเหตุ: ${
-      legacyCustomer.note ||
-      "-"
-    }`,
-    "",
-    "กรุณาตรวจว่าเป็นลูกค้าคนเดียวกันหรือไม่",
+    `หมายเหตุ: ${legacyCustomer.note || "-"}`,
     "",
     "Reply ข้อความนี้:",
     "✅ ยืนยันลูกค้าเก่า",
     "❌ ไม่ใช่",
   ].join("\n");
 
-
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method:
-          "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `LEGACY MATCH LINE PUSH FAILED ${response.status}: ${responseText}`
-    );
-  }
-
-
-  let responseData = {};
-
-
-  if (responseText) {
-    try {
-      responseData =
-        JSON.parse(
-          responseText
-        );
-
-    } catch {
-      responseData = {};
-    }
-  }
-
-
-  const messageId =
-    responseData
-      ?.sentMessages
-      ?.[0]
-      ?.id ||
-    null;
-
-
-  if (!messageId) {
-    throw new Error(
-      "Legacy match LINE messageId missing"
-    );
-  }
-
-
-  // ========================================
-  // บันทึกว่า Legacy คนนี้
-  // กำลังรอยืนยันกับ Customer คนไหน
-  // ========================================
-
+  const pushed = await pushTelegramSales(text);
   await setLegacyCustomerPendingMatch({
-  legacyCustomerId:
-    legacyCustomer.id,
+    legacyCustomerId: legacyCustomer.id,
+    customerId: customer.id,
+    lineGroupMessageId: pushed.messageId,
+    pendingMessageText: message,
+    pendingMessageType: messageType,
+  });
 
-  customerId:
-    customer.id,
-
-  lineGroupMessageId:
-    messageId,
-
-  pendingMessageText:
-    message,
-
-  pendingMessageType:
-    messageType,
-});
-
-  return {
-    messageId,
-    text,
-  };
+  return { messageId: pushed.messageId, text };
 }
 
 async function sendCreditApprovalRequestToLineGroup({
@@ -3910,385 +3259,81 @@ async function sendCreditApprovalRequestToLineGroup({
   job,
   phone,
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-  if (!token || !groupId) {
-    throw new Error(
-      "Missing LINE config for credit approval"
-    );
-  }
-
-
-  const formattedPrice =
-    Number(
-      job.price || 0
-    ).toLocaleString("th-TH");
-
-
+  const formattedPrice = Number(job?.price || 0).toLocaleString("th-TH");
   const text = [
     "⚠️ ขออนุมัติเครดิตลูกค้าใหม่",
     "",
-    `ลูกค้า: ${
-      customer.display_name ||
-      "ไม่ทราบชื่อ"
-    }`,
-    `Platform: ${
-      String(
-        customer.platform ||
-        "line"
-      ).toUpperCase()
-    }`,
-    `เบอร์: ${
-      phone || "-"
-    }`,
+    `ลูกค้า: ${customer?.display_name || "ไม่ทราบชื่อ"}`,
+    `Platform: ${String(customer?.platform || "line").toUpperCase()}`,
+    `เบอร์: ${phone || "-"}`,
     "",
-    `ธุรกิจ: ${
-      job.business_name ||
-      "-"
-    }`,
+    `ธุรกิจ: ${job?.business_name || "-"}`,
     `มูลค่างาน: ${formattedPrice} บาท`,
-    "",
-    "ลูกค้ารายนี้ยังไม่มีประวัติชำระเงินในระบบ",
-    "กรุณาเข้าไปตรวจสอบ Account / Profile และประเมินความเสี่ยงก่อนเริ่มงาน",
     "",
     "Reply ข้อความนี้:",
     "✅ อนุมัติ",
     "❌ ไม่อนุมัติ",
   ].join("\n");
-
-
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method: "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to: groupId,
-
-            messages: [
-              {
-                type: "text",
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `CREDIT APPROVAL LINE PUSH FAILED ${response.status}: ${responseText}`
-    );
-  }
-
-
-  let responseData = {};
-
-  if (responseText) {
-    try {
-      responseData =
-        JSON.parse(
-          responseText
-        );
-    } catch {
-      responseData = {};
-    }
-  }
-
-
-  const messageId =
-    responseData
-      ?.sentMessages
-      ?.[0]
-      ?.id ||
-    null;
-
-
-  if (!messageId) {
-    throw new Error(
-      "Credit approval LINE messageId missing"
-    );
-  }
-
-
-  return {
-    messageId,
-    text,
-  };
+  const pushed = await pushTelegramSales(text);
+  return { messageId: pushed.messageId, text };
 }
-
-// =========================================================
-// EXISTING CUSTOMER BATCH CREDIT APPROVAL
-//
-// ลูกค้าเก่า:
-// - ไม่ถามเบอร์โทร
-// - อนุมัติทั้ง Batch
-// - LINE messageId ผูกกับ Anchor Job เพียง Job เดียว
-// =========================================================
 
 async function sendExistingCustomerBatchCreditApprovalToLineGroup({
   customer,
   jobs,
 }) {
-  const token =
-    process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  const groupId =
-    process.env.LINE_GROUP_ID;
-
-
-  if (!token || !groupId) {
-    throw new Error(
-      "Missing LINE config for existing customer batch credit approval"
-    );
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    throw new Error("No jobs supplied for existing customer batch credit approval");
   }
 
-
-  if (
-    !Array.isArray(jobs) ||
-    jobs.length === 0
-  ) {
-    throw new Error(
-      "No jobs supplied for existing customer batch credit approval"
-    );
-  }
-
-
-  // ========================================
-  // รวมรายการตาม Currency + Unit Price
-  //
-  // เช่น
-  // 5,500 THB × 3
-  // 9,900 THB × 1
-  // 199 USD × 2
-  // ========================================
-
-  const grouped =
-    new Map();
-
-
+  const grouped = new Map();
   for (const job of jobs) {
-    const price =
-      Number(
-        job.price || 0
-      );
-
-    if (
-      !Number.isFinite(price) ||
-      price <= 0
-    ) {
-      continue;
-    }
-
-
-    const currency =
-      getCurrencyFromUnitPrice({
-        price,
-
-        currency:
-          job.currency,
-      });
-
-
-    const key =
-      `${currency}:${price}`;
-
-
-    if (!grouped.has(key)) {
-      grouped.set(
-        key,
-        {
-          currency,
-          price,
-          count: 0,
-        }
-      );
-    }
-
-
+    const price = Number(job.price || 0);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const currency = getCurrencyFromUnitPrice({ price, currency: job.currency });
+    const key = `${currency}:${price}`;
+    if (!grouped.has(key)) grouped.set(key, { currency, price, count: 0 });
     grouped.get(key).count += 1;
   }
 
+  const detailLines = Array.from(grouped.values()).map(({ currency, price, count }) => {
+    const formattedPrice = formatMoney(price, currency);
+    const lineTotal = formatMoney(price * count, currency);
+    return currency === "THB"
+      ? `• ${formattedPrice} บาท/รีวิว × ${count} = ${lineTotal} บาท`
+      : `• $${formattedPrice} USD/review × ${count} = $${lineTotal} USD`;
+  });
 
-  const groups =
-    Array.from(
-      grouped.values()
-    );
-
-
-  const detailLines =
-    groups.map(
-      ({
-        currency,
-        price,
-        count,
-      }) => {
-
-        const formattedPrice =
-          formatMoney(
-            price,
-            currency
-          );
-
-
-        const lineTotal =
-          formatMoney(
-            price * count,
-            currency
-          );
-
-
-        if (currency === "THB") {
-          return (
-            `• ${formattedPrice} บาท/รีวิว` +
-            ` × ${count}` +
-            ` = ${lineTotal} บาท`
-          );
-        }
-
-
-        return (
-          `• $${formattedPrice} USD/review` +
-          ` × ${count}` +
-          ` = $${lineTotal} USD`
-        );
-      }
-    );
-
-
-  // ========================================
-  // Total THB
-  // ========================================
-
-  const totalTHB =
-    jobs.reduce(
-      (
-        total,
-        job
-      ) => {
-
-        const price =
-          Number(
-            job.price || 0
-          );
-
-
-        const currency =
-          getCurrencyFromUnitPrice({
-            price,
-
-            currency:
-              job.currency,
-          });
-
-
-        if (
-          currency !== "THB" ||
-          !Number.isFinite(price)
-        ) {
-          return total;
-        }
-
-
-        return total + price;
-      },
-      0
-    );
-
-
-  // ========================================
-  // Total USD
-  // ========================================
-
-  const totalUSD =
-    jobs.reduce(
-      (
-        total,
-        job
-      ) => {
-
-        const price =
-          Number(
-            job.price || 0
-          );
-
-
-        const currency =
-          getCurrencyFromUnitPrice({
-            price,
-
-            currency:
-              job.currency,
-          });
-
-
-        if (
-          currency !== "USD" ||
-          !Number.isFinite(price)
-        ) {
-          return total;
-        }
-
-
-        return total + price;
-      },
-      0
-    );
-
+  const totalTHB = jobs.reduce((total, job) => {
+    const price = Number(job.price || 0);
+    const currency = getCurrencyFromUnitPrice({ price, currency: job.currency });
+    return currency === "THB" && Number.isFinite(price) ? total + price : total;
+  }, 0);
+  const totalUSD = jobs.reduce((total, job) => {
+    const price = Number(job.price || 0);
+    const currency = getCurrencyFromUnitPrice({ price, currency: job.currency });
+    return currency === "USD" && Number.isFinite(price) ? total + price : total;
+  }, 0);
 
   const totalLines = [];
+  if (totalTHB > 0) totalLines.push(`รวม THB: ${formatMoney(totalTHB, "THB")} บาท`);
+  if (totalUSD > 0) totalLines.push(`รวม USD: $${formatMoney(totalUSD, "USD")} USD`);
 
-
-  if (totalTHB > 0) {
-    totalLines.push(
-      `รวม THB: ${formatMoney(
-        totalTHB,
-        "THB"
-      )} บาท`
-    );
-  }
-
-
-  if (totalUSD > 0) {
-    totalLines.push(
-      `รวม USD: $${formatMoney(
-        totalUSD,
-        "USD"
-      )} USD`
-    );
-  }
-
-
-  const numberedReviewLines = jobs.flatMap((job, index) => [
-    `${index + 1}. ${job.review_url || "-"}`,
-    `   ราคา: ${formatMoney(Number(job.price || 0), getCurrencyFromUnitPrice({ price: Number(job.price || 0), currency: job.currency }))} ${getCurrencyFromUnitPrice({ price: Number(job.price || 0), currency: job.currency })}`
-  ]);
+  const numberedReviewLines = jobs.flatMap((job, index) => {
+    const price = Number(job.price || 0);
+    const currency = getCurrencyFromUnitPrice({ price, currency: job.currency });
+    return [
+      `${index + 1}. ${job.review_url || "-"}`,
+      `   ราคา: ${formatMoney(price, currency)} ${currency}`,
+    ];
+  });
 
   const text = [
     "👤 ลูกค้าเก่ายืนยันงาน — รอ Sales ตรวจ",
     "",
-    `ลูกค้า: ${customer.display_name || "ไม่ทราบชื่อ"}`,
+    `ลูกค้า: ${customer?.display_name || "ไม่ทราบชื่อ"}`,
     `Platform: ${getPlatformLabel(customer)}`,
-    `Customer ID: ${customer.id}`,
+    `Customer ID: ${customer?.id || "-"}`,
     "",
     `จำนวนรีวิวในชุด: ${jobs.length} รีวิว`,
     "",
@@ -4304,86 +3349,8 @@ async function sendExistingCustomerBatchCreditApprovalToLineGroup({
     "❌ ราคา/ลิงก์ผิด: Reply ข้อความนี้แล้วพิมพ์  ยกเลิก",
   ].join("\n");
 
-
-  const response =
-    await fetch(
-      "https://api.line.me/v2/bot/message/push",
-      {
-        method:
-          "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json",
-        },
-
-        body:
-          JSON.stringify({
-            to:
-              groupId,
-
-            messages: [
-              {
-                type:
-                  "text",
-
-                text,
-              },
-            ],
-          }),
-      }
-    );
-
-
-  const responseText =
-    await response.text();
-
-
-  if (!response.ok) {
-    throw new Error(
-      `EXISTING BATCH CREDIT APPROVAL LINE PUSH FAILED ${response.status}: ${responseText}`
-    );
-  }
-
-
-  let responseData = {};
-
-
-  if (responseText) {
-    try {
-      responseData =
-        JSON.parse(
-          responseText
-        );
-
-    } catch {
-      responseData = {};
-    }
-  }
-
-
-  const messageId =
-    responseData
-      ?.sentMessages
-      ?.[0]
-      ?.id ||
-    null;
-
-
-  if (!messageId) {
-    throw new Error(
-      "Existing customer batch credit approval LINE messageId missing"
-    );
-  }
-
-
-  return {
-    messageId,
-    text,
-  };
+  const pushed = await pushTelegramSales(text);
+  return { messageId: pushed.messageId, text };
 }
 
 // =========================================================
@@ -5157,6 +4124,483 @@ app.use(
     },
   })
 );
+
+
+// =========================================================
+// TELEGRAM INTERNAL WEBHOOK — SALES REPLY FLOW
+// =========================================================
+app.post("/telegram/webhook", async (req, res) => {
+  // Telegram expects a fast 200; process in this request because Render keeps
+  // the service warm and our commands need deterministic DB updates.
+  try {
+    const update = req.body || {};
+    const updateId = update?.update_id;
+    const msg = update?.message;
+
+    if (!msg?.chat?.id) return res.sendStatus(200);
+
+    if (updateId !== null && updateId !== undefined) {
+      const claim = await claimWebhookEvent({
+        platform: "telegram",
+        eventId: String(updateId),
+        payload: {
+          chatId: String(msg.chat.id),
+          messageId: String(msg.message_id || ""),
+        },
+      });
+      if (claim?.claimed === false) return res.sendStatus(200);
+    }
+
+    const { salesChatId, t0ChatId, t2ChatId } = getTelegramInternalConfig();
+    const chatId = String(msg.chat.id);
+    const allowed = new Set([salesChatId, t0ChatId, t2ChatId].filter(Boolean));
+    if (!allowed.has(chatId)) {
+      console.warn("TELEGRAM MESSAGE IGNORED — UNKNOWN CHAT", { chatId });
+      return res.sendStatus(200);
+    }
+
+    const groupText = String(msg.text || msg.caption || "").trim();
+    if (!groupText) return res.sendStatus(200);
+
+    const normalizedGroupText = groupText.toLowerCase();
+
+    // Quick connectivity test in any configured internal group.
+    if (["/test", "/test@"].some((cmd) => normalizedGroupText === cmd || normalizedGroupText.startsWith("/test@"))) {
+      await replyTelegramInternal(
+        chatId,
+        msg.message_id,
+        `✅ Telegram Internal connected\nChat: ${msg.chat.title || chatId}`
+      );
+      return res.sendStatus(200);
+    }
+
+    // T0/T2 are dispatch-only. Interactive business commands belong to Sales.
+    if (chatId !== salesChatId) return res.sendStatus(200);
+    const quotedMessageId = msg?.reply_to_message?.message_id
+      ? String(msg.reply_to_message.message_id)
+      : null;
+    const actorId = msg?.from?.id ? String(msg.from.id) : null;
+
+    const reply = async (text) =>
+      replyTelegramInternal(chatId, msg.message_id, text);
+
+    // -----------------------------------------------------
+    // V2 SALES: Preview confirm/cancel + existing customer approval
+    // -----------------------------------------------------
+    if (quotedMessageId) {
+      const isConfirmWork = ["ยืนยันงาน", "confirm work", "confirm job"].includes(normalizedGroupText);
+      const isCancelWork = ["ยกเลิก", "cancel", "cancel job"].includes(normalizedGroupText);
+
+      if (isConfirmWork || isCancelWork) {
+        const draft = await getSalesOrderDraftByPreviewMessageId(quotedMessageId);
+
+        if (draft) {
+          if (isCancelWork) {
+            if (draft.status !== "pending_confirmation") {
+              await reply(`⚠️ งานชุดนี้อยู่ในสถานะ ${draft.status} แล้วครับ`);
+              return res.sendStatus(200);
+            }
+
+            await updateSalesOrderDraft(draft.id, {
+              status: "cancelled",
+              cancelled_at: new Date().toISOString(),
+            });
+            await reply(
+              "❌ ยกเลิก Draft แล้วครับ\nยังไม่มี Job ถูกสร้าง / ยังไม่ลง Sheet / ยังไม่เริ่มงาน\nแก้ข้อมูลแล้ว Reply ข้อความลูกค้าเดิมเพื่อส่งชุดใหม่ได้เลย"
+            );
+            return res.sendStatus(200);
+          }
+
+          try {
+            const confirmed = await confirmV2SalesOrderDraft(draft);
+            const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
+            await reply([
+              "✅ ยืนยันงานเรียบร้อย",
+              `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
+              `Platform: ${getPlatformLabel(confirmed.customer)}`,
+              `รับเข้าคิว: ${confirmed.startedJobs.length} รีวิว`,
+              "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+              confirmed.customerNotifyOk
+                ? "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว"
+                : "⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+              failedSheets.length === 0
+                ? "ลง Sheet ครบแล้ว"
+                : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+            ].join("\n"));
+          } catch (error) {
+            console.error("TELEGRAM V2 SALES ORDER CONFIRM FAILED:", error);
+            await reply(`❌ ยืนยันงานไม่สำเร็จ: ${error.message}\nกรุณาอย่ากดยืนยันซ้ำจนกว่าจะตรวจสอบสถานะ`);
+          }
+          return res.sendStatus(200);
+        }
+
+        const anchorJob = await getJobByLineGroupMessageId(quotedMessageId);
+        if (anchorJob?.status === "waiting_credit_approval") {
+          const existingCustomer = await getCustomerById(anchorJob.customer_id);
+          const conversation = existingCustomer
+            ? await getConversationByCustomerId(existingCustomer.id)
+            : null;
+
+          if (
+            existingCustomer &&
+            conversation?.handoff_reason === "EXISTING_BATCH_CREDIT_APPROVAL_PENDING"
+          ) {
+            const batchJobs = await getWaitingCreditApprovalJobsByCustomerId(existingCustomer.id);
+
+            if (isCancelWork) {
+              for (const job of batchJobs) {
+                await updateJob(job.id, { status: "sales_rejected" });
+              }
+              await updateConversationState({
+                customerId: existingCustomer.id,
+                state: GMR_STATES.WAITING_MAP,
+                handoff: false,
+                handoffReason: null,
+              });
+              await reply(`❌ ยกเลิกชุดนี้แล้วครับ\nจำนวน ${batchJobs.length} รีวิว\nยังไม่มีงานถูกเริ่ม และระบบจะไม่ส่งข้อความยกเลิกหาลูกค้า`);
+              return res.sendStatus(200);
+            }
+
+            try {
+              const started = await startApprovedExistingCustomerBatch({
+                customer: existingCustomer,
+                conversation,
+                jobs: batchJobs,
+              });
+              const sheetResults = await appendV2StartedJobsToMasterSheet({
+                customer: existingCustomer,
+                jobs: started.startedJobs,
+                source: "existing_customer_telegram_sales_approved",
+              });
+              await sendMessageToCustomer({
+                platform: existingCustomer.platform,
+                platformUserId: existingCustomer.platform_user_id,
+                text: started.botReply,
+              });
+              const sheetFails = sheetResults.filter((item) => item.ok !== true);
+              await reply([
+                "✅ Sales ยืนยันงานลูกค้าเก่าแล้ว",
+                `รับเข้าคิว ${started.startedJobs.length} รีวิว`,
+                "ส่ง Script เริ่มงานให้ลูกค้าแล้ว",
+                sheetFails.length === 0 ? "ลง Sheet ครบแล้ว" : `⚠️ Sheet fail ${sheetFails.length} งาน`,
+              ].join("\n"));
+            } catch (error) {
+              console.error("TELEGRAM V2 EXISTING BATCH CONFIRM FAILED:", error);
+              await reply(`❌ เริ่มงานลูกค้าเก่าไม่สำเร็จ: ${error.message}`);
+            }
+            return res.sendStatus(200);
+          }
+        }
+      }
+
+      // Reply Lead Card -> price + review links -> Preview
+      const leadCard = await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
+      if (leadCard) {
+        try {
+          const prepared = await prepareV2SalesOrderDraft({
+            leadCard,
+            groupText,
+            lineUserId: actorId,
+          });
+          if (prepared?.ok) {
+            await reply(
+              "✅ อ่านราคาและลิงก์แล้วครับ\nระบบส่ง Preview ใหม่แล้ว กรุณาตรวจแล้ว Reply Preview ด้วยคำว่า “ยืนยันงาน” หรือ “ยกเลิก”"
+            );
+          }
+        } catch (error) {
+          await reply([
+            `❌ อ่านคำสั่งงานไม่สำเร็จ: ${error.message}`,
+            "",
+            "วิธีง่ายที่สุด:",
+            "Reply ข้อความลูกค้า แล้วพิมพ์",
+            "5500 THB",
+            "https://google.com/maps/reviews/...",
+          ].join("\n"));
+        }
+        return res.sendStatus(200);
+      }
+    }
+
+    // -----------------------------------------------------
+    // MANUAL ASSIGNED WORK
+    // -----------------------------------------------------
+    if (/^\/manual\b/i.test(groupText)) {
+      try {
+        const manualResult = await createManualAssignedWorkFromGroupText(groupText);
+        const lines = manualResult.createdJobs.map(
+          (item, index) => `${index + 1}. ${item.reviewUrl}\n   Job: ${item.jobId}\n   Status: ${item.status}`
+        );
+        await reply([
+          "✅ รับ Manual Assigned Work เข้าระบบแล้ว",
+          `Customer: ${manualResult.customer?.display_name || "-"}`,
+          `Type: ${manualResult.parsed.workType || "AUTO"}`,
+          `Price: ${manualResult.parsed.price} ${manualResult.parsed.currency || ""}/review`,
+          `จำนวน: ${manualResult.createdJobs.length} รีวิว`,
+          "",
+          ...lines,
+          "",
+          "หมายเหตุ: customer_notify=false ระบบจะไม่ทักลูกค้าเอง",
+        ].join("\n"));
+      } catch (error) {
+        await reply(`❌ Manual Assigned Work ไม่สำเร็จ: ${error.message}`);
+      }
+      return res.sendStatus(200);
+    }
+
+    // -----------------------------------------------------
+    // REVIEW REMOVAL HUMAN CONFIRMATION
+    // -----------------------------------------------------
+    if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
+      const monitoringJobs = await getJobsForReviewMonitoring();
+      const removalJob = (monitoringJobs || []).find(
+        (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
+      );
+      if (removalJob) {
+        const value = normalizedGroupText === "อนุมัติ"
+          ? "CONFIRM_REMOVED"
+          : "REVIEW_STILL_VISIBLE";
+        await callSheetControlInternally({ jobId: removalJob.id, value });
+        await reply(
+          value === "CONFIRM_REMOVED"
+            ? "✅ ยืนยันว่ารีวิวออกแล้ว ระบบดำเนินขั้นตอนถัดไปเรียบร้อยครับ"
+            : "✅ รับทราบครับ รีวิวนี้ยังอยู่ ระบบจะตรวจต่อในรอบถัดไป"
+        );
+        return res.sendStatus(200);
+      }
+    }
+
+    // -----------------------------------------------------
+    // REACTIVATION TEAM DECISION
+    // -----------------------------------------------------
+    if (quotedMessageId && ["ส่งลูกค้า", "ข้าม"].includes(normalizedGroupText)) {
+      const alert = await getReactivationAlertByLineGroupMessageId(quotedMessageId);
+      if (alert) {
+        if (normalizedGroupText === "ข้าม") {
+          await setReactivationAlertTeamDecision({ alertId: alert.id, decision: "skip" });
+          await reply("✅ ข้าม Reactivation รายการนี้แล้ว ระบบจะไม่ทักลูกค้าครับ");
+          return res.sendStatus(200);
+        }
+
+        const customer = await getCustomerById(alert.customer_id);
+        const customerMap = await getCustomerMapById(alert.customer_map_id);
+        if (!customer) {
+          await reply("❌ ไม่พบข้อมูลลูกค้าของ Reactivation นี้ครับ");
+          return res.sendStatus(200);
+        }
+
+        const platformUserId = String(customer.platform_user_id || "").trim();
+        const liveChatReady = Boolean(platformUserId) &&
+          !platformUserId.startsWith("legacy:") &&
+          customer.customer_notify !== false;
+
+        if (!liveChatReady) {
+          await reply([
+            "⚠️ ตรวจ Map ได้แล้ว แต่ยังไม่มี Chat ID จริงสำหรับส่งอัตโนมัติ",
+            `ลูกค้า: ${customer.display_name || "-"}`,
+            `Platform: ${customer.platform || "-"}`,
+            "",
+            "ระบบเก็บ Alert ไว้ก่อน ไม่ได้ส่งผิดห้อง",
+            "เมื่อผูกห้องแชทจริงแล้ว Reply ข้อความเดิมว่า “ส่งลูกค้า” อีกครั้งได้",
+          ].join("\n"));
+          return res.sendStatus(200);
+        }
+
+        const customerText = getCustomerText(
+          customer,
+          `ตรวจพบรีวิว 1 ดาวใหม่บน Google Maps ของ ${customerMap?.business_name || "ธุรกิจของคุณ"}\n\nReviewer: ${alert.reviewer_name || "-"}\n\nต้องการให้ทางเราตรวจสอบเพื่อดำเนินการรีวิวนี้ไหมครับ?\nหากสนใจ พิมพ์ “สนใจ” ได้เลยครับ`,
+          `We found a new 1-star review on the Google Maps listing for ${customerMap?.business_name || "your business"}.\n\nReviewer: ${alert.reviewer_name || "-"}\n\nWould you like us to check this review for you?\nIf you're interested, reply “Interested”.`
+        );
+
+        await sendMessageToCustomer({
+          platform: customer.platform,
+          platformUserId: customer.platform_user_id,
+          text: customerText,
+        });
+        await saveMessage({
+          customerId: customer.id,
+          platform: customer.platform,
+          direction: "outbound",
+          messageType: "text",
+          messageText: customerText,
+        });
+        await updateLastBotMessage(customer.id, customerText);
+        await setReactivationAlertTeamDecision({
+          alertId: alert.id,
+          decision: "send_to_customer",
+        });
+        await reply("✅ ส่งข้อความ Reactivation ให้ลูกค้าแล้วครับ ระบบจะรอคำตอบโดยไม่ Handoff");
+        return res.sendStatus(200);
+      }
+    }
+
+    // -----------------------------------------------------
+    // MANUAL PAYMENT APPROVAL / REJECTION
+    // -----------------------------------------------------
+    if (quotedMessageId && ["ok", "okay", "ยืนยัน"].includes(normalizedGroupText)) {
+      const pendingPayment = await getPaymentByLineGroupMessageId(quotedMessageId);
+      if (pendingPayment) {
+        if (pendingPayment.payment_verified === true || pendingPayment.review_status === "approved") {
+          await reply("✅ สลิปนี้ถูกยืนยันไปแล้วครับ");
+          return res.sendStatus(200);
+        }
+        if (pendingPayment.review_status === "rejected") {
+          await reply("❌ สลิปนี้ถูกปฏิเสธไปแล้ว ไม่สามารถยืนยันย้อนหลังได้ครับ");
+          return res.sendStatus(200);
+        }
+
+        const paymentJob = await getJobById(pendingPayment.job_id);
+        if (!paymentJob) {
+          await reply("❌ ไม่พบงานของ Payment นี้");
+          return res.sendStatus(200);
+        }
+
+        const reasons = Array.isArray(pendingPayment.verification_reasons)
+          ? pendingPayment.verification_reasons
+          : [];
+        if (reasons.includes("MULTIPLE_WAITING_PAYMENT_JOBS")) {
+          await reply("⚠️ สลิปนี้เป็นยอดรวมหลายงาน ยังไม่สามารถกดยืนยันแบบงานเดียวได้ครับ กรุณาตรวจรายการทั้งหมดก่อน");
+          return res.sendStatus(200);
+        }
+
+        const customer = await getCustomerById(paymentJob.customer_id);
+        if (!customer) {
+          await reply("❌ ไม่พบข้อมูลลูกค้าของ Payment นี้");
+          return res.sendStatus(200);
+        }
+
+        const verifiedAt = new Date().toISOString();
+        await updatePayment(pendingPayment.id, {
+          payment_verified: true,
+          verified_at: verifiedAt,
+          review_status: "approved",
+        });
+        if (pendingPayment.slip_file_path) {
+          try { await deletePaymentSlip(pendingPayment.slip_file_path); } catch (e) {
+            console.error("TELEGRAM PAYMENT APPROVED SLIP DELETE FAILED:", e);
+          }
+        }
+        await updateJob(paymentJob.id, { status: "paid", paid_at: verifiedAt });
+        await updateConversationState({
+          customerId: customer.id,
+          state: GMR_STATES.WAITING_MAP,
+          handoff: false,
+          handoffReason: null,
+        });
+        try {
+          await updateJobInGoogleSheet({
+            jobId: paymentJob.id,
+            status: "paid",
+            paidAt: verifiedAt,
+          });
+        } catch (e) {
+          console.error("TELEGRAM PAYMENT SHEET UPDATE FAILED:", e);
+        }
+        const customerReply = "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
+        try {
+          await sendMessageToCustomer({
+            platform: customer.platform,
+            platformUserId: customer.platform_user_id,
+            text: customerReply,
+          });
+        } catch (e) {
+          console.error("TELEGRAM PAYMENT CUSTOMER REPLY FAILED:", e);
+        }
+        await reply("✅ ยืนยันสลิปเรียบร้อยแล้ว และแจ้งลูกค้าแล้วครับ");
+        return res.sendStatus(200);
+      }
+    }
+
+    if (quotedMessageId && ["no", "ไม่ผ่าน", "reject", "rejected"].includes(normalizedGroupText)) {
+      const pendingPayment = await getPaymentByLineGroupMessageId(quotedMessageId);
+      if (pendingPayment) {
+        if (pendingPayment.payment_verified === true || pendingPayment.review_status === "approved") {
+          await reply("✅ สลิปนี้ถูกยืนยันไปแล้ว ไม่สามารถปฏิเสธย้อนหลังได้ครับ");
+          return res.sendStatus(200);
+        }
+        if (pendingPayment.review_status === "rejected") {
+          await reply("❌ สลิปนี้ถูกปฏิเสธไปแล้วครับ");
+          return res.sendStatus(200);
+        }
+
+        const paymentJob = await getJobById(pendingPayment.job_id);
+        const customer = paymentJob ? await getCustomerById(paymentJob.customer_id) : null;
+        if (!paymentJob || !customer) {
+          await reply("❌ ไม่พบข้อมูลงาน/ลูกค้าของ Payment นี้");
+          return res.sendStatus(200);
+        }
+
+        await updatePayment(pendingPayment.id, {
+          payment_verified: false,
+          verified_at: null,
+          review_status: "rejected",
+        });
+        if (pendingPayment.slip_file_path) {
+          try { await deletePaymentSlip(pendingPayment.slip_file_path); } catch (e) {
+            console.error("TELEGRAM PAYMENT REJECTED SLIP DELETE FAILED:", e);
+          }
+        }
+
+        const customerReply = "ตรวจสอบแล้วสลิปนี้ยังไม่สามารถยืนยันการชำระได้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ";
+        try {
+          await sendMessageToCustomer({
+            platform: customer.platform,
+            platformUserId: customer.platform_user_id,
+            text: customerReply,
+          });
+          await saveMessage({
+            customerId: customer.id,
+            platform: customer.platform,
+            direction: "outbound",
+            messageType: "text",
+            messageText: customerReply,
+          });
+          await updateLastBotMessage(customer.id, customerReply);
+        } catch (e) {
+          console.error("TELEGRAM PAYMENT REJECTION CUSTOMER REPLY FAILED:", e);
+        }
+        await reply("❌ สลิปไม่ผ่านการตรวจสอบ และแจ้งลูกค้าแล้วครับ");
+        return res.sendStatus(200);
+      }
+    }
+
+    // -----------------------------------------------------
+    // Legacy waiting-price compatibility
+    // -----------------------------------------------------
+    if (quotedMessageId) {
+      try {
+        const priceResult = await processLineGroupPrice({
+          quotedMessageId,
+          text: groupText,
+        });
+        if (priceResult?.ok) {
+          const priceText = formatMoney(priceResult.amount, priceResult.currency);
+          await reply(
+            priceResult.currency === "THB"
+              ? `✅ แจ้งราคาลูกค้าแล้ว\nราคา ${priceText} บาท/รีวิว`
+              : `✅ แจ้งราคาลูกค้าแล้ว\nราคา $${priceText} USD/รีวิว`
+          );
+          return res.sendStatus(200);
+        }
+        if (priceResult?.reason && priceResult.reason !== "NOT_A_REPLY" && priceResult.reason !== "JOB_NOT_FOUND") {
+          const reasonText = {
+            INVALID_PRICE: "⚠️ กรุณาพิมพ์เฉพาะราคา เช่น 5900",
+            MULTIPLE_WAITING_PRICE_JOBS: "⚠️ ตอนนี้มีหลายงานรอเสนอราคา ระบบไม่สามารถเลือกงานแทนให้อัตโนมัติได้ครับ",
+            JOB_NOT_WAITING_PRICE: "⚠️ งานนี้ไม่ได้อยู่ในสถานะรอราคาแล้วครับ",
+            CUSTOMER_NOT_WAITING_PRICE: "⚠️ ลูกค้ารายนี้ไม่ได้อยู่ในขั้นตอนรอราคาแล้วครับ",
+          }[priceResult.reason];
+          if (reasonText) await reply(reasonText);
+        }
+      } catch (error) {
+        console.error("TELEGRAM LEGACY PRICE ERROR:", error);
+      }
+    }
+
+    return res.sendStatus(200);
+  } catch (error) {
+    console.error("TELEGRAM WEBHOOK ERROR:", error);
+    return res.sendStatus(200); // prevent Telegram retry storms on business-logic errors
+  }
+});
 
 // =========================================================
 // STRIPE CHECKOUT RESULT PAGES
@@ -6323,36 +5767,13 @@ function getLeadRequestText(customer) {
 function getLeadReceivedText(customer) {
   return getCustomerText(
     customer,
-    "สวัสดีครับ ส่งลิงค์ Google Map ตัวที่ต้องการดำเนินการมาให้ช่วยดูได้เลยครับ หากส่งลิงค์ไม่ได้แจ้งชื่อธุรกิจได้เช่นกันครับ",
-    "Hello! Please send the Google Maps link you'd like us to check. If you can’t send the link, just send us your business name"
+    "ได้รับข้อมูลแล้วครับ เจ้าหน้าที่จะตรวจสอบและแจ้งรายละเอียดในแชทนี้ต่อครับ",
+    "We received the information. Our team will review it and continue with you in this chat."
   );
 }
 
 async function pushTextToMainLineGroup(text) {
-  const token = String(process.env.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
-  const groupId = String(process.env.LINE_GROUP_ID || "").trim();
-  if (!token || !groupId) throw new Error("Missing LINE config for Sales group");
-
-  const response = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      to: groupId,
-      messages: [{ type: "text", text: String(text || "") }],
-    }),
-  });
-
-  const responseText = await response.text();
-  let data = {};
-  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
-  if (!response.ok) throw new Error(`LINE Sales push failed ${response.status}: ${responseText}`);
-
-  const messageId = data?.sentMessages?.[0]?.id ? String(data.sentMessages[0].id) : null;
-  if (!messageId) throw new Error("LINE Sales push succeeded but messageId missing");
-  return { messageId, text };
+  return pushTelegramSales(String(text || ""));
 }
 
 async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW_LEAD" }) {
@@ -24250,7 +23671,9 @@ if (
   
 
 app.listen(PORT, () => {
-  console.log(
-    `GMR Auto Chat running on port ${PORT}`
-  );
+  console.log(`GMR Auto Chat running on port ${PORT}`);
+
+  registerTelegramWebhook().catch((error) => {
+    console.error("TELEGRAM WEBHOOK REGISTER FAILED:", error);
+  });
 });
