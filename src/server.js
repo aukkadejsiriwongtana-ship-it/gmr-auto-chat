@@ -129,6 +129,16 @@ updateCustomerTransportMetadata,
 getMonthlyOutreachCandidates,
 claimMonthlyOutreach,
 completeMonthlyOutreach,
+
+getSalesLeadByCustomerId,
+getOrCreateSalesLead,
+updateSalesLead,
+createSalesLeadCard,
+getSalesLeadCardByLineGroupMessageId,
+createSalesOrderDraft,
+setSalesOrderDraftPreviewMessage,
+getSalesOrderDraftByPreviewMessageId,
+updateSalesOrderDraft,
   
 } from "./repositories/gmrRepository.js";
 
@@ -1392,190 +1402,24 @@ async function sendRemovalConfirmationToLineGroup({
   };
 }
 
-
 // =========================================================
 // REVIEW REMOVED KPI → INTERNAL LINE GROUP ONLY
-//
-// Review ที่ถูกตรวจพบว่าหายใน timestamp เดียวกัน
-// = ถือเป็น review set / KPI round เดียวกัน
-//
-// หลัง CONFIRM_REMOVED:
-// - รวม T0/T2
-// - debounce 30 วินาที
-// - ส่ง LINE ภายในเพียงข้อความเดียวต่อรอบ
-//
-// ข้อมูลนี้ห้ามส่งให้ลูกค้า
 // =========================================================
 
-const removalKpiBatchQueue =
-  new Map();
-
-
-async function getRemovalKpiWorkType(
-  job
-) {
-
-  // ========================================
-  // 1. ใช้ Department ก่อน
-  // เพราะ KPI จ่ายตามแผนกจริง
-  // ========================================
-
-  try {
-
-    const jobDepartmentId =
-      String(
-        job?.department_id ||
-        job?.departmentId ||
-        ""
-      ).trim();
-
-
-    if (jobDepartmentId) {
-
-      const departments =
-        await getActiveDepartments();
-
-
-      const department =
-        (departments || []).find(
-          (item) =>
-            String(
-              item?.id || ""
-            ) ===
-            jobDepartmentId
-        );
-
-
-      const code =
-        String(
-          department?.code || ""
-        )
-          .trim()
-          .toUpperCase();
-
-
-      if (
-        code === "T0" ||
-        code === "T2"
-      ) {
-        return code;
-      }
-    }
-
-  } catch (error) {
-
-    console.error(
-      "KPI DEPARTMENT LOOKUP FAILED:",
-      {
-        jobId:
-          job?.id || null,
-
-        error:
-          error?.message ||
-          String(error),
-      }
-    );
-  }
-
-
-  // ========================================
-  // 2. Fallback → review.is_recent
-  // ========================================
-
-  try {
-
-    const reviews =
-      await getReviewsByJobId(
-        job.id
-      );
-
-
-    const review =
-      Array.isArray(reviews)
-        ? (
-            reviews.find(
-              (item) =>
-                item
-                  ?.selected_by_customer ===
-                true
-            ) ||
-            reviews[0] ||
-            null
-          )
-        : null;
-
-
-    if (
-      review?.is_recent === true
-    ) {
-      return "T0";
-    }
-
-
-    if (
-      review?.is_recent === false
-    ) {
-      return "T2";
-    }
-
-  } catch (error) {
-
-    console.error(
-      "KPI REVIEW TYPE LOOKUP FAILED:",
-      {
-        jobId:
-          job?.id || null,
-
-        error:
-          error?.message ||
-          String(error),
-      }
-    );
-  }
-
-
-  return null;
-}
-
-
-// =========================================================
-// ส่ง KPI batch จริงเข้า LINE
-// =========================================================
-
-async function flushRemovalKpiBatch(
-  batchKey
-) {
-
-  const batch =
-    removalKpiBatchQueue.get(
-      batchKey
-    );
-
-
-  if (!batch) {
-    return;
-  }
-
-
-  // ลบออกก่อนส่ง
-  // ป้องกันส่งซ้ำจาก timer เดิม
-  removalKpiBatchQueue.delete(
-    batchKey
-  );
-
-
+async function sendRemovalKpiToLineGroup({
+  job,
+  customer,
+  removedAt,
+}) {
   const token =
     String(
-      process.env
-        .LINE_CHANNEL_ACCESS_TOKEN ||
+      process.env.LINE_CHANNEL_ACCESS_TOKEN ||
       ""
     ).trim();
 
-
   const groupId =
     String(
-      process.env
-        .LINE_GROUP_ID ||
+      process.env.LINE_GROUP_ID ||
       ""
     ).trim();
 
@@ -1587,18 +1431,99 @@ async function flushRemovalKpiBatch(
   }
 
 
-  const eventDate =
-    new Date(
-      batch.removedAt
+  // ========================================
+  // DETERMINE T0 / T2
+  // 1) ใช้ review.is_recent ก่อน
+  // 2) ถ้าไม่มี ใช้ department.code
+  // ========================================
+
+  let workType =
+    null;
+
+
+  try {
+    const reviews =
+      await getReviewsByJobId(
+        job.id
+      );
+
+    const review =
+      Array.isArray(reviews)
+        ? reviews[0]
+        : null;
+
+
+    if (
+      review?.is_recent === true
+    ) {
+      workType =
+        "T0";
+    } else if (
+      review?.is_recent === false
+    ) {
+      workType =
+        "T2";
+    }
+  } catch (error) {
+    console.error(
+      "KPI REVIEW TYPE LOOKUP FAILED:",
+      error
     );
+  }
 
 
-  const safeDate =
-    Number.isNaN(
-      eventDate.getTime()
-    )
-      ? new Date()
-      : eventDate;
+  // Fallback → department
+  if (!workType) {
+    try {
+      const departments =
+        await getActiveDepartments();
+
+      const jobDepartmentId =
+        String(
+          job?.department_id ||
+          job?.departmentId ||
+          ""
+        );
+
+      const department =
+        (departments || []).find(
+          (item) =>
+            String(item?.id || "") ===
+            jobDepartmentId
+        );
+
+      const code =
+        String(
+          department?.code || ""
+        )
+          .trim()
+          .toUpperCase();
+
+      if (
+        code === "T0" ||
+        code === "T2"
+      ) {
+        workType =
+          code;
+      }
+    } catch (error) {
+      console.error(
+        "KPI DEPARTMENT LOOKUP FAILED:",
+        error
+      );
+    }
+  }
+
+
+  const eventTime =
+    removedAt ||
+    new Date().toISOString();
+
+
+  const date =
+    new Date(
+      eventTime
+    );
 
 
   const parts =
@@ -1623,14 +1548,11 @@ async function flushRemovalKpiBatch(
         minute:
           "2-digit",
 
-        second:
-          "2-digit",
-
         hour12:
           false,
       }
     ).formatToParts(
-      safeDate
+      date
     );
 
 
@@ -1645,75 +1567,44 @@ async function flushRemovalKpiBatch(
   const thaiDate =
     `${getPart("day")}/${getPart("month")}/${getPart("year")}`;
 
-
   const thaiTime =
-    `${getPart("hour")}:${getPart("minute")}:${getPart("second")}`;
+    `${getPart("hour")}:${getPart("minute")}`;
 
 
-  const total =
-    batch.t0Count +
-    batch.t2Count +
-    batch.unknownCount;
+  const t0Count =
+    workType === "T0"
+      ? 1
+      : 0;
+
+  const t2Count =
+    workType === "T2"
+      ? 1
+      : 0;
 
 
   const lines = [
     "✅ REVIEW REMOVED — KPI",
     "",
     `วันที่: ${thaiDate}`,
-    `เวลารีวิวออก: ${thaiTime} น.`,
+    `เวลา: ${thaiTime} น.`,
     "",
-    `T0: ${batch.t0Count} รีวิว`,
-    `T2: ${batch.t2Count} รีวิว`,
+    `T0: ${t0Count} รีวิว`,
+    `T2: ${t2Count} รีวิว`,
     "",
-    `รอบนี้สำเร็จทั้งหมด: ${total} รีวิว`,
+    "รอบนี้สำเร็จทั้งหมด: 1 รีวิว",
+    "",
+    `Customer: ${customer?.display_name || "-"}`,
+    `Business: ${job?.business_name || "-"}`,
+    `Job: ${job?.id || "-"}`,
   ];
 
 
-  if (
-    batch.unknownCount > 0
-  ) {
-
+  if (!workType) {
     lines.push(
       "",
-      `⚠️ ไม่สามารถระบุ T0/T2: ${batch.unknownCount} รีวิว`
+      "⚠️ ไม่สามารถระบุ T0/T2 ได้ กรุณาตรวจสอบ Job นี้ก่อนจ่าย KPI"
     );
   }
-
-
-  if (
-    batch.jobs.size > 0
-  ) {
-
-    lines.push(
-      "",
-      "Job ในรอบนี้:"
-    );
-
-
-    let index =
-      1;
-
-
-    for (
-      const item of
-      batch.jobs.values()
-    ) {
-
-      lines.push(
-        `${index}. ${item.workType || "UNKNOWN"} | ` +
-        `${item.businessName || "-"} | ` +
-        `${item.jobId}`
-      );
-
-
-      index +=
-        1;
-    }
-  }
-
-
-  const text =
-    lines.join("\n");
 
 
   const response =
@@ -1741,7 +1632,8 @@ async function flushRemovalKpiBatch(
                 type:
                   "text",
 
-                text,
+                text:
+                  lines.join("\n"),
               },
             ],
           }),
@@ -1754,278 +1646,26 @@ async function flushRemovalKpiBatch(
 
 
   if (!response.ok) {
-
     throw new Error(
       `LINE KPI push failed: ${response.status} ${responseText}`
     );
   }
 
 
-  console.log(
-    "REMOVAL KPI BATCH SENT:",
-    {
-      batchKey,
-
-      removedAt:
-        batch.removedAt,
-
-      t0Count:
-        batch.t0Count,
-
-      t2Count:
-        batch.t2Count,
-
-      unknownCount:
-        batch.unknownCount,
-
-      total,
-    }
-  );
-}
-
-
-// =========================================================
-// QUEUE KPI
-// =========================================================
-
-async function sendRemovalKpiToLineGroup({
-  job,
-  customer,
-  removedAt,
-}) {
-
-  const eventTime =
-    String(
-      removedAt ||
-      job?.review_removed_detected_at ||
-      new Date().toISOString()
-    ).trim();
-
-
-  const workType =
-    await getRemovalKpiWorkType(
-      job
-    );
-
-
-  // ========================================
-  // ใช้เวลาที่ระบบตรวจพบว่ารีวิวหาย
-  // เป็น Batch Key
-  //
-  // งานจาก monitor รอบเดียวกัน
-  // จะใช้ checkedAt เดียวกัน
-  // ========================================
-
-  const batchKey =
-    eventTime;
-
-
-  let batch =
-    removalKpiBatchQueue.get(
-      batchKey
-    );
-
-
-  if (!batch) {
-
-    batch = {
-      removedAt:
-        eventTime,
-
-      t0Count:
-        0,
-
-      t2Count:
-        0,
-
-      unknownCount:
-        0,
-
-      jobs:
-        new Map(),
-
-      timer:
-        null,
-    };
-
-
-    removalKpiBatchQueue.set(
-      batchKey,
-      batch
-    );
-  }
-
-
-  // ========================================
-  // กัน job เดิมถูก CONFIRM ซ้ำ
-  // ========================================
-
-  const jobId =
-    String(
-      job?.id || ""
-    ).trim();
-
-
-  if (
-    jobId &&
-    batch.jobs.has(
-      jobId
-    )
-  ) {
-
-    console.log(
-      "REMOVAL KPI DUPLICATE JOB SUPPRESSED:",
-      {
-        batchKey,
-        jobId,
-      }
-    );
-
-
-    return {
-      ok:
-        true,
-
-      queued:
-        true,
-
-      duplicate:
-        true,
-
-      batchKey,
-    };
-  }
-
-
-  if (
-    workType === "T0"
-  ) {
-
-    batch.t0Count +=
-      1;
-
-  } else if (
-    workType === "T2"
-  ) {
-
-    batch.t2Count +=
-      1;
-
-  } else {
-
-    batch.unknownCount +=
-      1;
-  }
-
-
-  if (jobId) {
-
-    batch.jobs.set(
-      jobId,
-      {
-        jobId,
-
-        workType,
-
-        customerName:
-          customer?.display_name ||
-          null,
-
-        businessName:
-          job?.business_name ||
-          null,
-      }
-    );
-  }
-
-
-  // ========================================
-  // มี Job ใหม่ใน set เดียวกัน
-  // → เลื่อนเวลาส่งออกไปอีก 30 วินาที
-  //
-  // เพื่อรวมหลาย CONFIRM_REMOVED
-  // ให้เป็นข้อความ KPI เดียว
-  // ========================================
-
-  if (
-    batch.timer
-  ) {
-
-    clearTimeout(
-      batch.timer
-    );
-  }
-
-
-  batch.timer =
-    setTimeout(
-      async () => {
-
-        try {
-
-          await flushRemovalKpiBatch(
-            batchKey
-          );
-
-        } catch (error) {
-
-          console.error(
-            "REMOVAL KPI BATCH FLUSH FAILED:",
-            {
-              batchKey,
-
-              error:
-                error?.message ||
-                String(error),
-            }
-          );
-        }
-
-      },
-      30 * 1000
-    );
-
-
-  console.log(
-    "REMOVAL KPI JOB QUEUED:",
-    {
-      batchKey,
-
-      jobId,
-
-      workType,
-
-      t0Count:
-        batch.t0Count,
-
-      t2Count:
-        batch.t2Count,
-
-      unknownCount:
-        batch.unknownCount,
-    }
-  );
-
-
   return {
     ok:
       true,
 
-    queued:
-      true,
-
-    batchKey,
-
     workType,
 
-    t0Count:
-      batch.t0Count,
+    t0Count,
 
-    t2Count:
-      batch.t2Count,
+    t2Count,
+
+    removedAt:
+      eventTime,
   };
 }
-
 
 async function callSheetControlInternally({ jobId, value }) {
   const secret = process.env.SHEET_CONTROL_SECRET;
@@ -2923,6 +2563,72 @@ await markDispatchStuckAlerted({
       false;
   }
 }
+
+
+// =========================================================
+// FIXED THAILAND DISPATCH SCHEDULE
+// 00:00 / 08:00 / 12:00 / 16:00 / 20:00
+//
+// The DB atomic claim remains the final duplicate guard.
+// =========================================================
+
+const FIXED_DISPATCH_HOURS_TH = new Set([0, 8, 12, 16, 20]);
+let lastFixedDispatchSlot = null;
+
+function getBangkokClockParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value || "";
+  return {
+    dateKey: `${get("year")}-${get("month")}-${get("day")}`,
+    hour: Number(get("hour")),
+    minute: Number(get("minute")),
+  };
+}
+
+async function runFixedDispatchSchedulerTick() {
+  const enabled = String(
+    process.env.FIXED_DISPATCH_SCHEDULER_ENABLED ?? "true"
+  ).toLowerCase() !== "false";
+
+  if (!enabled) return;
+
+  const clock = getBangkokClockParts();
+  if (!FIXED_DISPATCH_HOURS_TH.has(clock.hour)) return;
+  if (clock.minute > 2) return;
+
+  const slotKey = `${clock.dateKey}-${String(clock.hour).padStart(2, "0")}:00`;
+  if (lastFixedDispatchSlot === slotKey) return;
+  lastFixedDispatchSlot = slotKey;
+
+  try {
+    console.log("FIXED DISPATCH SLOT START:", { slotKey });
+    const result = await runDepartmentDispatch();
+    console.log("FIXED DISPATCH SLOT COMPLETE:", { slotKey, result });
+  } catch (error) {
+    console.error("FIXED DISPATCH SLOT FAILED:", { slotKey, error: error.message });
+  }
+}
+
+setInterval(() => {
+  runFixedDispatchSchedulerTick().catch((error) => {
+    console.error("FIXED DISPATCH TIMER ERROR:", error);
+  });
+}, 30 * 1000);
+
+setTimeout(() => {
+  runFixedDispatchSchedulerTick().catch((error) => {
+    console.error("FIXED DISPATCH INITIAL CHECK ERROR:", error);
+  });
+}, 5 * 1000);
 
 // =========================================================
 // MONTHLY EXISTING CUSTOMER OUTREACH
@@ -4527,33 +4233,30 @@ async function sendExistingCustomerBatchCreditApprovalToLineGroup({
   }
 
 
+  const numberedReviewLines = jobs.flatMap((job, index) => [
+    `${index + 1}. ${job.review_url || "-"}`,
+    `   ราคา: ${formatMoney(Number(job.price || 0), getCurrencyFromUnitPrice({ price: Number(job.price || 0), currency: job.currency }))} ${getCurrencyFromUnitPrice({ price: Number(job.price || 0), currency: job.currency })}`
+  ]);
+
   const text = [
-    "⚠️ ขออนุมัติเครดิตลูกค้าเก่า",
+    "👤 ลูกค้าเก่ายืนยันงาน — รอ Sales ตรวจ",
     "",
-    `ลูกค้า: ${
-      customer.display_name ||
-      "ไม่ทราบชื่อ"
-    }`,
-    `Platform: ${
-      String(
-        customer.platform ||
-        "line"
-      ).toUpperCase()
-    }`,
+    `ลูกค้า: ${customer.display_name || "ไม่ทราบชื่อ"}`,
+    `Platform: ${getPlatformLabel(customer)}`,
+    `Customer ID: ${customer.id}`,
     "",
     `จำนวนรีวิวในชุด: ${jobs.length} รีวิว`,
     "",
-    "รายละเอียดราคา:",
-    ...detailLines,
+    ...numberedReviewLines,
     "",
+    "สรุปราคา:",
+    ...detailLines,
     ...totalLines,
     "",
-    "ลูกค้ารายนี้มีประวัติชำระเงินกับระบบแล้ว",
-    "แต่ช่วงเริ่มต้นของระบบยังต้องขออนุมัติเครดิตก่อนเริ่มงาน",
+    "⚠️ ยังไม่ได้เริ่มงาน / ยังไม่ Dispatch",
     "",
-    "Reply ข้อความนี้:",
-    "✅ อนุมัติ",
-    "❌ ไม่อนุมัติ",
+    "✅ ถูกต้อง: Reply ข้อความนี้แล้วพิมพ์  ยืนยันงาน",
+    "❌ ราคา/ลิงก์ผิด: Reply ข้อความนี้แล้วพิมพ์  ยกเลิก",
   ].join("\n");
 
 
@@ -4931,10 +4634,12 @@ Duration: 1-14days(depends on GG system)
 🔥We will promptly notify the client upon successful completion🔥
 
 📌 Terms & Conditions:
-1. Payment is accepted via STRIPE(credit card).
-2. Full payment is required immediately upon completion of the service.
-3. The service has commenced, cancellation or changes are not permitted. (The full service fee remains payable)
-4. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
+1. Payment is accepted via STRIPE (credit card).
+2. Full payment is required immediately after the review has been successfully removed.
+3. Once the service has started, cancellation or changes are not permitted, including cases where the reviewer later agrees to remove the review themselves. The full service fee remains payable.
+4. Service fees are non-refundable once the service has started.
+5. The service is considered complete once the review has been removed and payment has been completed after the result is checked.
+6. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
 
 Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
   }
@@ -5105,10 +4810,12 @@ Duration: 1-14days(depends on GG system)
 🔥We will promptly notify the client upon successful completion🔥
 
 📌 Terms & Conditions:
-1. Payment is accepted via STRIPE(credit card).
-2. Full payment is required immediately upon completion of the service.
-3. The service has commenced, cancellation or changes are not permitted. (The full service fee remains payable)
-4. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
+1. Payment is accepted via STRIPE (credit card).
+2. Full payment is required immediately after the review has been successfully removed.
+3. Once the service has started, cancellation or changes are not permitted, including cases where the reviewer later agrees to remove the review themselves. The full service fee remains payable.
+4. Service fees are non-refundable once the service has started.
+5. The service is considered complete once the review has been removed and payment has been completed after the result is checked.
+6. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
 
 Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
   }
@@ -6436,6 +6143,21 @@ app.post(
       }
 
 
+      const force = req.body?.force === true;
+      const clock = getBangkokClockParts();
+
+      // Old cron jobs may still call this endpoint at 04:00.
+      // V2 blocks non-approved hours unless an authenticated manual call uses force=true.
+      if (!force && !FIXED_DISPATCH_HOURS_TH.has(clock.hour)) {
+        return res.status(200).json({
+          ok: true,
+          skipped: true,
+          reason: "outside_fixed_dispatch_schedule",
+          bangkokHour: clock.hour,
+          allowedHours: Array.from(FIXED_DISPATCH_HOURS_TH),
+        });
+      }
+
       const result =
         await runDepartmentDispatch();
 
@@ -6499,6 +6221,551 @@ app.get("/test-supabase", async (req, res) => {
   }
 });
 
+
+
+// =========================================================
+// GMR CHAT V2 — HUMAN-CONTROLLED SALES FLOW
+//
+// New customer:
+// - FAQ only
+// - ask Map / business name / review URL once
+// - never search business name
+// - never auto-price
+// - never create a Job until Sales confirms in LINE group
+//
+// Existing customer:
+// - direct Review URL may use verified historical T0/T2 rate
+// - Map URL only asks customer to send the exact Review URL
+// - customer confirmation still requires Sales confirmation
+// =========================================================
+
+function looksLikeGoogleReviewUrl(value) {
+  const text = String(value || "").trim();
+  return /https?:\/\/[^\s]*google[^\s]*\/maps\/reviews/i.test(text) ||
+    /https?:\/\/maps\.app\.goo\.gl\/[^\s]+/i.test(text) && /review/i.test(text);
+}
+
+function classifyV2LeadInput(message, messageType = "text") {
+  const text = String(message || "").trim();
+  if (!text) return { actionable: false, inputType: null, payload: null };
+
+  if (looksLikeGoogleReviewUrl(text)) {
+    const url = (text.match(/https?:\/\/[^\s]+/i) || [])[0] || text;
+    return { actionable: true, inputType: "REVIEW_URL", payload: url.replace(/[),.;]+$/g, "") };
+  }
+
+  const mapUrl = extractGoogleMapsUrl(text);
+  if (mapUrl) {
+    return { actionable: true, inputType: "MAP_URL", payload: mapUrl.replace(/[),.;]+$/g, "") };
+  }
+
+  const classification = classifyInput({ messageType, text });
+  if (classification?.type === INPUT_TYPES.BUSINESS_NAME) {
+    return { actionable: true, inputType: "BUSINESS_NAME", payload: text };
+  }
+
+  return { actionable: false, inputType: classification?.type || null, payload: null };
+}
+
+function getLeadRequestText(customer) {
+  return getCustomerText(
+    customer,
+    "รบกวนส่งลิงก์ Google Maps หรือชื่อธุรกิจมาให้ตรวจสอบได้เลยครับ",
+    "Please send your Google Maps link or business name so our team can check it for you."
+  );
+}
+
+function getLeadReceivedText(customer) {
+  return getCustomerText(
+    customer,
+    "ได้รับข้อมูลแล้วครับ เจ้าหน้าที่จะตรวจสอบและแจ้งรายละเอียดในแชทนี้ต่อครับ",
+    "We received the information. Our team will review it and continue with you in this chat."
+  );
+}
+
+async function pushTextToMainLineGroup(text) {
+  const token = String(process.env.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
+  const groupId = String(process.env.LINE_GROUP_ID || "").trim();
+  if (!token || !groupId) throw new Error("Missing LINE config for Sales group");
+
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      to: groupId,
+      messages: [{ type: "text", text: String(text || "") }],
+    }),
+  });
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+  if (!response.ok) throw new Error(`LINE Sales push failed ${response.status}: ${responseText}`);
+
+  const messageId = data?.sentMessages?.[0]?.id ? String(data.sentMessages[0].id) : null;
+  if (!messageId) throw new Error("LINE Sales push succeeded but messageId missing");
+  return { messageId, text };
+}
+
+async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW_LEAD" }) {
+  const platformLabel = getPlatformLabel(customer);
+  const label =
+    inputType === "REVIEW_URL" ? "Review URL" :
+    inputType === "MAP_URL" ? "Google Maps" :
+    inputType === "BUSINESS_NAME" ? "ชื่อธุรกิจ" : "ข้อมูลลูกค้า";
+
+  const text = [
+    reason === "EXISTING_MISSING_RATE"
+      ? "👤 ลูกค้าเก่า — ไม่มีราคาประวัติประเภทนี้"
+      : "🆕 ลูกค้าต้องการให้ตรวจสอบ",
+    "",
+    `ลูกค้า: ${customer?.display_name || "-"}`,
+    `Platform: ${platformLabel}`,
+    `Customer ID: ${customer?.id || "-"}`,
+    "",
+    `${label}:`,
+    String(payload || "-"),
+    "",
+    "Sales: คุยราคา/ตรวจลิงก์กับลูกค้าในห้องแชทเอง",
+    "เมื่อลูกค้าตกลงแล้ว ให้ Reply ข้อความนี้ แล้วส่ง:",
+    "ราคา + Review URL (วางหลายลิงก์ได้)",
+    "",
+    "ตัวอย่าง:",
+    "5500 THB",
+    "https://google.com/maps/reviews/...",
+  ].join("\n");
+
+  const pushed = await pushTextToMainLineGroup(text);
+  const card = await createSalesLeadCard({
+    customerId: customer.id,
+    lineGroupMessageId: pushed.messageId,
+    payload: String(payload || ""),
+    inputType,
+  });
+
+  await getOrCreateSalesLead(customer.id);
+  await updateSalesLead(customer.id, {
+    info_received_at: new Date().toISOString(),
+    status: "open",
+  });
+
+  return { ...pushed, card };
+}
+
+async function saveV2BotReply({ customer, platform, botReply }) {
+  if (!botReply) return;
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+  await updateLastBotMessage(customer.id, botReply);
+}
+
+async function handleV2NewCustomerInbound({
+  customer,
+  conversation,
+  platform,
+  message,
+  messageType,
+}) {
+  const lead = await getOrCreateSalesLead(customer.id);
+  const leadInput = classifyV2LeadInput(message, messageType);
+
+  // 1) Actionable lead info always goes to Sales. No Map search / no pricing / no Job.
+  if (leadInput.actionable) {
+    try {
+      await sendV2SalesLeadCard({
+        customer,
+        payload: leadInput.payload,
+        inputType: leadInput.inputType,
+      });
+    } catch (error) {
+      console.error("V2 SALES LEAD CARD FAILED:", error);
+      await triggerHumanAttention({
+        customer,
+        conversation,
+        message,
+        reason: "V2_LEAD_CARD_FAILED",
+      });
+    }
+
+    const botReply = getLeadReceivedText(customer);
+    await saveV2BotReply({ customer, platform, botReply });
+    return {
+      handled: true,
+      result: {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        v2Lead: true,
+        inputType: leadInput.inputType,
+        botReply,
+      },
+    };
+  }
+
+  // 2) FAQ only. If this is the first time, append the one-time Map/business request.
+  const faqMatch = await getGlobalFaqReply({ customer, message });
+  if (faqMatch?.reply) {
+    let botReply = faqMatch.reply;
+    if (!lead?.info_requested_at) {
+      botReply = `${botReply}\n\n${getLeadRequestText(customer)}`;
+      await updateSalesLead(customer.id, {
+        info_requested_at: new Date().toISOString(),
+      });
+    }
+    await saveV2BotReply({ customer, platform, botReply });
+    return {
+      handled: true,
+      result: {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        faqMatched: true,
+        faqKey: faqMatch.faqKey,
+        botReply,
+      },
+    };
+  }
+
+  // 3) First non-FAQ contact: ask once only.
+  if (!lead?.info_requested_at) {
+    const botReply = getLeadRequestText(customer);
+    await updateSalesLead(customer.id, {
+      info_requested_at: new Date().toISOString(),
+    });
+    await saveV2BotReply({ customer, platform, botReply });
+    return {
+      handled: true,
+      result: {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        v2LeadRequest: true,
+        botReply,
+      },
+    };
+  }
+
+  // 4) Unknown question after the one-time request -> Sales, but NOT permanent handoff.
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message,
+    reason: "V2_NEW_CUSTOMER_NON_FAQ",
+  });
+
+  return {
+    handled: true,
+    result: {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      botReply: null,
+      softHandoff: true,
+      note: "Non-FAQ question sent to Sales. Bot remains available for later FAQ messages.",
+    },
+  };
+}
+
+function parseV2SalesOrderText(text) {
+  const raw = String(text || "").trim();
+  const allUrls = raw.match(/https?:\/\/[^\s]+/gi) || [];
+  const reviewUrls = Array.from(new Set(
+    allUrls
+      .map((url) => url.replace(/[),.;]+$/g, "").trim())
+      .filter((url) => /google/i.test(url) && /maps\/reviews|maps\.app\.goo\.gl/i.test(url))
+  ));
+
+  const nonUrlLines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^https?:\/\//i.test(line) && !/^(งาน|\/job)$/i.test(line));
+
+  let amount = null;
+  let currency = null;
+  for (const line of nonUrlLines) {
+    const match = line.replace(/,/g, "").match(/(?:ราคา\s*[:=]?\s*)?\$?\s*(\d+(?:\.\d{1,2})?)\s*(THB|USD|บาท)?/i);
+    if (!match) continue;
+    amount = Number(match[1]);
+    const token = String(match[2] || "").toUpperCase();
+    if (token === "USD" || line.includes("$")) currency = "USD";
+    else if (token === "THB" || /บาท/i.test(line)) currency = "THB";
+    break;
+  }
+
+  if (Number.isFinite(amount) && amount > 0 && !currency) {
+    currency = amount >= 2500 ? "THB" : "USD";
+  }
+
+  return { price: amount, currency, reviewUrls };
+}
+
+async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null }) {
+  const customer = await getCustomerById(leadCard.customer_id);
+  if (!customer) throw new Error("ไม่พบลูกค้าที่ผูกกับข้อความนี้");
+
+  const parsed = parseV2SalesOrderText(groupText);
+  if (!Number.isFinite(parsed.price) || parsed.price <= 0) {
+    throw new Error("กรุณาระบุราคา เช่น 5500 THB หรือ 250 USD");
+  }
+  if (!parsed.reviewUrls.length) {
+    throw new Error("ไม่พบ Review URL กรุณาวางลิงก์รีวิวอย่างน้อย 1 ลิงก์");
+  }
+
+  const reviewItems = [];
+  const errors = [];
+
+  for (let index = 0; index < parsed.reviewUrls.length; index++) {
+    const originalUrl = parsed.reviewUrls[index];
+    try {
+      let lookupUrl = originalUrl;
+      try {
+        const resolved = await resolveGoogleShortUrl(originalUrl);
+        if (resolved) lookupUrl = resolved;
+      } catch {}
+
+      const directResult = await getReviewFromDirectUrl(lookupUrl);
+      if (!directResult?.found || !directResult?.review) {
+        errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl}`);
+        continue;
+      }
+
+      const review = directResult.review;
+      const canonicalUrl = review.reviewUrl || lookupUrl;
+      const ageDays = getReviewAgeDays(review);
+      if (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays))) {
+        errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl}`);
+        continue;
+      }
+
+      const existingJob =
+        (await getJobByCustomerAndReviewUrl(customer.id, canonicalUrl)) ||
+        (canonicalUrl !== originalUrl
+          ? await getJobByCustomerAndReviewUrl(customer.id, originalUrl)
+          : null);
+      if (existingJob) {
+        errors.push(`${index + 1}. ลิงก์นี้มี Job อยู่แล้ว (${existingJob.status}): ${canonicalUrl}`);
+        continue;
+      }
+
+      const department = await getDepartmentForReviewAge(Number(ageDays));
+      if (!department?.id) {
+        errors.push(`${index + 1}. หาแผนก T0/T2 ไม่ได้: ${canonicalUrl}`);
+        continue;
+      }
+
+      reviewItems.push({
+        originalUrl,
+        canonicalUrl,
+        businessName: directResult.businessName || null,
+        reviewerName: review.reviewerName || null,
+        rating: Number(review.rating) || null,
+        reviewText: review.text || review.reviewText || null,
+        reviewDate: review.isoDate || null,
+        providerReviewId: review.reviewId || null,
+        reviewAgeDays: Number(ageDays),
+        workType: Number(ageDays) <= 14 ? "T0" : "T2",
+        departmentId: department.id,
+      });
+    } catch (error) {
+      errors.push(`${index + 1}. ตรวจลิงก์ไม่ได้: ${originalUrl} (${error.message})`);
+    }
+  }
+
+  if (errors.length > 0 || reviewItems.length !== parsed.reviewUrls.length) {
+    const text = [
+      "❌ ยังรับงานไม่ได้ กรุณาตรวจลิงก์ก่อน",
+      "",
+      ...errors,
+      "",
+      "แก้ข้อมูลแล้ว Reply ข้อความลูกค้าเดิมอีกครั้ง พร้อมราคา + Review URL",
+      "⚠️ ยังไม่มี Job ถูกสร้าง และยังไม่มีงานลง Sheet",
+    ].join("\n");
+    await pushTextToMainLineGroup(text);
+    return { ok: false, validationFailed: true, errors };
+  }
+
+  const draft = await createSalesOrderDraft({
+    customerId: customer.id,
+    leadCardId: leadCard.id,
+    price: parsed.price,
+    currency: parsed.currency,
+    reviewItems,
+    createdByLineUserId: lineUserId,
+  });
+
+  const total = parsed.price * reviewItems.length;
+  const totalText = parsed.currency === "THB"
+    ? `${formatMoney(total, "THB")} บาท`
+    : `$${formatMoney(total, "USD")} USD`;
+
+  const reviewLines = reviewItems.flatMap((item, index) => [
+    `${index + 1}. ${item.canonicalUrl}`,
+    `   ประเภท: ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน`,
+  ]);
+
+  const previewText = [
+    "📋 ตรวจสอบงานก่อนรับเข้าระบบ",
+    "",
+    `ลูกค้า: ${customer.display_name || "-"}`,
+    `Platform: ${getPlatformLabel(customer)}`,
+    `Customer ID: ${customer.id}`,
+    "",
+    `ราคา: ${formatMoney(parsed.price, parsed.currency)} ${parsed.currency} / รีวิว`,
+    `จำนวน: ${reviewItems.length} รีวิว`,
+    `รวมกรณีสำเร็จทั้งหมด: ${totalText}`,
+    "",
+    ...reviewLines,
+    "",
+    "⚠️ งานยังไม่ได้เริ่ม / ยังไม่ลง Sheet",
+    "",
+    "✅ ถูกต้อง: Reply ข้อความนี้แล้วพิมพ์  ยืนยันงาน",
+    "❌ ข้อมูลผิด: Reply ข้อความนี้แล้วพิมพ์  ยกเลิก",
+  ].join("\n");
+
+  const pushed = await pushTextToMainLineGroup(previewText);
+  await setSalesOrderDraftPreviewMessage({ draftId: draft.id, messageId: pushed.messageId });
+
+  return { ok: true, customer, draft, reviewItems, previewMessageId: pushed.messageId };
+}
+
+async function appendV2StartedJobsToMasterSheet({ customer, jobs, source = "sales_line" }) {
+  const results = [];
+  for (const job of jobs) {
+    try {
+      await appendJobToGoogleSheet({
+        jobId: job.id,
+        customerId: customer.id,
+        customerName: customer.display_name || "",
+        platform: customer.platform || "",
+        phone: customer.phone || "",
+        businessName: job.business_name || "",
+        reviewUrl: job.review_url || "",
+        price: Number(job.price || 0),
+        status: job.status || "queued",
+        startedAt: job.queued_at || new Date().toISOString(),
+        removedAt: "",
+        paidAt: "",
+        email: customer.email || "",
+        currency: job.currency || "THB",
+        source,
+        customerNotify: true,
+      });
+      results.push({ jobId: job.id, ok: true });
+    } catch (error) {
+      console.error("V2 MASTER SHEET APPEND FAILED:", { jobId: job.id, error: error.message });
+      results.push({ jobId: job.id, ok: false, error: error.message });
+    }
+  }
+  return results;
+}
+
+async function confirmV2SalesOrderDraft(draft) {
+  if (!draft || draft.status !== "pending_confirmation") {
+    throw new Error("งานชุดนี้ไม่ได้อยู่ในสถานะรอยืนยันแล้ว");
+  }
+
+  const customer = await getCustomerById(draft.customer_id);
+  if (!customer) throw new Error("ไม่พบข้อมูลลูกค้า");
+
+  const items = Array.isArray(draft.review_items) ? draft.review_items : [];
+  if (!items.length) throw new Error("Draft ไม่มี Review URL");
+
+  const stagedJobs = [];
+  for (const item of items) {
+    let job = await getJobByCustomerAndReviewUrl(customer.id, item.canonicalUrl);
+    if (job && !["waiting_credit_approval"].includes(String(job.status))) {
+      throw new Error(`Review นี้มี Job อยู่แล้ว: ${item.canonicalUrl}`);
+    }
+
+    if (!job) {
+      job = await createJob({
+        customerId: customer.id,
+        businessName: item.businessName || null,
+        reviewUrl: item.canonicalUrl,
+        reviewCase: "sales_confirmed_direct_review",
+        reviewVisible: true,
+        reviewHasText: Boolean(String(item.reviewText || "").trim()),
+        departmentId: item.departmentId,
+        status: "waiting_credit_approval",
+      });
+
+      await saveReviewCandidate({
+        customerId: customer.id,
+        jobId: job.id,
+        businessName: item.businessName || null,
+        reviewerName: item.reviewerName || null,
+        rating: item.rating || null,
+        reviewText: item.reviewText || null,
+        reviewDate: item.reviewDate || null,
+        reviewUrl: item.canonicalUrl,
+        providerReviewId: item.providerReviewId || null,
+        isRecent: item.workType === "T0",
+        isVisible: true,
+        hasText: Boolean(String(item.reviewText || "").trim()),
+      });
+    }
+
+    job = await updateJob(job.id, {
+      price: Number(draft.price),
+      currency: String(draft.currency || "THB").toUpperCase(),
+      status: "waiting_credit_approval",
+      source: `sales_line:${draft.id}`,
+      customer_notify: true,
+    });
+    stagedJobs.push(job);
+  }
+
+  const conversation = await getOrCreateConversation(customer.id);
+  const startResult = await startApprovedExistingCustomerBatch({
+    customer,
+    conversation,
+    jobs: stagedJobs,
+  });
+
+  const sheetResults = await appendV2StartedJobsToMasterSheet({
+    customer,
+    jobs: startResult.startedJobs,
+    source: "sales_line",
+  });
+
+  await updateSalesOrderDraft(draft.id, {
+    status: "confirmed",
+    confirmed_at: new Date().toISOString(),
+  });
+  await updateSalesLead(customer.id, { status: "converted" });
+
+  let customerNotifyOk = true;
+  try {
+    await sendMessageToCustomer({
+      platform: customer.platform,
+      platformUserId: customer.platform_user_id,
+      text: startResult.botReply,
+    });
+  } catch (error) {
+    customerNotifyOk = false;
+    console.error("V2 START CUSTOMER NOTIFICATION FAILED:", error);
+  }
+
+  return {
+    customer,
+    startedJobs: startResult.startedJobs,
+    botReply: startResult.botReply,
+    sheetResults,
+    customerNotifyOk,
+  };
+}
 
 // =========================================================
 // CORE TEST MESSAGE HANDLER
@@ -7161,6 +7428,28 @@ let autoConfirmDirectMap =
     }
   }
 
+
+// =========================================================
+// GMR CHAT V2 ROUTING GATE
+// =========================================================
+
+// NEW CUSTOMER: fully handled by V2 lead/FAQ flow.
+// This prevents the old Map-search / auto-price / WAITING_PRICE logic
+// from running for new customers.
+if (isNewCustomer) {
+  const v2New = await handleV2NewCustomerInbound({
+    customer,
+    conversation,
+    platform,
+    message,
+    messageType,
+  });
+
+  if (v2New?.handled) {
+    return v2New.result;
+  }
+}
+
 // -------------------------------------------------------
 // EXISTING CUSTOMER HISTORY CHECK
 // -------------------------------------------------------
@@ -7255,45 +7544,27 @@ const freshConversationForMap =
   );
 
 
-const welcomeTemplateForMap =
-  await getTemplate(
-    "welcome",
-    customer.language || "th"
-  );
-
-
-const normalizeConversationText =
-  (value) =>
-    String(value || "")
-      .replace(/\r\n/g, "\n")
-      .replace(/[ \t]+/g, " ")
-      .trim()
-      .toLowerCase();
-
-
 const lastBotMessageForMap =
-  normalizeConversationText(
+  String(
     freshConversationForMap
-      ?.last_bot_message
-  );
+      ?.last_bot_message ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
 
 
-const welcomeTextForMap =
-  normalizeConversationText(
-    welcomeTemplateForMap
-      ?.content
-  );
-
-
-// สำคัญ:
-// Reconfirm Map ได้เฉพาะเมื่อ
-// ข้อความล่าสุดของ Bot คือ Welcome จริง ๆ
 const welcomeWasSent =
-  Boolean(
-    welcomeTextForMap
-  ) &&
-  lastBotMessageForMap ===
-    welcomeTextForMap;
+  lastBotMessageForMap.includes(
+    "ส่งลิงก์"
+  ) ||
+  lastBotMessageForMap.includes(
+    "google maps"
+  ) ||
+  lastBotMessageForMap.includes(
+    "send"
+  );
+
 
 const wantsToStartService =
   isServiceInquiryMessage(
@@ -8563,6 +8834,32 @@ if (
     // MAP URL
     // -----------------------------------------------------
 
+// GMR CHAT V2: Existing customer sent a business Map URL.
+// Short direct-review links have already been preflighted above and
+// changed to REVIEW_URL, so only a real MAP_URL reaches this guard.
+if (
+  isExistingCustomer &&
+  classification.type === INPUT_TYPES.MAP_URL
+) {
+  const botReply = getCustomerText(
+    customer,
+    "ได้รับลิงก์ Google Maps แล้วครับ รบกวนส่งลิงก์รีวิวที่ต้องการดำเนินการมาได้เลยครับ",
+    "We received the Google Maps link. Please send the exact review link you would like us to process."
+  );
+
+  await saveV2BotReply({ customer, platform, botReply });
+
+  return {
+    ok: true,
+    customerId: customer.id,
+    customerType: "EXISTING_CUSTOMER",
+    stateBefore: conversation.state,
+    stateAfter: conversation.state,
+    existingCustomerMapOnly: true,
+    botReply,
+  };
+}
+
    if (
   classification.type ===
   INPUT_TYPES.MAP_URL
@@ -9375,25 +9672,27 @@ departmentId:
         getCustomerText(
           customer,
 
-          `ตรวจสอบแล้ว สามารถดำเนินการได้ครับ ✅
+          `ลิงก์ที่ส่งมา:
+${canonicalReviewUrl}
 
 ประเภท: ${reviewTypeText}
 ราคา: ${priceText}
+จำนวน: 1 รีวิว
 
-ขณะนี้มีทั้งหมด ${batchJobs.length} รีวิวในรายการ
+ขณะนี้มี ${batchJobs.length} รีวิวในรายการทั้งหมด
+หากต้องการส่งเพิ่ม สามารถส่ง Review URL ถัดไปได้เลยครับ
+เมื่อพร้อมเริ่มงาน รบกวนพิมพ์ “ยืนยัน” ครับ`,
 
-สามารถส่งลิงก์รีวิวถัดไปมาได้เลยครับ
-เมื่อส่งครบแล้ว พิมพ์ “ยืนยัน” เพื่อยืนยันรายการก่อนเริ่มดำเนินการ`,
-
-          `Checked. We can proceed with this review. ✅
+          `Review link received:
+${canonicalReviewUrl}
 
 Type: ${reviewTypeText}
 Price: ${priceText}
+Quantity: 1 review
 
-There are currently ${batchJobs.length} review(s) in this batch.
-
-You may send the next review link.
-When finished, reply "Confirm all" to confirm the full batch before we begin.`
+There are ${batchJobs.length} review(s) in the current batch.
+You may send another Review URL if needed.
+When you are ready to start, please reply "Confirm all".`
         );
 
 
@@ -9499,6 +9798,45 @@ When finished, reply "Confirm all" to confirm the full batch before we begin.`
   }
 }
   
+  // Existing customer but no verified historical rate for this review type.
+  // V2: Sales handles the quote manually in the real customer chat.
+  // No waiting_price Job is created here.
+  if (isExistingCustomer) {
+    try {
+      await sendV2SalesLeadCard({
+        customer,
+        payload: canonicalReviewUrl,
+        inputType: "REVIEW_URL",
+        reason: "EXISTING_MISSING_RATE",
+      });
+    } catch (error) {
+      console.error("EXISTING MISSING RATE LEAD CARD FAILED:", error);
+      await triggerHumanAttention({
+        customer,
+        conversation,
+        message: canonicalReviewUrl,
+        reason: "EXISTING_CUSTOMER_MISSING_RATE_V2",
+      });
+    }
+
+    const botReply = getCustomerText(
+      customer,
+      "ได้รับลิงก์รีวิวแล้วครับ รายการนี้ยังไม่มีราคาประวัติที่ยืนยันไว้ เจ้าหน้าที่จะตรวจสอบและแจ้งราคาในแชทนี้ครับ",
+      "We received the review link. There is no verified historical rate for this review type yet, so our team will review it and quote you in this chat."
+    );
+
+    await saveV2BotReply({ customer, platform, botReply });
+    return {
+      ok: true,
+      customerId: customer.id,
+      customerType: "EXISTING_CUSTOMER",
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      missingHistoricalRate: true,
+      botReply,
+    };
+  }
+
   const job =
     await createJob({
       customerId:
@@ -14206,6 +14544,190 @@ console.log(
     .trim()
     .toLowerCase();
 
+// =========================================================
+// V2 SALES — USER FRIENDLY REPLY FLOW
+//
+// A) Reply Lead Card + price + Review URLs -> Preview only
+// B) Reply Preview + "ยืนยันงาน" -> create Jobs + Sheet + Queue
+// C) Reply Preview + "ยกเลิก" -> cancel draft
+// D) Existing-customer approval card uses the same words
+// =========================================================
+
+if (quotedMessageId) {
+  const isConfirmWork = ["ยืนยันงาน", "confirm work", "confirm job"].includes(normalizedGroupText);
+  const isCancelWork = ["ยกเลิก", "cancel", "cancel job"].includes(normalizedGroupText);
+
+  // -------------------------------------------------------
+  // V2 NEW/MANUAL QUOTE SALES ORDER DRAFT
+  // -------------------------------------------------------
+  if (isConfirmWork || isCancelWork) {
+    const draft = await getSalesOrderDraftByPreviewMessageId(quotedMessageId);
+
+    if (draft) {
+      if (isCancelWork) {
+        if (draft.status !== "pending_confirmation") {
+          await replyLineTextMessage(
+            event.replyToken,
+            `⚠️ งานชุดนี้อยู่ในสถานะ ${draft.status} แล้วครับ`
+          );
+          continue;
+        }
+
+        await updateSalesOrderDraft(draft.id, {
+          status: "cancelled",
+          cancelled_at: new Date().toISOString(),
+        });
+
+        await replyLineTextMessage(
+          event.replyToken,
+          "❌ ยกเลิก Draft แล้วครับ\nยังไม่มี Job ถูกสร้าง / ยังไม่ลง Sheet / ยังไม่เริ่มงาน\nแก้ข้อมูลแล้ว Reply ข้อความลูกค้าเดิมเพื่อส่งชุดใหม่ได้เลย"
+        );
+        continue;
+      }
+
+      try {
+        const confirmed = await confirmV2SalesOrderDraft(draft);
+        const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
+
+        await replyLineTextMessage(
+          event.replyToken,
+          [
+            "✅ ยืนยันงานเรียบร้อย",
+            `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
+            `Platform: ${getPlatformLabel(confirmed.customer)}`,
+            `รับเข้าคิว: ${confirmed.startedJobs.length} รีวิว`,
+            "ระบบจะส่ง T0/T2 เข้ากลุ่มตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+            confirmed.customerNotifyOk
+              ? "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว"
+              : "⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+            failedSheets.length === 0
+              ? "ลง Sheet ครบแล้ว"
+              : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+          ].join("\n")
+        );
+      } catch (error) {
+        console.error("V2 SALES ORDER CONFIRM FAILED:", error);
+        await replyLineTextMessage(
+          event.replyToken,
+          `❌ ยืนยันงานไม่สำเร็จ: ${error.message}\nกรุณาอย่ากดยืนยันซ้ำจนกว่าจะตรวจสอบสถานะ`
+        );
+      }
+      continue;
+    }
+
+    // -----------------------------------------------------
+    // EXISTING CUSTOMER BATCH APPROVAL
+    // -----------------------------------------------------
+    const anchorJob = await getJobByLineGroupMessageId(quotedMessageId);
+    if (anchorJob?.status === "waiting_credit_approval") {
+      const existingCustomerForApproval = await getCustomerById(anchorJob.customer_id);
+      const existingConversationForApproval = existingCustomerForApproval
+        ? await getConversationByCustomerId(existingCustomerForApproval.id)
+        : null;
+
+      if (
+        existingCustomerForApproval &&
+        existingConversationForApproval?.handoff_reason === "EXISTING_BATCH_CREDIT_APPROVAL_PENDING"
+      ) {
+        const batchJobs = await getWaitingCreditApprovalJobsByCustomerId(
+          existingCustomerForApproval.id
+        );
+
+        if (isCancelWork) {
+          for (const job of batchJobs) {
+            await updateJob(job.id, { status: "sales_rejected" });
+          }
+
+          await updateConversationState({
+            customerId: existingCustomerForApproval.id,
+            state: GMR_STATES.WAITING_MAP,
+            handoff: false,
+            handoffReason: null,
+          });
+
+          await replyLineTextMessage(
+            event.replyToken,
+            `❌ ยกเลิกชุดนี้แล้วครับ\nจำนวน ${batchJobs.length} รีวิว\nยังไม่มีงานถูกเริ่ม และระบบจะไม่ส่งข้อความยกเลิกหาลูกค้า`
+          );
+          continue;
+        }
+
+        try {
+          const started = await startApprovedExistingCustomerBatch({
+            customer: existingCustomerForApproval,
+            conversation: existingConversationForApproval,
+            jobs: batchJobs,
+          });
+
+          const sheetResults = await appendV2StartedJobsToMasterSheet({
+            customer: existingCustomerForApproval,
+            jobs: started.startedJobs,
+            source: "existing_customer_sales_approved",
+          });
+
+          await sendMessageToCustomer({
+            platform: existingCustomerForApproval.platform,
+            platformUserId: existingCustomerForApproval.platform_user_id,
+            text: started.botReply,
+          });
+
+          const sheetFails = sheetResults.filter((item) => item.ok !== true);
+          await replyLineTextMessage(
+            event.replyToken,
+            [
+              "✅ Sales ยืนยันงานลูกค้าเก่าแล้ว",
+              `รับเข้าคิว ${started.startedJobs.length} รีวิว`,
+              "ส่ง Script เริ่มงานให้ลูกค้าแล้ว",
+              sheetFails.length === 0 ? "ลง Sheet ครบแล้ว" : `⚠️ Sheet fail ${sheetFails.length} งาน`,
+            ].join("\n")
+          );
+        } catch (error) {
+          console.error("V2 EXISTING BATCH CONFIRM FAILED:", error);
+          await replyLineTextMessage(
+            event.replyToken,
+            `❌ เริ่มงานลูกค้าเก่าไม่สำเร็จ: ${error.message}`
+          );
+        }
+        continue;
+      }
+    }
+  }
+
+  // -------------------------------------------------------
+  // Reply Lead Card -> parse price + review links -> Preview
+  // -------------------------------------------------------
+  const leadCard = await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
+  if (leadCard) {
+    try {
+      const prepared = await prepareV2SalesOrderDraft({
+        leadCard,
+        groupText,
+        lineUserId: event.source?.userId || null,
+      });
+
+      if (prepared?.ok) {
+        await replyLineTextMessage(
+          event.replyToken,
+          "✅ อ่านราคาและลิงก์แล้วครับ\nระบบส่ง Preview ใหม่ด้านล่างแล้ว กรุณาตรวจแล้ว Reply Preview ด้วยคำว่า “ยืนยันงาน” หรือ “ยกเลิก”"
+        );
+      }
+    } catch (error) {
+      await replyLineTextMessage(
+        event.replyToken,
+        [
+          `❌ อ่านคำสั่งงานไม่สำเร็จ: ${error.message}`,
+          "",
+          "วิธีง่ายที่สุด:",
+          "Reply ข้อความลูกค้า แล้วพิมพ์",
+          "5500 THB",
+          "https://google.com/maps/reviews/...",
+          "https://google.com/maps/reviews/...",
+        ].join("\n")
+      );
+    }
+    continue;
+  }
+}
 
 // =========================================================
 // MANUAL ASSIGNED WORK COMMAND
@@ -15052,131 +15574,65 @@ if (
 // - log ไว้ให้ตรวจภายหลัง
 // ========================================
 
-const legacyMapUrl =
-  String(
-    legacyCustomer.map_url || ""
-  ).trim();
+const legacyMapUrls = Array.from(new Set(
+  [
+    ...(Array.isArray(legacyCustomer.map_urls) ? legacyCustomer.map_urls : []),
+    ...String(legacyCustomer.map_url || "").split(/\r?\n|,/g),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+));
 
-if (legacyMapUrl) {
-
+for (const legacyMapUrl of legacyMapUrls) {
   try {
+    const legacyPlaces = await searchPlaceByText(legacyMapUrl);
 
-    const legacyPlaces =
-      await searchPlaceByText(
-        legacyMapUrl
-      );
-
-    if (
-      Array.isArray(legacyPlaces) &&
-      legacyPlaces.length > 0
-    ) {
-
-      const legacyPlace =
-        legacyPlaces[0];
-
-      const legacyPlaceId =
-        String(
-          legacyPlace?.placeId || ""
-        ).trim();
+    if (Array.isArray(legacyPlaces) && legacyPlaces.length > 0) {
+      const legacyPlace = legacyPlaces[0];
+      const legacyPlaceId = String(legacyPlace?.placeId || "").trim();
 
       if (legacyPlaceId) {
-
         await upsertCustomerMapRecord({
-          customerId:
-            matchedCustomer.id,
-
+          customerId: matchedCustomer.id,
           businessName:
             legacyPlace.businessName ||
             legacyCustomer.business_name ||
             null,
-
-          placeId:
-            legacyPlaceId,
-
-          mapUrl:
-            legacyPlace.mapUrl ||
-            legacyMapUrl,
-
-          sourceReviewUrl:
-            null,
+          placeId: legacyPlaceId,
+          mapUrl: legacyPlace.mapUrl || legacyMapUrl,
+          sourceReviewUrl: null,
         });
 
-        console.log(
-          "LEGACY CUSTOMER MAP LINKED:",
-          {
-            legacyCustomerId:
-              legacyCustomer.id,
-
-            customerId:
-              matchedCustomer.id,
-
-            placeId:
-              legacyPlaceId,
-
-            mapUrl:
-              legacyPlace.mapUrl ||
-              legacyMapUrl,
-          }
-        );
-
+        console.log("LEGACY CUSTOMER MAP LINKED:", {
+          legacyCustomerId: legacyCustomer.id,
+          customerId: matchedCustomer.id,
+          placeId: legacyPlaceId,
+          mapUrl: legacyPlace.mapUrl || legacyMapUrl,
+        });
       } else {
-
-        console.warn(
-          "LEGACY MAP PLACE ID MISSING:",
-          {
-            legacyCustomerId:
-              legacyCustomer.id,
-
-            customerId:
-              matchedCustomer.id,
-
-            mapUrl:
-              legacyMapUrl,
-          }
-        );
+        console.warn("LEGACY MAP PLACE ID MISSING:", {
+          legacyCustomerId: legacyCustomer.id,
+          customerId: matchedCustomer.id,
+          mapUrl: legacyMapUrl,
+        });
       }
-
     } else {
-
-      console.warn(
-        "LEGACY MAP NOT RESOLVED:",
-        {
-          legacyCustomerId:
-            legacyCustomer.id,
-
-          customerId:
-            matchedCustomer.id,
-
-          mapUrl:
-            legacyMapUrl,
-        }
-      );
+      console.warn("LEGACY MAP NOT RESOLVED:", {
+        legacyCustomerId: legacyCustomer.id,
+        customerId: matchedCustomer.id,
+        mapUrl: legacyMapUrl,
+      });
     }
-
   } catch (legacyMapError) {
-
-    // Map resolve fail ไม่ควรทำให้
-    // Legacy Customer Import ทั้งก้อนล้ม
-
-    console.error(
-      "LEGACY MAP LINK ERROR:",
-      {
-        legacyCustomerId:
-          legacyCustomer.id,
-
-        customerId:
-          matchedCustomer.id,
-
-        mapUrl:
-          legacyMapUrl,
-
-        error:
-          legacyMapError?.message ||
-          String(legacyMapError),
-      }
-    );
+    console.error("LEGACY MAP LINK ERROR:", {
+      legacyCustomerId: legacyCustomer.id,
+      customerId: matchedCustomer.id,
+      mapUrl: legacyMapUrl,
+      error: legacyMapError?.message || String(legacyMapError),
+    });
   }
 }
+
 
       
       // ========================================
@@ -20769,6 +21225,11 @@ app.post(
     mapUrl:
       item.mapUrl,
 
+    mapUrls:
+      item.mapUrls ||
+      item.map_urls ||
+      null,
+
     phone:
       item.phone,
 
@@ -21547,103 +22008,57 @@ const matchedCustomerId =
     importedLegacy?.matched_customer_id || ""
   ).trim();
 
-const importedMapUrl =
-  String(
-    importedLegacy?.map_url ||
-    item.mapUrl ||
-    ""
-  ).trim();
+const importedMapUrls = Array.from(new Set(
+  [
+    ...(Array.isArray(importedLegacy?.map_urls) ? importedLegacy.map_urls : []),
+    ...(Array.isArray(item.mapUrls) ? item.mapUrls : []),
+    ...String(importedLegacy?.map_url || item.mapUrl || "").split(/\r?\n|,/g),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+));
 
-if (
-  matchedCustomerId &&
-  importedMapUrl
-) {
+if (matchedCustomerId && importedMapUrls.length > 0) {
+  for (const importedMapUrl of importedMapUrls) {
+    try {
+      const places = await searchPlaceByText(importedMapUrl);
 
-  try {
+      if (Array.isArray(places) && places.length > 0) {
+        const place = places[0];
+        const placeId = String(place?.placeId || "").trim();
 
-    const places =
-      await searchPlaceByText(
-        importedMapUrl
-      );
-
-    if (
-      Array.isArray(places) &&
-      places.length > 0
-    ) {
-
-      const place =
-        places[0];
-
-      const placeId =
-        String(
-          place?.placeId || ""
-        ).trim();
-
-      if (placeId) {
-
-        await upsertCustomerMapRecord({
-          customerId:
-            matchedCustomerId,
-
-          businessName:
-            place.businessName ||
-            importedLegacy?.business_name ||
-            item.businessName ||
-            null,
-
-          placeId,
-
-          mapUrl:
-            place.mapUrl ||
-            importedMapUrl,
-
-          sourceReviewUrl:
-            null,
-        });
-
-        console.log(
-          "LEGACY IMPORT MAP AUTO-LINKED:",
-          {
-            legacyCustomerId:
-              importedLegacy?.id ||
+        if (placeId) {
+          await upsertCustomerMapRecord({
+            customerId: matchedCustomerId,
+            businessName:
+              place.businessName ||
+              importedLegacy?.business_name ||
+              item.businessName ||
               null,
-
-            customerId:
-              matchedCustomerId,
-
             placeId,
+            mapUrl: place.mapUrl || importedMapUrl,
+            sourceReviewUrl: null,
+          });
 
-            mapUrl:
-              place.mapUrl ||
-              importedMapUrl,
-          }
-        );
+          console.log("LEGACY IMPORT MAP AUTO-LINKED:", {
+            legacyCustomerId: importedLegacy?.id || null,
+            customerId: matchedCustomerId,
+            placeId,
+            mapUrl: place.mapUrl || importedMapUrl,
+          });
+        }
       }
+    } catch (mapLinkError) {
+      console.error("LEGACY IMPORT MAP AUTO-LINK FAILED:", {
+        legacyCustomerId: importedLegacy?.id || null,
+        customerId: matchedCustomerId,
+        mapUrl: importedMapUrl,
+        error: mapLinkError?.message || String(mapLinkError),
+      });
     }
-
-  } catch (mapLinkError) {
-
-    // ห้ามทำให้ Import ลูกค้าเก่าทั้งแถวล้ม
-    console.error(
-      "LEGACY IMPORT MAP AUTO-LINK FAILED:",
-      {
-        legacyCustomerId:
-          importedLegacy?.id ||
-          null,
-
-        customerId:
-          matchedCustomerId,
-
-        mapUrl:
-          importedMapUrl,
-
-        error:
-          mapLinkError?.message ||
-          String(mapLinkError),
-      }
-    );
   }
 }
+
           
      const finalLegacyCustomer =
   autoMatchedLegacy ||
