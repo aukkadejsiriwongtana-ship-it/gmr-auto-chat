@@ -6086,16 +6086,11 @@ async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW
     `${label}:`,
     String(payload || "-"),
     "",
-    "Sales: ตรวจราคาและเลือก Review URL ที่จะดำเนินการ",
-    "Reply ข้อความนี้ แล้วส่ง 2 บรรทัด:",
-    "ราคา",
-    "Review URL ที่จะให้เริ่มงาน (วางหลายลิงก์ได้)",
-    "",
     "ตัวอย่าง:",
     "5500",
     "https://google.com/maps/reviews/...",
     "",
-    "ระบบจะตรวจอายุรีวิวและจัดแผนกให้อัตโนมัติ:",
+    "REPLY ราคาเมื่อลูกค้ายืนยันแล้วเท่านั้น:",
     "1–14 วัน = T0 | มากกว่า 14 วัน = T2",
   ].join("\n");
 
