@@ -6017,6 +6017,45 @@ function looksLikeExplicitBusinessName(value) {
   return /^(?:ชื่อธุรกิจ|ชื่อร้าน|ร้านชื่อ|บริษัทชื่อ|business\s*name|company\s*name|shop\s*name)\s*[:：-]?\s*.+$/i.test(text);
 }
 
+function looksLikeQuestionOrConversation(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return false;
+
+  if (/[?？]/.test(text)) return true;
+
+  const patterns = [
+    /ไหม(?:ครับ|ค่ะ|คะ)?$/,
+    /มั้ย(?:ครับ|ค่ะ|คะ)?$/,
+    /หรือเปล่า/,
+    /รึเปล่า/,
+    /หรือไม่/,
+    /ยังไง/,
+    /อย่างไร/,
+    /เท่าไหร่/,
+    /เท่าไร/,
+    /^มี(?:บริการ|เพิ่ม|รับ|ทำ|ลบ|ช่วย|ไหม|มั้ย)/,
+    /(?:ทำ|รับ|มี|ช่วย|เพิ่ม|ลบ).*(?:ไหม|มั้ย|หรือเปล่า|รึเปล่า)/,
+    /^(?:how|what|why|when|where|who|can|could|would|do|does|is|are|have|has)\b/i,
+  ];
+
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function looksLikeSafeBareBusinessName(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+
+  if (looksLikeGenericGmrServiceInquiry(text)) return false;
+  if (looksLikeQuestionOrConversation(text)) return false;
+
+  // Avoid treating normal conversational sentences as a business name.
+  if (text.length > 120) return false;
+  if (text.split(/\s+/).filter(Boolean).length > 10) return false;
+  if (/(?:ครับ|ค่ะ|คะ|ครับผม|นะครับ|นะคะ)$/i.test(text)) return false;
+
+  return true;
+}
+
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const text = normalizeInboundUrlText(message).trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
@@ -6039,7 +6078,12 @@ function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const classification = classifyInput({ messageType, text });
   if (classification?.type === INPUT_TYPES.BUSINESS_NAME) {
     const allowBareBusinessName = Boolean(options?.allowBareBusinessName);
-    if (allowBareBusinessName || looksLikeExplicitBusinessName(text)) {
+
+    if (looksLikeExplicitBusinessName(text)) {
+      return { actionable: true, inputType: "BUSINESS_NAME", payload: text };
+    }
+
+    if (allowBareBusinessName && looksLikeSafeBareBusinessName(text)) {
       return { actionable: true, inputType: "BUSINESS_NAME", payload: text };
     }
   }
@@ -6058,8 +6102,8 @@ function getLeadRequestText(customer) {
 function getLeadReceivedText(customer) {
   return getCustomerText(
     customer,
-    "ได้รับข้อมูลแล้วครับ เจ้าหน้าที่จะตรวจสอบและแจ้งรายละเอียดในแชทนี้ต่อครับ",
-    "We received the information. Our team will review it and continue with you in this chat."
+    "สำหรับงานแรกเลือกมา 1 รีวิวได้เลยครับ",
+    "For the first case, please choose 1 review you'd like us to handle."
   );
 }
 
@@ -6131,15 +6175,8 @@ async function handleV2NewCustomerInbound({
   messageType,
 }) {
   const lead = await getOrCreateSalesLead(customer.id);
-  const leadInput = classifyV2LeadInput(message, messageType, {
-    // A bare business name is accepted only after we have explicitly asked
-    // this customer for a Map URL / business name. Explicit forms such as
-    // "ชื่อร้าน: ABC Clinic" are still accepted immediately.
-    allowBareBusinessName: Boolean(lead?.info_requested_at),
-  });
 
-  // 1) Actionable lead info always goes to Sales. No Map search / no pricing / no Job.
-  if (leadInput.actionable) {
+  const acceptLeadInput = async (leadInput) => {
     try {
       await sendV2SalesLeadCard({
         customer,
@@ -6158,6 +6195,7 @@ async function handleV2NewCustomerInbound({
 
     const botReply = getLeadReceivedText(customer);
     await saveV2BotReply({ customer, platform, botReply });
+
     return {
       handled: true,
       result: {
@@ -6170,19 +6208,35 @@ async function handleV2NewCustomerInbound({
         botReply,
       },
     };
+  };
+
+  // 1) Explicit lead data only: Review URL / Map URL / "ชื่อร้าน: ...".
+  // Bare BUSINESS_NAME is intentionally disabled here so FAQ/questions cannot
+  // be swallowed by the legacy business-name classifier before FAQ matching.
+  const explicitLeadInput = classifyV2LeadInput(message, messageType, {
+    allowBareBusinessName: false,
+  });
+
+  if (explicitLeadInput.actionable) {
+    return acceptLeadInput(explicitLeadInput);
   }
 
-  // 2) FAQ only. If this is the first time, append the one-time Map/business request.
+  // 2) FAQ has priority over a bare business-name guess.
+  // Example: "มีเพิ่มดาวไหม" must match the FAQ keyword "เพิ่มดาว" rather
+  // than being treated as a business name / lead payload.
   const faqMatch = await getGlobalFaqReply({ customer, message });
   if (faqMatch?.reply) {
     let botReply = faqMatch.reply;
+
     if (!lead?.info_requested_at) {
       botReply = `${botReply}\n\n${getLeadRequestText(customer)}`;
       await updateSalesLead(customer.id, {
         info_requested_at: new Date().toISOString(),
       });
     }
+
     await saveV2BotReply({ customer, platform, botReply });
+
     return {
       handled: true,
       result: {
@@ -6197,13 +6251,31 @@ async function handleV2NewCustomerInbound({
     };
   }
 
-  // 3) First non-FAQ contact: ask once only.
+  // 3) After we have already asked once for Map/business info, allow a plain
+  // business name — but only if it looks like a name, not a question/sentence.
+  if (lead?.info_requested_at) {
+    const bareBusinessLeadInput = classifyV2LeadInput(message, messageType, {
+      allowBareBusinessName: true,
+    });
+
+    if (
+      bareBusinessLeadInput.actionable &&
+      bareBusinessLeadInput.inputType === "BUSINESS_NAME"
+    ) {
+      return acceptLeadInput(bareBusinessLeadInput);
+    }
+  }
+
+  // 4) First non-FAQ contact: ask for Map/business once only.
   if (!lead?.info_requested_at) {
     const botReply = getLeadRequestText(customer);
+
     await updateSalesLead(customer.id, {
       info_requested_at: new Date().toISOString(),
     });
+
     await saveV2BotReply({ customer, platform, botReply });
+
     return {
       handled: true,
       result: {
@@ -6217,7 +6289,8 @@ async function handleV2NewCustomerInbound({
     };
   }
 
-  // 4) Unknown question after the one-time request -> Sales, but NOT permanent handoff.
+  // 5) Unknown/non-FAQ after the one-time request:
+  // notify Sales internally and stay silent in the customer chat.
   await triggerHumanAttention({
     customer,
     conversation,
