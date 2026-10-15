@@ -2830,6 +2830,7 @@ export async function createLegacyCustomerFromSheet({
   displayName,
   businessName = null,
   mapUrl = null,
+  mapUrls = null,
   phone = null,
   email = null,
 
@@ -2852,8 +2853,18 @@ export async function createLegacyCustomerFromSheet({
     );
   }
 
+  const normalizedMapUrls = Array.from(new Set(
+    (Array.isArray(mapUrls)
+      ? mapUrls
+      : String(mapUrls || mapUrl || "")
+          .split(/\r?\n|,/g))
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  ));
+
   const normalizedMapUrl =
-    String(mapUrl || "").trim() || null;
+    normalizedMapUrls[0] ||
+    (String(mapUrl || "").trim() || null);
 
 
   // -------------------------------------------------------
@@ -2903,12 +2914,20 @@ export async function createLegacyCustomerFromSheet({
     // UPDATE MAP URL ของ record เดิม
     // ========================================
 
+    const existingByIdMapUrls = Array.isArray(existingById.map_urls)
+      ? existingById.map_urls.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+
+    const mapListChanged =
+      normalizedMapUrls.length > 0 &&
+      JSON.stringify(normalizedMapUrls) !== JSON.stringify(existingByIdMapUrls);
+
     if (
       normalizedMapUrl &&
-      normalizedMapUrl !==
-        String(
-          existingById.map_url || ""
-        ).trim()
+      (
+        normalizedMapUrl !== String(existingById.map_url || "").trim() ||
+        mapListChanged
+      )
     ) {
 
       const {
@@ -2920,6 +2939,10 @@ export async function createLegacyCustomerFromSheet({
           .update({
             map_url:
               normalizedMapUrl,
+            map_urls:
+              normalizedMapUrls.length > 0
+                ? normalizedMapUrls
+                : (existingById.map_urls || []),
           })
           .eq(
             "id",
@@ -3010,12 +3033,20 @@ export async function createLegacyCustomerFromSheet({
     // → update record เดิม
     // ========================================
 
+    const existingMapUrls = Array.isArray(customer.map_urls)
+      ? customer.map_urls.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+
+    const duplicateMapListChanged =
+      normalizedMapUrls.length > 0 &&
+      JSON.stringify(normalizedMapUrls) !== JSON.stringify(existingMapUrls);
+
     if (
       normalizedMapUrl &&
-      normalizedMapUrl !==
-        String(
-          customer.map_url || ""
-        ).trim()
+      (
+        normalizedMapUrl !== String(customer.map_url || "").trim() ||
+        duplicateMapListChanged
+      )
     ) {
 
       const {
@@ -3027,6 +3058,10 @@ export async function createLegacyCustomerFromSheet({
           .update({
             map_url:
               normalizedMapUrl,
+            map_urls:
+              normalizedMapUrls.length > 0
+                ? normalizedMapUrls
+                : (customer.map_urls || []),
           })
           .eq(
             "id",
@@ -3088,6 +3123,9 @@ export async function createLegacyCustomerFromSheet({
 
         map_url:
           normalizedMapUrl,
+
+        map_urls:
+          normalizedMapUrls,
 
         phone:
           phone
@@ -4552,42 +4590,6 @@ export async function findCustomersByPlatformAndDisplayName({
     return [];
   }
 
-
-  // =========================================
-  // NORMALIZE DISPLAY NAME
-  //
-  // ตัวอย่าง:
-  // "<Robert Marchese"
-  // "Robert Marchese"
-  // " Robert Marchese "
-  //
-  // → robert marchese
-  // =========================================
-
-  const normalizeName = (value) =>
-    String(value || "")
-      .trim()
-      .toLowerCase()
-      .replace(
-        /^[^a-z0-9\u0E00-\u0E7F]+/gi,
-        ""
-      )
-      .replace(
-        /[^a-z0-9\u0E00-\u0E7F]+$/gi,
-        ""
-      )
-      .replace(/\s+/g, " ")
-      .trim();
-
-
-  const normalizedTarget =
-    normalizeName(
-      safeDisplayName
-    );
-
-
-  // ใช้ contains เพื่อดึง candidate ก่อน
-  // แล้ว filter ด้วย normalized exact name อีกชั้น
   const {
     data,
     error,
@@ -4600,7 +4602,7 @@ export async function findCustomersByPlatformAndDisplayName({
     )
     .ilike(
       "display_name",
-      `%${safeDisplayName}%`
+      safeDisplayName
     )
     .order(
       "created_at",
@@ -4609,21 +4611,14 @@ export async function findCustomersByPlatformAndDisplayName({
       }
     );
 
-
   if (error) {
     throw error;
   }
 
-
-  return (
-    data || []
-  ).filter(
-    (customer) =>
-      normalizeName(
-        customer.display_name
-      ) === normalizedTarget
-  );
+  return data || [];
 }
+
+
 // =========================================================
 // MANUAL CUSTOMER / SHEET EDITABLE SYNC HELPERS
 // =========================================================
@@ -5396,5 +5391,143 @@ export async function completeMonthlyOutreach({
     throw error;
   }
 
+  return data;
+}
+
+// =========================================================
+// V2 SALES LEADS / SALES ORDER DRAFTS
+// =========================================================
+
+export async function getSalesLeadByCustomerId(customerId) {
+  const { data, error } = await supabase
+    .from("gmr_sales_leads")
+    .select("*")
+    .eq("customer_id", customerId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function getOrCreateSalesLead(customerId) {
+  const existing = await getSalesLeadByCustomerId(customerId);
+  if (existing) return existing;
+  try {
+    const { data, error } = await supabase
+      .from("gmr_sales_leads")
+      .insert({ customer_id: customerId, status: "open" })
+      .select()
+      .single();
+    if (error) throw error;
+    return data;
+  } catch (error) {
+    if (error?.code === "23505") {
+      const raced = await getSalesLeadByCustomerId(customerId);
+      if (raced) return raced;
+    }
+    throw error;
+  }
+}
+
+export async function updateSalesLead(customerId, patch = {}) {
+  const safePatch = { ...patch, updated_at: new Date().toISOString() };
+  const { data, error } = await supabase
+    .from("gmr_sales_leads")
+    .update(safePatch)
+    .eq("customer_id", customerId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function createSalesLeadCard({
+  customerId,
+  lineGroupMessageId,
+  payload = null,
+  inputType = null,
+}) {
+  const { data, error } = await supabase
+    .from("gmr_sales_lead_cards")
+    .insert({
+      customer_id: customerId,
+      line_group_message_id: String(lineGroupMessageId),
+      payload,
+      input_type: inputType,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getSalesLeadCardByLineGroupMessageId(lineGroupMessageId) {
+  if (!lineGroupMessageId) return null;
+  const { data, error } = await supabase
+    .from("gmr_sales_lead_cards")
+    .select("*")
+    .eq("line_group_message_id", String(lineGroupMessageId))
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function createSalesOrderDraft({
+  customerId,
+  leadCardId = null,
+  price,
+  currency,
+  reviewItems,
+  createdByLineUserId = null,
+}) {
+  const { data, error } = await supabase
+    .from("gmr_sales_order_drafts")
+    .insert({
+      customer_id: customerId,
+      lead_card_id: leadCardId,
+      price: Number(price),
+      currency: String(currency || "THB").toUpperCase(),
+      review_items: reviewItems || [],
+      created_by_line_user_id: createdByLineUserId,
+      status: "pending_confirmation",
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function setSalesOrderDraftPreviewMessage({ draftId, messageId }) {
+  const { data, error } = await supabase
+    .from("gmr_sales_order_drafts")
+    .update({
+      preview_line_group_message_id: String(messageId),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", draftId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function getSalesOrderDraftByPreviewMessageId(messageId) {
+  if (!messageId) return null;
+  const { data, error } = await supabase
+    .from("gmr_sales_order_drafts")
+    .select("*")
+    .eq("preview_line_group_message_id", String(messageId))
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateSalesOrderDraft(draftId, patch = {}) {
+  const { data, error } = await supabase
+    .from("gmr_sales_order_drafts")
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq("id", draftId)
+    .select()
+    .single();
+  if (error) throw error;
   return data;
 }
