@@ -5734,7 +5734,53 @@ function looksLikeGoogleReviewUrl(value) {
     /https?:\/\/maps\.app\.goo\.gl\/[^\s]+/i.test(text) && /review/i.test(text);
 }
 
-function classifyV2LeadInput(message, messageType = "text") {
+function looksLikeGenericGmrServiceInquiry(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return false;
+
+  // Prevent generic service-interest / price / FAQ messages from being
+  // misclassified as a BUSINESS_NAME by the legacy input classifier.
+  // These messages must stay in the FAQ / ask-for-map flow until the
+  // customer actually provides a Map URL, Review URL, or business name.
+  const patterns = [
+    /สนใจ/,
+    /ลบ\s*รีวิว/,
+    /ลบ\s*รีวิว\s*google/,
+    /รีวิว\s*1\s*ดาว/,
+    /หนึ่งดาว/,
+    /ราคา/,
+    /เท่าไหร่/,
+    /เท่าไร/,
+    /ค่าบริการ/,
+    /ทำยังไง/,
+    /ทำอย่างไร/,
+    /บริการ/,
+    /ช่วยลบ/,
+    /google\s*review/,
+    /review\s*removal/,
+    /remove\s+(?:a\s+)?review/,
+    /delete\s+(?:a\s+)?review/,
+    /remove\s+google\s+review/,
+    /interested/,
+    /how\s+much/,
+    /price/,
+    /pricing/,
+    /service/,
+    /can\s+you\s+remove/,
+    /help\s+(?:me\s+)?remove/,
+  ];
+
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function looksLikeExplicitBusinessName(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+
+  return /^(?:ชื่อธุรกิจ|ชื่อร้าน|ร้านชื่อ|บริษัทชื่อ|business\s*name|company\s*name|shop\s*name)\s*[:：-]?\s*.+$/i.test(text);
+}
+
+function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const text = String(message || "").trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
 
@@ -5748,9 +5794,17 @@ function classifyV2LeadInput(message, messageType = "text") {
     return { actionable: true, inputType: "MAP_URL", payload: mapUrl.replace(/[),.;]+$/g, "") };
   }
 
+  // Generic inquiries are never lead payloads by themselves.
+  if (looksLikeGenericGmrServiceInquiry(text)) {
+    return { actionable: false, inputType: "SERVICE_INQUIRY", payload: null };
+  }
+
   const classification = classifyInput({ messageType, text });
   if (classification?.type === INPUT_TYPES.BUSINESS_NAME) {
-    return { actionable: true, inputType: "BUSINESS_NAME", payload: text };
+    const allowBareBusinessName = Boolean(options?.allowBareBusinessName);
+    if (allowBareBusinessName || looksLikeExplicitBusinessName(text)) {
+      return { actionable: true, inputType: "BUSINESS_NAME", payload: text };
+    }
   }
 
   return { actionable: false, inputType: classification?.type || null, payload: null };
@@ -5841,7 +5895,12 @@ async function handleV2NewCustomerInbound({
   messageType,
 }) {
   const lead = await getOrCreateSalesLead(customer.id);
-  const leadInput = classifyV2LeadInput(message, messageType);
+  const leadInput = classifyV2LeadInput(message, messageType, {
+    // A bare business name is accepted only after we have explicitly asked
+    // this customer for a Map URL / business name. Explicit forms such as
+    // "ชื่อร้าน: ABC Clinic" are still accepted immediately.
+    allowBareBusinessName: Boolean(lead?.info_requested_at),
+  });
 
   // 1) Actionable lead info always goes to Sales. No Map search / no pricing / no Job.
   if (leadInput.actionable) {
