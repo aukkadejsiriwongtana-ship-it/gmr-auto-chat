@@ -6319,7 +6319,7 @@ async function confirmV2SalesOrderDraft(draft) {
         customerId: customer.id,
         businessName: item.businessName || null,
         reviewUrl: item.canonicalUrl,
-        reviewCase: "sales_confirmed_direct_review",
+        reviewCase: "direct_review",
         reviewVisible: true,
         reviewHasText: Boolean(String(item.reviewText || "").trim()),
         departmentId: item.departmentId,
