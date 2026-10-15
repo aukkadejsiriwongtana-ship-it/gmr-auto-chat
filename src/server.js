@@ -5949,7 +5949,7 @@ app.get("/test-supabase", async (req, res) => {
 
 
 // =========================================================
-// GLOBAL CUSTOMER PHONE CAPTURE + ROBUST REVIEW URL LOOKUP — V2.2.15
+// GLOBAL CUSTOMER PHONE CAPTURE + ROBUST REVIEW URL LOOKUP — V2.2.17
 // =========================================================
 
 function extractThaiTenDigitPhone(value) {
@@ -6030,6 +6030,268 @@ function extractGoogleReviewSkid(value) {
   }
 }
 
+
+function extractGoogleMapsBusinessEntity(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  let decoded = raw;
+  try { decoded = decodeURIComponent(raw); } catch {}
+
+  // Direct Google review URLs normally contain the business data id in a
+  // segment similar to: !1s0x0:0xf2a64d766330b4d!
+  const match = decoded.match(/(0x[0-9a-f]+):(0x[0-9a-f]+)/i);
+  if (!match) return null;
+
+  const dataId = `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+  const cidHex = match[2].toLowerCase();
+
+  let cidDecimal = null;
+  try {
+    cidDecimal = BigInt(cidHex).toString(10);
+  } catch {}
+
+  return { dataId, cidHex, cidDecimal };
+}
+
+function extractGoogleReviewIdentityTokens(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  let decoded = raw;
+  try { decoded = decodeURIComponent(raw); } catch {}
+
+  const tokens = new Set();
+  const add = (token) => {
+    const safe = String(token || "").trim().toLowerCase();
+    if (safe) tokens.add(safe);
+  };
+
+  add(extractGoogleReviewSkid(decoded));
+
+  // Google direct-review URL data contains another review identity token,
+  // commonly after !2m5!1s... . Some providers expose this value as reviewId
+  // instead of the skid UUID, so retain both identities for exact matching.
+  const dataTokenMatch = decoded.match(/!2m5!1s([^!&]+)/i);
+  if (dataTokenMatch?.[1]) add(dataTokenMatch[1]);
+
+  return [...tokens];
+}
+
+function getReviewIdentityTokens(review) {
+  if (!review || typeof review !== "object") return [];
+  const tokens = new Set();
+  const add = (value) => {
+    const safe = String(value || "").trim().toLowerCase();
+    if (safe) tokens.add(safe);
+  };
+
+  [
+    review.reviewId,
+    review.review_id,
+    review.providerReviewId,
+    review.provider_review_id,
+    review.googleReviewId,
+    review.google_review_id,
+    review.id,
+  ].forEach(add);
+
+  const reviewUrl = String(
+    review.reviewUrl ||
+    review.review_url ||
+    review.reviewLink ||
+    review.review_link ||
+    ""
+  ).trim();
+
+  for (const token of extractGoogleReviewIdentityTokens(reviewUrl)) add(token);
+  return [...tokens];
+}
+
+function extractReviewsFromProviderResult(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+
+  const candidates = [
+    value.reviews,
+    value.result?.reviews,
+    value.data?.reviews,
+    value.result,
+    value.data,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+
+  return [];
+}
+
+
+function decodeBasicHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, n) => {
+      try { return String.fromCodePoint(Number(n)); } catch { return _; }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => {
+      try { return String.fromCodePoint(parseInt(n, 16)); } catch { return _; }
+    });
+}
+
+async function getGoogleReviewSharePageMeta(url) {
+  const inputUrl = String(url || "").trim();
+  if (!/^https?:\/\//i.test(inputUrl)) return null;
+
+  try {
+    const response = await fetch(inputUrl, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+      },
+    });
+
+    const finalUrl = String(response.url || inputUrl).trim();
+    const html = await response.text();
+
+    const readMeta = (propertyName) => {
+      const escaped = propertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const patterns = [
+        new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, "i"),
+        new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`, "i"),
+      ];
+      for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (match?.[1]) return decodeBasicHtmlEntities(match[1]).trim();
+      }
+      return null;
+    };
+
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title =
+      readMeta("og:title") ||
+      (titleMatch?.[1] ? decodeBasicHtmlEntities(titleMatch[1]).replace(/\s+/g, " ").trim() : null);
+    const description =
+      readMeta("og:description") ||
+      readMeta("description") ||
+      null;
+
+    let businessName = null;
+    if (title) {
+      const patterns = [
+        /^Google review of\s+(.+?)\s*$/i,
+        /^Review of\s+(.+?)\s*$/i,
+        /^รีวิว(?:ของ)?\s*(.+?)\s*$/i,
+        /^(.+?)\s*[-|–—]\s*Google Maps\s*$/i,
+      ];
+      for (const pattern of patterns) {
+        const match = title.match(pattern);
+        if (match?.[1]) {
+          businessName = match[1].trim();
+          break;
+        }
+      }
+    }
+
+    console.log("ROBUST REVIEW SHARE PAGE META:", {
+      inputUrl,
+      finalUrl,
+      title: title || null,
+      businessName: businessName || null,
+      hasDescription: Boolean(description),
+    });
+
+    return {
+      finalUrl,
+      title,
+      description,
+      businessName,
+    };
+  } catch (error) {
+    console.log("ROBUST REVIEW SHARE PAGE META FAILED:", {
+      inputUrl,
+      error: error?.message || String(error),
+    });
+    return null;
+  }
+}
+
+async function resolvePlaceFromDirectReviewUrl({ originalUrl, resolvedUrl }) {
+  const directCandidates = [originalUrl, resolvedUrl].filter(Boolean);
+  const entity =
+    extractGoogleMapsBusinessEntity(resolvedUrl) ||
+    extractGoogleMapsBusinessEntity(originalUrl);
+
+  const lookupCandidates = [];
+
+  // Google review share links expose a public preview title such as
+  // "Google review of <Business Name>". Telegram itself uses this metadata
+  // for the link preview, so use the same server-readable metadata to recover
+  // the business name before falling back to CID parsing.
+  const shareMeta = await getGoogleReviewSharePageMeta(originalUrl);
+  if (shareMeta?.businessName) lookupCandidates.push(shareMeta.businessName);
+  if (shareMeta?.finalUrl && shareMeta.finalUrl !== originalUrl) lookupCandidates.push(shareMeta.finalUrl);
+
+  if (entity?.cidDecimal) {
+    lookupCandidates.push(
+      `https://www.google.com/maps?cid=${entity.cidDecimal}`,
+      `https://maps.google.com/?cid=${entity.cidDecimal}`,
+      entity.dataId,
+      entity.cidDecimal
+    );
+  }
+
+  lookupCandidates.push(...directCandidates);
+
+  const seen = new Set();
+  for (const candidate of lookupCandidates) {
+    const safeCandidate = String(candidate || "").trim();
+    if (!safeCandidate || seen.has(safeCandidate)) continue;
+    seen.add(safeCandidate);
+
+    const searchInputs = [safeCandidate];
+
+    if (/^https?:\/\//i.test(safeCandidate)) {
+      try {
+        const expanded = await resolveGoogleShortUrl(safeCandidate);
+        if (expanded && !searchInputs.includes(expanded)) searchInputs.push(expanded);
+      } catch {}
+    }
+
+    for (const searchInput of searchInputs) {
+      try {
+        const places = await searchPlaceByText(searchInput);
+        if (Array.isArray(places) && places.length) {
+          const place = places[0];
+          console.log("ROBUST REVIEW PLACE RESOLVED:", {
+            originalUrl,
+            resolvedUrl,
+            searchInput,
+            entityDataId: entity?.dataId || null,
+            cidDecimal: entity?.cidDecimal || null,
+            placeId: place?.placeId || place?.place_id || null,
+            businessName: place?.businessName || place?.name || null,
+          });
+          return place;
+        }
+      } catch (error) {
+        console.log("ROBUST REVIEW PLACE SEARCH FAILED:", {
+          searchInput,
+          error: error?.message || String(error),
+        });
+      }
+    }
+  }
+
+  return null;
+}
+
 function normalizeReviewUrlForExactMatch(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -6040,9 +6302,10 @@ function normalizeReviewUrlForExactMatch(value) {
 }
 
 async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl }) {
-  const targetSkid =
-    extractGoogleReviewSkid(resolvedUrl) ||
-    extractGoogleReviewSkid(originalUrl);
+  const targetTokens = new Set([
+    ...extractGoogleReviewIdentityTokens(originalUrl),
+    ...extractGoogleReviewIdentityTokens(resolvedUrl),
+  ]);
 
   const targetUrls = new Set(
     [originalUrl, resolvedUrl]
@@ -6051,66 +6314,74 @@ async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl })
       .filter(Boolean)
   );
 
-  let places = [];
-  for (const mapCandidate of [originalUrl, resolvedUrl]) {
-    if (!mapCandidate) continue;
-    try {
-      places = await searchPlaceByText(mapCandidate);
-      if (Array.isArray(places) && places.length) break;
-    } catch (error) {
-      console.log("ROBUST REVIEW PLACE SEARCH FAILED:", {
-        mapCandidate,
-        error: error?.message || String(error),
-      });
-    }
-  }
+  const place = await resolvePlaceFromDirectReviewUrl({
+    originalUrl,
+    resolvedUrl,
+  });
 
-  const place = Array.isArray(places) ? places[0] : null;
   const placeId = place?.placeId || place?.place_id || null;
   if (!placeId) {
-    return { found: false, reason: "PLACE_NOT_FOUND_FOR_REVIEW_URL" };
+    return {
+      found: false,
+      reason: "PLACE_NOT_FOUND_FOR_REVIEW_URL",
+      businessEntity: extractGoogleMapsBusinessEntity(resolvedUrl || originalUrl),
+    };
   }
 
+  // Use every review source already available in this service. The direct
+  // review may be old, new, or buried among many 1-star reviews; limiting the
+  // fallback to only newest + lowest was the reason valid share links could
+  // still be rejected after the business was resolved.
   const reviewResults = await Promise.allSettled([
     getNewestReviews(placeId),
     getLowestReviews(placeId),
+    getPlaceReviews(placeId),
   ]);
 
-  const reviews = [];
+  const seenReviewKeys = new Set();
+  let inspectedCount = 0;
+
   for (const settled of reviewResults) {
     if (settled.status !== "fulfilled") continue;
-    const rows = Array.isArray(settled.value?.reviews)
-      ? settled.value.reviews
-      : Array.isArray(settled.value)
-        ? settled.value
-        : [];
+    const rows = extractReviewsFromProviderResult(settled.value);
+
     for (const review of rows) {
-      if (!review) continue;
-      const id = String(
-        review.reviewId ||
-        review.review_id ||
-        review.providerReviewId ||
-        review.provider_review_id ||
+      if (!review || typeof review !== "object") continue;
+
+      const reviewUrl = String(
+        review.reviewUrl ||
+        review.review_url ||
+        review.reviewLink ||
+        review.review_link ||
         ""
-      ).trim().toLowerCase();
-      const reviewUrl = String(review.reviewUrl || review.review_url || "").trim();
-      const reviewSkid = extractGoogleReviewSkid(reviewUrl);
+      ).trim();
       const normalizedReviewUrl = normalizeReviewUrlForExactMatch(reviewUrl);
+      const reviewTokens = getReviewIdentityTokens(review);
+      const reviewKey =
+        reviewTokens[0] ||
+        normalizedReviewUrl ||
+        `${review.reviewerName || review.reviewer_name || ""}|${review.isoDate || review.iso_date || ""}|${review.rating || ""}`;
 
-      const exactIdMatch = Boolean(targetSkid && id && id === targetSkid);
-      const exactSkidMatch = Boolean(targetSkid && reviewSkid && reviewSkid === targetSkid);
-      const exactUrlMatch = Boolean(normalizedReviewUrl && targetUrls.has(normalizedReviewUrl));
+      if (reviewKey && seenReviewKeys.has(reviewKey)) continue;
+      if (reviewKey) seenReviewKeys.add(reviewKey);
+      inspectedCount += 1;
 
-      if (exactIdMatch || exactSkidMatch || exactUrlMatch) {
+      const exactTokenMatch = reviewTokens.some((token) => targetTokens.has(token));
+      const exactUrlMatch = Boolean(
+        normalizedReviewUrl && targetUrls.has(normalizedReviewUrl)
+      );
+
+      if (exactTokenMatch || exactUrlMatch) {
         console.log("ROBUST REVIEW PLACE-LIST MATCHED:", {
           originalUrl,
           resolvedUrl,
           placeId,
-          targetSkid,
-          reviewId: id || null,
-          reviewSkid: reviewSkid || null,
+          targetTokens: [...targetTokens],
+          reviewTokens,
           reviewUrl: reviewUrl || null,
+          inspectedCount,
         });
+
         return {
           found: true,
           review,
@@ -6119,16 +6390,21 @@ async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl })
           lookupUrl: reviewUrl || resolvedUrl || originalUrl,
           resolvedUrl: resolvedUrl || originalUrl,
           matchedVia: "PLACE_LIST_EXACT",
+          placeId,
         };
       }
-      reviews.push(review);
     }
   }
 
   return {
     found: false,
-    reason: targetSkid ? "REVIEW_SKID_NOT_FOUND_IN_PLACE_LISTS" : "REVIEW_NOT_FOUND_IN_PLACE_LISTS",
+    reason: targetTokens.size
+      ? "REVIEW_ID_NOT_FOUND_IN_PLACE_REVIEW_LISTS"
+      : "REVIEW_NOT_FOUND_IN_PLACE_REVIEW_LISTS",
     placeId,
+    businessName: place.businessName || place.name || null,
+    inspectedCount,
+    targetTokens: [...targetTokens],
   };
 }
 
