@@ -6323,8 +6323,8 @@ function getLeadRequestText(customer) {
 function getLeadReceivedText(customer) {
   return getCustomerText(
     customer,
-    "ได้รับข้อมูลแล้วครับ เจ้าหน้าที่จะตรวจสอบและแจ้งรายละเอียดในแชทนี้ต่อครับ",
-    "We received the information. Our team will review it and continue with you in this chat."
+    "สวัสดีครับ ส่งลิงค์ Google Map ตัวที่ต้องการดำเนินการมาให้ช่วยดูได้เลยครับ หากส่งลิงค์ไม่ได้แจ้งชื่อธุรกิจได้เช่นกันครับ",
+    "Hello! Please send the Google Maps link you'd like us to check. If you can’t send the link, just send us your business name"
   );
 }
 
