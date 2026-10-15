@@ -17,7 +17,7 @@ import "dotenv/config";
 import express from "express";
 
 import {
-  sendMessageToCustomer,
+  sendMessageToCustomer as sendMessageToCustomerBase,
   replyLineTextMessage,
   downloadLineMessageContent,
   getLineUserProfile,
@@ -30,6 +30,180 @@ import {
   appendDispatchJobToGoogleSheet,
   updateJobInGoogleSheet,
 } from "./services/googleSheetsService.js";
+
+
+// =========================================================
+// CUSTOMER OUTBOUND ROUTER — V2.2.8
+// Facebook customers arrive through ManyChat, so their stored
+// platform_user_id is the ManyChat subscriber_id. Asynchronous
+// replies (Sales starts work, payment, reactivation, etc.) must
+// therefore go back through ManyChat Content API instead of
+// requiring a Facebook Page Access Token.
+// LINE continues to use the existing customerMessagingService.
+// =========================================================
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithNetworkRetry(url, options = {}, {
+  attempts = 3,
+  timeoutMs = 15000,
+  label = "HTTP",
+} = {}) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, {
+          ...options,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      lastError = error;
+      console.error(`${label} NETWORK ERROR`, {
+        attempt,
+        attempts,
+        code: error?.code || error?.cause?.code || null,
+        message: error?.message || String(error),
+      });
+
+      if (attempt < attempts) {
+        await sleepMs(500 * attempt);
+      }
+    }
+  }
+
+  throw lastError || new Error(`${label} request failed`);
+}
+
+function getManychatApiTokenForPlatform(platform) {
+  const normalized = String(platform || "").trim().toLowerCase();
+
+  if (normalized === "facebook_en") {
+    return String(
+      process.env.MANYCHAT_API_TOKEN_EN ||
+      process.env.MANYCHAT_API_TOKEN ||
+      ""
+    ).trim();
+  }
+
+  if (normalized === "facebook_th") {
+    return String(
+      process.env.MANYCHAT_API_TOKEN_TH ||
+      process.env.MANYCHAT_API_TOKEN ||
+      ""
+    ).trim();
+  }
+
+  return "";
+}
+
+async function sendManychatFacebookText({ platform, platformUserId, text }) {
+  const token = getManychatApiTokenForPlatform(platform);
+  const subscriberId = String(platformUserId || "").trim();
+  const safeText = String(text || "").trim();
+
+  if (!token) {
+    throw new Error(
+      `Missing ManyChat API Token for ${platform}. Configure MANYCHAT_API_TOKEN (or MANYCHAT_API_TOKEN_TH / MANYCHAT_API_TOKEN_EN).`
+    );
+  }
+
+  if (!subscriberId) throw new Error("Missing ManyChat subscriber_id");
+  if (!safeText) throw new Error("Missing customer message text");
+
+  const response = await fetchWithNetworkRetry(
+    "https://api.manychat.com/fb/sending/sendContent",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        // Keep as string. ManyChat subscriber IDs can exceed JS safe integer range.
+        subscriber_id: subscriberId,
+        data: {
+          version: "v2",
+          content: {
+            messages: [
+              {
+                type: "text",
+                text: safeText,
+              },
+            ],
+          },
+        },
+      }),
+    },
+    {
+      attempts: 3,
+      timeoutMs: 15000,
+      label: "MANYCHAT CUSTOMER SEND",
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  console.log("MANYCHAT CUSTOMER SEND RESPONSE:", {
+    platform,
+    subscriberId,
+    httpStatus: response.status,
+    ok: response.ok,
+    manychatStatus: data?.status || null,
+  });
+
+  if (!response.ok || data?.status === "error") {
+    throw new Error(
+      `ManyChat customer send failed ${response.status}: ${responseText}`
+    );
+  }
+
+  return {
+    ok: true,
+    transport: "manychat",
+    platform,
+    subscriberId,
+  };
+}
+
+async function sendMessageToCustomer({ platform, platformUserId, text, ...rest }) {
+  const normalized = String(platform || "").trim().toLowerCase();
+
+  if (normalized === "facebook_th" || normalized === "facebook_en") {
+    const manychatToken = getManychatApiTokenForPlatform(normalized);
+
+    if (manychatToken) {
+      return sendManychatFacebookText({
+        platform: normalized,
+        platformUserId,
+        text,
+      });
+    }
+
+    // Backward-compatible fallback for installations that intentionally
+    // send directly through Meta Graph API and already have Page tokens.
+    console.warn("MANYCHAT TOKEN MISSING — FALLING BACK TO FACEBOOK DIRECT TRANSPORT", {
+      platform: normalized,
+    });
+  }
+
+  return sendMessageToCustomerBase({
+    platform,
+    platformUserId,
+    text,
+    ...rest,
+  });
+}
 
 // Internal team notifications are routed through Telegram in V2.2.
 // Keep the legacy LINE group service untouched in the repository; this server no longer imports it.
@@ -1721,12 +1895,17 @@ async function sendTelegramText({ chatId, text, replyToMessageId = null }) {
     };
   }
 
-  const response = await fetch(
+  const response = await fetchWithNetworkRetry(
     `https://api.telegram.org/bot${token}/sendMessage`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    },
+    {
+      attempts: 3,
+      timeoutMs: 12000,
+      label: "TELEGRAM SEND",
     }
   );
 
@@ -1852,7 +2031,7 @@ async function registerTelegramWebhook() {
   ).replace(/\/$/, "");
 
   const webhookUrl = `${baseUrl}/telegram/webhook`;
-  const response = await fetch(
+  const response = await fetchWithNetworkRetry(
     `https://api.telegram.org/bot${token}/setWebhook`,
     {
       method: "POST",
@@ -1862,6 +2041,11 @@ async function registerTelegramWebhook() {
         allowed_updates: ["message"],
         drop_pending_updates: false,
       }),
+    },
+    {
+      attempts: 3,
+      timeoutMs: 12000,
+      label: "TELEGRAM SET WEBHOOK",
     }
   );
 
@@ -4365,33 +4549,49 @@ app.post("/telegram/webhook", async (req, res) => {
               (item, index) => `${index + 1}. ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน\n   ${item.canonicalUrl}`
             );
 
-            await reply([
-              "✅ รับงานและเริ่มดำเนินการแล้ว",
-              `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
-              `Platform: ${getPlatformLabel(confirmed.customer)}`,
-              `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
-              `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
-              "",
-              ...workLines,
-              "",
-              confirmed.customerNotifyOk
-                ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
-                : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
-              failedSheets.length === 0
-                ? "✅ ลง Sheet ครบแล้ว"
-                : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
-              "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
-            ].join("\n"));
+            console.log("V2 LEAD START COMMITTED:", {
+              draftId: prepared.draft.id,
+              customerId: confirmed.customer?.id || null,
+              jobIds: confirmed.startedJobs.map((job) => job.id),
+              customerNotifyOk: confirmed.customerNotifyOk,
+              failedSheetCount: failedSheets.length,
+            });
+
+            try {
+              await reply([
+                "✅ รับงานและเริ่มดำเนินการแล้ว",
+                `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
+                `Platform: ${getPlatformLabel(confirmed.customer)}`,
+                `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
+                `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
+                "",
+                ...workLines,
+                "",
+                confirmed.customerNotifyOk
+                  ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
+                  : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+                failedSheets.length === 0
+                  ? "✅ ลง Sheet ครบแล้ว"
+                  : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+                "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+              ].join("\n"));
+            } catch (ackError) {
+              console.error("TELEGRAM V2 LEAD START ACK FAILED — JOB ALREADY COMMITTED:", ackError);
+            }
           }
         } catch (error) {
           console.error("TELEGRAM V2 LEAD START FAILED:", error);
-          await reply([
-            `❌ รับงาน/เริ่มงานไม่สำเร็จ: ${error.message}`,
-            "",
-            "รูปแบบที่ถูกต้อง:",
-            "5500",
-            "https://google.com/maps/reviews/...",
-          ].join("\n"));
+          try {
+            await reply([
+              `❌ รับงาน/เริ่มงานไม่สำเร็จ: ${error.message}`,
+              "",
+              "รูปแบบที่ถูกต้อง:",
+              "5500",
+              "https://google.com/maps/reviews/...",
+            ].join("\n"));
+          } catch (replyError) {
+            console.error("TELEGRAM V2 LEAD START ERROR REPLY FAILED:", replyError);
+          }
         }
         return res.sendStatus(200);
       }
