@@ -5531,3 +5531,240 @@ export async function updateSalesOrderDraft(draftId, patch = {}) {
   if (error) throw error;
   return data;
 }
+
+// =========================================================
+// LEGACY MONITORING CUSTOMER
+// Creates a durable customer shell so legacy Maps can be
+// monitored before the customer ever messages the new bot.
+// =========================================================
+
+export async function getOrCreateLegacyMonitoringCustomer({
+  legacyCustomerId,
+  platform,
+  platformUserId = null,
+  platformAccount = null,
+  displayName,
+  language = "th",
+}) {
+  if (!legacyCustomerId) {
+    throw new Error("Missing legacyCustomerId in getOrCreateLegacyMonitoringCustomer");
+  }
+
+  const safePlatform = String(platform || "legacy").trim().toLowerCase() || "legacy";
+  const explicitPlatformUserId = String(platformUserId || "").trim();
+  const placeholderPlatformUserId = `legacy:${legacyCustomerId}`;
+  const targetPlatformUserId = explicitPlatformUserId || placeholderPlatformUserId;
+
+  const existing = await getCustomerByPlatformUserId(
+    safePlatform,
+    targetPlatformUserId
+  );
+
+  if (existing) return existing;
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .insert({
+      platform: safePlatform,
+      platform_account: platformAccount || null,
+      platform_user_id: targetPlatformUserId,
+      display_name: displayName || null,
+      language: language === "en" ? "en" : "th",
+      customer_type: "existing",
+      source: "legacy_import",
+      customer_notify: Boolean(explicitPlatformUserId),
+      transport_metadata: {
+        legacy_customer_id: String(legacyCustomerId),
+        legacy_monitoring_shell: !explicitPlatformUserId,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) {
+    if (error?.code === "23505") {
+      const raced = await getCustomerByPlatformUserId(
+        safePlatform,
+        targetPlatformUserId
+      );
+      if (raced) return raced;
+    }
+    throw error;
+  }
+
+  return data;
+}
+
+export async function findLegacyMonitoringCustomersByPlatformAndDisplayName({
+  platform,
+  displayName,
+}) {
+  const safePlatform = String(platform || "").trim().toLowerCase();
+  const safeDisplayName = String(displayName || "").trim();
+
+  if (!safePlatform || !safeDisplayName) return [];
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .select("*")
+    .eq("platform", safePlatform)
+    .ilike("display_name", safeDisplayName)
+    .like("platform_user_id", "legacy:%")
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function attachLegacyMonitoringCustomer({
+  customerId,
+  platformUserId,
+  displayName = null,
+}) {
+  if (!customerId) {
+    throw new Error("Missing customerId in attachLegacyMonitoringCustomer");
+  }
+  if (!platformUserId) {
+    throw new Error("Missing platformUserId in attachLegacyMonitoringCustomer");
+  }
+
+  const patch = {
+    platform_user_id: String(platformUserId),
+    customer_notify: true,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (displayName) {
+    patch.display_name = String(displayName).trim();
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_customers")
+    .update(patch)
+    .eq("id", customerId)
+    .like("platform_user_id", "legacy:%")
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+// =========================================================
+// REMOVAL KPI BATCHES
+// Durable aggregation by one review-monitor run.
+// =========================================================
+
+export async function upsertRemovalKpiBatch({
+  batchId,
+  detectedAt = null,
+}) {
+  if (!batchId) {
+    throw new Error("Missing batchId in upsertRemovalKpiBatch");
+  }
+
+  const now = detectedAt || new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("gmr_removal_kpi_batches")
+    .upsert(
+      {
+        batch_id: String(batchId),
+        status: "pending",
+        detected_at: now,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "batch_id",
+        ignoreDuplicates: true,
+      }
+    )
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+export async function getJobsByRemovalDetectionBatchId(batchId) {
+  if (!batchId) return [];
+
+  const { data, error } = await supabase
+    .from("gmr_jobs")
+    .select("*")
+    .eq("removal_detection_batch_id", String(batchId))
+    .order("review_removed_detected_at", { ascending: true, nullsFirst: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function claimRemovalKpiBatch(batchId) {
+  if (!batchId) return null;
+
+  const { data, error } = await supabase
+    .from("gmr_removal_kpi_batches")
+    .update({
+      status: "sending",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("batch_id", String(batchId))
+    .eq("status", "pending")
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+export async function completeRemovalKpiBatch({
+  batchId,
+  t0Count,
+  t2Count,
+  totalCount,
+  lineMessageId = null,
+  status = "sent",
+}) {
+  if (!batchId) {
+    throw new Error("Missing batchId in completeRemovalKpiBatch");
+  }
+
+  const now = new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("gmr_removal_kpi_batches")
+    .update({
+      status,
+      t0_count: Number(t0Count || 0),
+      t2_count: Number(t2Count || 0),
+      total_count: Number(totalCount || 0),
+      line_message_id: lineMessageId || null,
+      sent_at: status === "sent" ? now : null,
+      updated_at: now,
+    })
+    .eq("batch_id", String(batchId))
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function releaseRemovalKpiBatch(batchId) {
+  if (!batchId) return null;
+
+  const { data, error } = await supabase
+    .from("gmr_removal_kpi_batches")
+    .update({
+      status: "pending",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("batch_id", String(batchId))
+    .eq("status", "sending")
+    .select()
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
