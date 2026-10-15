@@ -2911,53 +2911,76 @@ export async function createLegacyCustomerFromSheet({
 
 
     // ========================================
-    // UPDATE MAP URL ของ record เดิม
+    // SYNC LEGACY SHEET -> existing record
+    //
+    // Re-running the importer must not only sync Map URLs.
+    // It must also promote verified-payment status and sync any
+    // historical rates supplied later in the Sheet.
+    // Blank Sheet values do not erase previously imported data.
     // ========================================
 
     const existingByIdMapUrls = Array.isArray(existingById.map_urls)
       ? existingById.map_urls.map((value) => String(value || "").trim()).filter(Boolean)
       : [];
 
-    const mapListChanged =
-      normalizedMapUrls.length > 0 &&
-      JSON.stringify(normalizedMapUrls) !== JSON.stringify(existingByIdMapUrls);
+    const syncPatch = {
+      ...(platform
+        ? { platform: String(platform).trim().toLowerCase() }
+        : {}),
+      ...(platformAccount
+        ? { platform_account: String(platformAccount).trim() }
+        : {}),
+      ...(businessName
+        ? { business_name: String(businessName).trim() }
+        : {}),
+      ...(phone
+        ? { phone: String(phone).trim() }
+        : {}),
+      ...(email
+        ? { email: String(email).trim() }
+        : {}),
+      ...(newReviewRate !== null && newReviewRate !== undefined && newReviewRate !== ""
+        ? {
+            new_review_rate: Number(newReviewRate),
+            new_review_currency: String(newReviewCurrency || existingById.new_review_currency || "THB").trim().toUpperCase(),
+          }
+        : {}),
+      ...(oldReviewRate !== null && oldReviewRate !== undefined && oldReviewRate !== ""
+        ? {
+            old_review_rate: Number(oldReviewRate),
+            old_review_currency: String(oldReviewCurrency || existingById.old_review_currency || "THB").trim().toUpperCase(),
+          }
+        : {}),
+      has_verified_payment:
+        existingById.has_verified_payment === true ||
+        hasVerifiedPayment === true,
+      ...(note
+        ? { note: String(note).trim() }
+        : {}),
+    };
 
-    if (
-      normalizedMapUrl &&
-      (
-        normalizedMapUrl !== String(existingById.map_url || "").trim() ||
-        mapListChanged
-      )
-    ) {
-
-      const {
-        data: updatedCustomer,
-        error: updateError,
-      } =
-        await supabase
-          .from("gmr_legacy_customers")
-          .update({
-            map_url:
-              normalizedMapUrl,
-            map_urls:
-              normalizedMapUrls.length > 0
-                ? normalizedMapUrls
-                : (existingById.map_urls || []),
-          })
-          .eq(
-            "id",
-            normalizedLegacyCustomerId
-          )
-          .select()
-          .single();
-
-      if (updateError) {
-        throw updateError;
-      }
-
-      customer =
-        updatedCustomer;
+    if (normalizedMapUrl) {
+      syncPatch.map_url = normalizedMapUrl;
+      syncPatch.map_urls = normalizedMapUrls.length > 0
+        ? normalizedMapUrls
+        : existingByIdMapUrls;
     }
+
+    const {
+      data: updatedCustomer,
+      error: updateError,
+    } = await supabase
+      .from("gmr_legacy_customers")
+      .update(syncPatch)
+      .eq("id", normalizedLegacyCustomerId)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    customer = updatedCustomer;
 
 
     return {
@@ -3029,54 +3052,72 @@ export async function createLegacyCustomerFromSheet({
 
 
     // ========================================
-    // DUPLICATE แต่มี map_url ใหม่
-    // → update record เดิม
+    // DUPLICATE -> sync later Sheet corrections too
+    // (rates / verified payment / contact / Map).
     // ========================================
 
     const existingMapUrls = Array.isArray(customer.map_urls)
       ? customer.map_urls.map((value) => String(value || "").trim()).filter(Boolean)
       : [];
 
-    const duplicateMapListChanged =
-      normalizedMapUrls.length > 0 &&
-      JSON.stringify(normalizedMapUrls) !== JSON.stringify(existingMapUrls);
+    const duplicateSyncPatch = {
+      ...(platform
+        ? { platform: String(platform).trim().toLowerCase() }
+        : {}),
+      ...(platformAccount
+        ? { platform_account: String(platformAccount).trim() }
+        : {}),
+      ...(businessName
+        ? { business_name: String(businessName).trim() }
+        : {}),
+      ...(phone
+        ? { phone: String(phone).trim() }
+        : {}),
+      ...(email
+        ? { email: String(email).trim() }
+        : {}),
+      ...(newReviewRate !== null && newReviewRate !== undefined && newReviewRate !== ""
+        ? {
+            new_review_rate: Number(newReviewRate),
+            new_review_currency: String(newReviewCurrency || customer.new_review_currency || "THB").trim().toUpperCase(),
+          }
+        : {}),
+      ...(oldReviewRate !== null && oldReviewRate !== undefined && oldReviewRate !== ""
+        ? {
+            old_review_rate: Number(oldReviewRate),
+            old_review_currency: String(oldReviewCurrency || customer.old_review_currency || "THB").trim().toUpperCase(),
+          }
+        : {}),
+      has_verified_payment:
+        customer.has_verified_payment === true ||
+        hasVerifiedPayment === true,
+      ...(note
+        ? { note: String(note).trim() }
+        : {}),
+    };
 
-    if (
-      normalizedMapUrl &&
-      (
-        normalizedMapUrl !== String(customer.map_url || "").trim() ||
-        duplicateMapListChanged
-      )
-    ) {
-
-      const {
-        data: updatedCustomer,
-        error: updateError,
-      } =
-        await supabase
-          .from("gmr_legacy_customers")
-          .update({
-            map_url:
-              normalizedMapUrl,
-            map_urls:
-              normalizedMapUrls.length > 0
-                ? normalizedMapUrls
-                : (customer.map_urls || []),
-          })
-          .eq(
-            "id",
-            customer.id
-          )
-          .select()
-          .single();
-
-      if (updateError) {
-        throw updateError;
-      }
-
-      customer =
-        updatedCustomer;
+    if (normalizedMapUrl) {
+      duplicateSyncPatch.map_url = normalizedMapUrl;
+      duplicateSyncPatch.map_urls = normalizedMapUrls.length > 0
+        ? normalizedMapUrls
+        : existingMapUrls;
     }
+
+    const {
+      data: updatedCustomer,
+      error: updateError,
+    } = await supabase
+      .from("gmr_legacy_customers")
+      .update(duplicateSyncPatch)
+      .eq("id", customer.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    customer = updatedCustomer;
 
 
     return {
