@@ -6015,10 +6015,151 @@ function buildDirectReviewLookupCandidates(originalUrl, resolvedUrl = null) {
   return values;
 }
 
+function extractGoogleReviewSkid(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const skid = parsed.searchParams.get("skid");
+    return skid ? String(skid).trim().toLowerCase() : null;
+  } catch {
+    const match = raw.match(/[?&]skid=([^&#]+)/i);
+    if (!match) return null;
+    try { return decodeURIComponent(match[1]).trim().toLowerCase(); }
+    catch { return String(match[1]).trim().toLowerCase(); }
+  }
+}
+
+function normalizeReviewUrlForExactMatch(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return stripGoogleTrackingParams(raw)
+    .replace(/#.*$/, "")
+    .replace(/\/$/, "")
+    .toLowerCase();
+}
+
+async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl }) {
+  const targetSkid =
+    extractGoogleReviewSkid(resolvedUrl) ||
+    extractGoogleReviewSkid(originalUrl);
+
+  const targetUrls = new Set(
+    [originalUrl, resolvedUrl]
+      .filter(Boolean)
+      .map(normalizeReviewUrlForExactMatch)
+      .filter(Boolean)
+  );
+
+  let places = [];
+  for (const mapCandidate of [originalUrl, resolvedUrl]) {
+    if (!mapCandidate) continue;
+    try {
+      places = await searchPlaceByText(mapCandidate);
+      if (Array.isArray(places) && places.length) break;
+    } catch (error) {
+      console.log("ROBUST REVIEW PLACE SEARCH FAILED:", {
+        mapCandidate,
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  const place = Array.isArray(places) ? places[0] : null;
+  const placeId = place?.placeId || place?.place_id || null;
+  if (!placeId) {
+    return { found: false, reason: "PLACE_NOT_FOUND_FOR_REVIEW_URL" };
+  }
+
+  const reviewResults = await Promise.allSettled([
+    getNewestReviews(placeId),
+    getLowestReviews(placeId),
+  ]);
+
+  const reviews = [];
+  for (const settled of reviewResults) {
+    if (settled.status !== "fulfilled") continue;
+    const rows = Array.isArray(settled.value?.reviews)
+      ? settled.value.reviews
+      : Array.isArray(settled.value)
+        ? settled.value
+        : [];
+    for (const review of rows) {
+      if (!review) continue;
+      const id = String(
+        review.reviewId ||
+        review.review_id ||
+        review.providerReviewId ||
+        review.provider_review_id ||
+        ""
+      ).trim().toLowerCase();
+      const reviewUrl = String(review.reviewUrl || review.review_url || "").trim();
+      const reviewSkid = extractGoogleReviewSkid(reviewUrl);
+      const normalizedReviewUrl = normalizeReviewUrlForExactMatch(reviewUrl);
+
+      const exactIdMatch = Boolean(targetSkid && id && id === targetSkid);
+      const exactSkidMatch = Boolean(targetSkid && reviewSkid && reviewSkid === targetSkid);
+      const exactUrlMatch = Boolean(normalizedReviewUrl && targetUrls.has(normalizedReviewUrl));
+
+      if (exactIdMatch || exactSkidMatch || exactUrlMatch) {
+        console.log("ROBUST REVIEW PLACE-LIST MATCHED:", {
+          originalUrl,
+          resolvedUrl,
+          placeId,
+          targetSkid,
+          reviewId: id || null,
+          reviewSkid: reviewSkid || null,
+          reviewUrl: reviewUrl || null,
+        });
+        return {
+          found: true,
+          review,
+          businessName: place.businessName || place.name || null,
+          reason: null,
+          lookupUrl: reviewUrl || resolvedUrl || originalUrl,
+          resolvedUrl: resolvedUrl || originalUrl,
+          matchedVia: "PLACE_LIST_EXACT",
+        };
+      }
+      reviews.push(review);
+    }
+  }
+
+  return {
+    found: false,
+    reason: targetSkid ? "REVIEW_SKID_NOT_FOUND_IN_PLACE_LISTS" : "REVIEW_NOT_FOUND_IN_PLACE_LISTS",
+    placeId,
+  };
+}
+
 async function getReviewFromDirectUrlRobust(rawUrl) {
   const originalUrl = String(rawUrl || "").trim();
   if (!originalUrl) {
     return { found: false, review: null, reason: "EMPTY_URL", lookupUrl: null, resolvedUrl: null };
+  }
+
+  let lastReason = null;
+  let lastError = null;
+
+  // First try the exact URL Sales supplied. Some provider paths understand
+  // maps.app.goo.gl directly better than the expanded Google /maps/reviews URL.
+  try {
+    const firstResult = await getReviewFromDirectUrl(originalUrl);
+    if (firstResult?.found && firstResult?.review) {
+      console.log("ROBUST REVIEW ORIGINAL URL MATCHED:", {
+        originalUrl,
+        reviewerName: firstResult.review?.reviewerName || null,
+        rating: firstResult.review?.rating || null,
+      });
+      return {
+        ...firstResult,
+        lookupUrl: originalUrl,
+        resolvedUrl: originalUrl,
+      };
+    }
+    lastReason = firstResult?.reason || lastReason;
+  } catch (error) {
+    lastError = error;
   }
 
   let resolvedUrl = null;
@@ -6031,9 +6172,8 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
     });
   }
 
-  const candidates = buildDirectReviewLookupCandidates(originalUrl, resolvedUrl);
-  let lastReason = null;
-  let lastError = null;
+  const candidates = buildDirectReviewLookupCandidates(originalUrl, resolvedUrl)
+    .filter((candidate) => candidate !== originalUrl);
 
   for (const candidate of candidates) {
     try {
@@ -6053,6 +6193,11 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
         };
       }
       lastReason = result?.reason || lastReason;
+      console.log("ROBUST REVIEW URL CANDIDATE NOT FOUND:", {
+        originalUrl,
+        candidate,
+        reason: result?.reason || null,
+      });
     } catch (error) {
       lastError = error;
       console.log("ROBUST REVIEW URL CANDIDATE FAILED:", {
@@ -6061,6 +6206,27 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
         error: error?.message || String(error),
       });
     }
+  }
+
+  // Final automatic fallback: resolve the business from the Google URL,
+  // fetch newest + lowest review lists, then match ONLY by exact skid/id/URL.
+  // We never guess from rating/text/name.
+  try {
+    const placeListResult = await getReviewFromDirectUrlViaPlaceLists({
+      originalUrl,
+      resolvedUrl,
+    });
+    if (placeListResult?.found && placeListResult?.review) {
+      return placeListResult;
+    }
+    lastReason = placeListResult?.reason || lastReason;
+  } catch (error) {
+    lastError = error;
+    console.log("ROBUST REVIEW PLACE-LIST FALLBACK FAILED:", {
+      originalUrl,
+      resolvedUrl,
+      error: error?.message || String(error),
+    });
   }
 
   return {
@@ -6546,6 +6712,13 @@ function parseV2SalesOrderText(text) {
 
   let amount = null;
   let currency = null;
+  let workTypeOverride = null;
+
+  for (const line of nonUrlLines) {
+    const typeMatch = String(line || "").toUpperCase().match(/(?:^|\s)(T0|T2)(?:\s|$)/);
+    if (typeMatch && !workTypeOverride) workTypeOverride = typeMatch[1];
+  }
+
   for (const line of nonUrlLines) {
     const match = line.replace(/,/g, "").match(/(?:ราคา\s*[:=]?\s*)?\$?\s*(\d+(?:\.\d{1,2})?)\s*(THB|USD|บาท)?/i);
     if (!match) continue;
@@ -6560,7 +6733,7 @@ function parseV2SalesOrderText(text) {
     currency = amount >= 2500 ? "THB" : "USD";
   }
 
-  return { price: amount, currency, reviewUrls };
+  return { price: amount, currency, reviewUrls, workTypeOverride };
 }
 
 function buildV2CustomerQuoteText({ customer, draft, reviewItems }) {
@@ -6617,21 +6790,53 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     const originalUrl = parsed.reviewUrls[index];
     try {
       const directResult = await getReviewFromDirectUrlRobust(originalUrl);
-      if (!directResult?.found || !directResult?.review) {
-        const reason = String(directResult?.reason || "UNKNOWN");
-        errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl} (${reason})`);
-        continue;
+
+      let review = directResult?.review || null;
+      let canonicalUrl =
+        review?.reviewUrl ||
+        directResult?.lookupUrl ||
+        directResult?.resolvedUrl ||
+        originalUrl;
+      let ageDays = review ? getReviewAgeDays(review) : null;
+      let forcedWorkType = null;
+
+      if (!directResult?.found || !review) {
+        const resolvedDirectUrl = String(directResult?.resolvedUrl || "").trim();
+        const looksLikeResolvedDirectReview =
+          /google\.[^/]+\/maps\/reviews\/data=/i.test(resolvedDirectUrl) ||
+          Boolean(extractGoogleReviewSkid(resolvedDirectUrl));
+
+        if (parsed.workTypeOverride && looksLikeResolvedDirectReview) {
+          forcedWorkType = parsed.workTypeOverride;
+          canonicalUrl = resolvedDirectUrl || originalUrl;
+          ageDays = forcedWorkType === "T0" ? 14 : 15;
+          review = {
+            reviewUrl: canonicalUrl,
+            reviewerName: null,
+            rating: null,
+            text: null,
+            reviewText: null,
+            isoDate: null,
+            reviewId: extractGoogleReviewSkid(canonicalUrl),
+          };
+          console.log("V2 SALES REVIEW MANUAL T0/T2 FALLBACK:", {
+            originalUrl,
+            canonicalUrl,
+            workType: forcedWorkType,
+            providerReason: directResult?.reason || null,
+          });
+        } else {
+          const reason = String(directResult?.reason || "UNKNOWN");
+          const suffix = looksLikeResolvedDirectReview
+            ? " — Google ยืนยันว่าเป็น direct review link แต่ Provider อ่าน metadata ไม่ได้; Reply ใหม่โดยเพิ่ม T0 หรือ T2 เช่น `3500 T2` + URL"
+            : "";
+          errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl} (${reason})${suffix}`);
+          continue;
+        }
       }
 
-      const review = directResult.review;
-      const canonicalUrl =
-        review.reviewUrl ||
-        directResult.lookupUrl ||
-        directResult.resolvedUrl ||
-        originalUrl;
-      const ageDays = getReviewAgeDays(review);
-      if (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays))) {
-        errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl}`);
+      if (!forcedWorkType && (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays)))) {
+        errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl} — Reply ใหม่โดยเพิ่ม T0 หรือ T2 เช่น 3500 T2 + URL`);
         continue;
       }
 
@@ -6660,8 +6865,8 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
         reviewText: review.text || review.reviewText || null,
         reviewDate: review.isoDate || null,
         providerReviewId: review.reviewId || null,
-        reviewAgeDays: Number(ageDays),
-        workType: Number(ageDays) <= 14 ? "T0" : "T2",
+        reviewAgeDays: forcedWorkType ? null : Number(ageDays),
+        workType: forcedWorkType || (Number(ageDays) <= 14 ? "T0" : "T2"),
         departmentId: department.id,
       });
     } catch (error) {
