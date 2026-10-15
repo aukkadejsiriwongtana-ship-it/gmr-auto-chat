@@ -6236,11 +6236,33 @@ async function handleV2NewCustomerInbound({
     }
 
     // The "choose 1 review" acknowledgement is one-time only.
-    // Once lead info has already been received, subsequent Map/Review URLs
-    // still go to Sales but stay silent in the customer chat.
-    const botReply = lead?.info_received_at
-      ? null
-      : getLeadReceivedText(customer);
+    // Guard both the durable lead flag and the conversation's last bot text.
+    // The second guard is important for customers who received the same
+    // acknowledgement before the V2 lead flag existed / was backfilled.
+    let botReply = null;
+
+    if (!lead?.info_received_at) {
+      const candidateReply =
+        getLeadReceivedText(customer);
+
+      const freshConversation =
+        await getConversationByCustomerId(
+          customer.id
+        );
+
+      const alreadySentSameAck =
+        shouldSuppressDuplicateBotReply({
+          conversation:
+            freshConversation ||
+            conversation,
+          botReply:
+            candidateReply,
+        });
+
+      if (!alreadySentSameAck) {
+        botReply = candidateReply;
+      }
+    }
 
     if (botReply) {
       await saveV2BotReply({ customer, platform, botReply });
@@ -6812,8 +6834,24 @@ const forceEnglishPage =
   normalizedPlatform === "facebook_en" ||
   normalizedPlatform === "fb_en";
 
+const isThaiFacebookPage =
+  normalizedPlatform === "facebook_th" ||
+  normalizedPlatform === "fb_th";
+
 const thaiLocked =
   existingCustomer?.language_locked === true;
+
+// URL / attachment-only payloads do not carry a reliable language signal.
+// ManyChat often forwards an image as a CDN URL, which previously caused a
+// brand-new Facebook TH customer to be detected as English.
+const languageBearingText =
+  String(message || "")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[\s\p{P}\p{S}_]+/gu, "")
+    .trim();
+
+const hasLanguageBearingText =
+  Boolean(languageBearingText);
 
 let detectedLanguage;
 
@@ -6821,7 +6859,7 @@ let detectedLanguage;
 // LANGUAGE POLICY
 //
 // Facebook EN = English 100%
-// Facebook TH = Auto detect
+// Facebook TH = Auto detect when real text exists; otherwise TH default
 // LINE        = Auto detect
 // =========================================================
 
@@ -6833,13 +6871,22 @@ if (forceEnglishPage) {
 
   detectedLanguage = "th";
 
+} else if (
+  isThaiFacebookPage &&
+  !hasLanguageBearingText
+) {
+
+  detectedLanguage =
+    existingCustomer?.language ||
+    "th";
+
 } else {
 
   detectedLanguage =
     detectCustomerLanguage(
       message,
       existingCustomer?.language ||
-        "en"
+        (isThaiFacebookPage ? "th" : "en")
     );
 }
 
