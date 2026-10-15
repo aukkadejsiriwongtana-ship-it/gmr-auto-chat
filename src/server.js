@@ -4303,9 +4303,51 @@ app.post("/telegram/webhook", async (req, res) => {
             lineUserId: actorId,
           });
           if (prepared?.ok) {
-            await reply(
-              "✅ อ่านราคาและลิงก์แล้วครับ\nระบบส่ง Preview ใหม่แล้ว กรุณาตรวจแล้ว Reply Preview ด้วยคำว่า “ยืนยันงาน” หรือ “ยกเลิก”"
+            const customerQuote = buildV2CustomerQuoteText({
+              customer: prepared.customer,
+              draft: prepared.draft,
+              reviewItems: prepared.reviewItems,
+            });
+
+            let customerQuoteSent = false;
+            let customerQuoteError = null;
+            try {
+              await sendMessageToCustomer({
+                platform: prepared.customer.platform,
+                platformUserId: prepared.customer.platform_user_id,
+                text: customerQuote,
+              });
+              await saveMessage({
+                customerId: prepared.customer.id,
+                platform: prepared.customer.platform,
+                direction: "outbound",
+                messageType: "text",
+                messageText: customerQuote,
+              });
+              await updateLastBotMessage(prepared.customer.id, customerQuote);
+              customerQuoteSent = true;
+            } catch (error) {
+              customerQuoteError = error;
+              console.error("TELEGRAM V2 CUSTOMER QUOTE FAILED:", error);
+            }
+
+            const workLines = prepared.reviewItems.map(
+              (item, index) => `${index + 1}. ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน\n   ${item.canonicalUrl}`
             );
+
+            await reply([
+              customerQuoteSent
+                ? "✅ ส่งราคาให้ลูกค้าแล้ว"
+                : "⚠️ สร้าง Draft/Preview แล้ว แต่ส่งราคาให้ลูกค้าไม่สำเร็จ",
+              `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
+              `จำนวน: ${prepared.reviewItems.length} รีวิว`,
+              "",
+              ...workLines,
+              "",
+              "ระบบจัดประเภทให้อัตโนมัติ: 1–14 วัน = T0 | มากกว่า 14 วัน = T2",
+              "เมื่อเช็กลูกค้ายืนยันแล้ว ให้ Reply Preview ด้วยคำว่า “ยืนยันงาน”",
+              customerQuoteSent ? null : `สาเหตุส่งลูกค้าไม่สำเร็จ: ${customerQuoteError?.message || "unknown"}`,
+            ].filter(Boolean).join("\n"));
           }
         } catch (error) {
           await reply([
@@ -4313,7 +4355,7 @@ app.post("/telegram/webhook", async (req, res) => {
             "",
             "วิธีง่ายที่สุด:",
             "Reply ข้อความลูกค้า แล้วพิมพ์",
-            "5500 THB",
+            "5500",
             "https://google.com/maps/reviews/...",
           ].join("\n"));
         }
@@ -4568,6 +4610,15 @@ app.post("/telegram/webhook", async (req, res) => {
     // -----------------------------------------------------
     if (quotedMessageId) {
       try {
+        // Safety: only enter the legacy price flow when the replied Telegram
+        // message is explicitly linked to that waiting_price Job. Do not use
+        // the old "single pending job" fallback because it can quote the wrong
+        // customer when a V2 Lead Card reply is malformed or not found.
+        const legacyAnchorJob = await getJobByLineGroupMessageId(quotedMessageId);
+        if (!legacyAnchorJob || legacyAnchorJob.status !== "waiting_price") {
+          return res.sendStatus(200);
+        }
+
         const priceResult = await processLineGroupPrice({
           quotedMessageId,
           text: groupText,
@@ -5849,13 +5900,17 @@ async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW
     `${label}:`,
     String(payload || "-"),
     "",
-    "Sales: คุยราคา/ตรวจลิงก์กับลูกค้าในห้องแชทเอง",
-    "เมื่อลูกค้าตกลงแล้ว ให้ Reply ข้อความนี้ แล้วส่ง:",
-    "ราคา + Review URL (วางหลายลิงก์ได้)",
+    "Sales: ตรวจราคาและเลือก Review URL ที่จะดำเนินการ",
+    "Reply ข้อความนี้ แล้วส่ง 2 บรรทัด:",
+    "ราคา",
+    "Review URL ที่จะให้เริ่มงาน (วางหลายลิงก์ได้)",
     "",
     "ตัวอย่าง:",
-    "5500 THB",
+    "5500",
     "https://google.com/maps/reviews/...",
+    "",
+    "ระบบจะตรวจอายุรีวิวและจัดแผนกให้อัตโนมัติ:",
+    "1–14 วัน = T0 | มากกว่า 14 วัน = T2",
   ].join("\n");
 
   const pushed = await pushTextToMainLineGroup(text);
@@ -6034,6 +6089,41 @@ function parseV2SalesOrderText(text) {
   }
 
   return { price: amount, currency, reviewUrls };
+}
+
+function buildV2CustomerQuoteText({ customer, draft, reviewItems }) {
+  const unitPrice = Number(draft?.price || 0);
+  const currency = String(draft?.currency || "THB").toUpperCase();
+  const count = Array.isArray(reviewItems) ? reviewItems.length : 0;
+  const priceText = currency === "THB"
+    ? `${formatMoney(unitPrice, "THB")} บาท/รีวิว`
+    : `$${formatMoney(unitPrice, "USD")} USD/รีวิว`;
+  const total = unitPrice * count;
+  const totalText = currency === "THB"
+    ? `${formatMoney(total, "THB")} บาท`
+    : `$${formatMoney(total, "USD")} USD`;
+
+  return getCustomerText(
+    customer,
+    [
+      "ตรวจสอบแล้วครับ รีวิวที่เลือกสามารถดำเนินการได้ ✅",
+      "",
+      `ราคา: ${priceText}`,
+      `จำนวน: ${count} รีวิว`,
+      count > 1 ? `รวมกรณีสำเร็จทั้งหมด: ${totalText}` : null,
+      "",
+      "หากต้องการเริ่มดำเนินการ แจ้งยืนยันในแชทได้เลยครับ",
+    ].filter(Boolean).join("\n"),
+    [
+      "Checked. The selected review(s) can be processed. ✅",
+      "",
+      `Price: ${priceText}`,
+      `Quantity: ${count} review(s)`,
+      count > 1 ? `Total if all are successful: ${totalText}` : null,
+      "",
+      "If you would like us to proceed, please confirm in this chat.",
+    ].filter(Boolean).join("\n")
+  );
 }
 
 async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null }) {
