@@ -1481,9 +1481,8 @@ async function findExistingJobForSubmittedReviewUrl(customerId, rawUrl) {
   }
 
   try {
-    const lookupUrl = resolvedUrl || originalUrl;
-    const directResult = await getReviewFromDirectUrl(lookupUrl);
-    const canonicalUrl = directResult?.review?.reviewUrl || null;
+    const directResult = await getReviewFromDirectUrlRobust(originalUrl);
+    const canonicalUrl = directResult?.review?.reviewUrl || directResult?.lookupUrl || null;
 
     if (canonicalUrl) {
       const job = await getJobByCustomerAndReviewUrl(customerId, canonicalUrl);
@@ -5950,6 +5949,130 @@ app.get("/test-supabase", async (req, res) => {
 
 
 // =========================================================
+// GLOBAL CUSTOMER PHONE CAPTURE + ROBUST REVIEW URL LOOKUP — V2.2.15
+// =========================================================
+
+function extractThaiTenDigitPhone(value) {
+  const text = String(value || "")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .trim();
+
+  if (!text) return null;
+
+  // Accept common Thai local formats such as:
+  // 0812345678 / 081-234-5678 / 081 234 5678
+  // The number must be standalone, not embedded inside a longer digit string.
+  const matches = text.match(/(?:^|[^\d])0(?:[\s-]?\d){9}(?!\d)/g) || [];
+
+  for (const match of matches) {
+    const digits = String(match || "").replace(/\D/g, "");
+    if (/^0\d{9}$/.test(digits)) return digits;
+  }
+
+  return null;
+}
+
+function thaiPhoneToE164(localPhone) {
+  const digits = String(localPhone || "").replace(/\D/g, "");
+  if (!/^0\d{9}$/.test(digits)) return null;
+  return `+66${digits.slice(1)}`;
+}
+
+function stripGoogleTrackingParams(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  try {
+    const u = new URL(raw);
+    ["g_st", "entry", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]
+      .forEach((key) => u.searchParams.delete(key));
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function buildDirectReviewLookupCandidates(originalUrl, resolvedUrl = null) {
+  const values = [];
+  const add = (value) => {
+    const safe = String(value || "").trim().replace(/[)\]}>，。、,.;]+$/g, "");
+    if (!safe) return;
+    if (!values.includes(safe)) values.push(safe);
+  };
+
+  add(normalizeInboundUrlText(originalUrl));
+  add(stripGoogleTrackingParams(normalizeInboundUrlText(originalUrl)));
+  add(resolvedUrl);
+  add(stripGoogleTrackingParams(resolvedUrl));
+
+  for (const value of [...values]) {
+    try {
+      const decoded = decodeURIComponent(value);
+      if (decoded !== value) add(decoded);
+    } catch {}
+  }
+
+  return values;
+}
+
+async function getReviewFromDirectUrlRobust(rawUrl) {
+  const originalUrl = String(rawUrl || "").trim();
+  if (!originalUrl) {
+    return { found: false, review: null, reason: "EMPTY_URL", lookupUrl: null, resolvedUrl: null };
+  }
+
+  let resolvedUrl = null;
+  try {
+    resolvedUrl = await resolveGoogleShortUrl(originalUrl);
+  } catch (error) {
+    console.error("ROBUST REVIEW URL RESOLVE FAILED:", {
+      originalUrl,
+      error: error?.message || String(error),
+    });
+  }
+
+  const candidates = buildDirectReviewLookupCandidates(originalUrl, resolvedUrl);
+  let lastReason = null;
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    try {
+      const result = await getReviewFromDirectUrl(candidate);
+      if (result?.found && result?.review) {
+        console.log("ROBUST REVIEW URL MATCHED:", {
+          originalUrl,
+          resolvedUrl,
+          lookupUrl: candidate,
+          reviewerName: result.review?.reviewerName || null,
+          rating: result.review?.rating || null,
+        });
+        return {
+          ...result,
+          lookupUrl: candidate,
+          resolvedUrl: resolvedUrl || candidate,
+        };
+      }
+      lastReason = result?.reason || lastReason;
+    } catch (error) {
+      lastError = error;
+      console.log("ROBUST REVIEW URL CANDIDATE FAILED:", {
+        originalUrl,
+        candidate,
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  return {
+    found: false,
+    review: null,
+    reason: lastReason || lastError?.message || "REVIEW_NOT_FOUND",
+    lookupUrl: null,
+    resolvedUrl,
+  };
+}
+
+// =========================================================
 // GMR CHAT V2 — HUMAN-CONTROLLED SALES FLOW
 //
 // New customer:
@@ -6094,6 +6217,11 @@ function looksLikeReviewSelectionPhrase(value) {
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const text = normalizeInboundUrlText(message).trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
+
+  // A 10-digit Thai phone number is customer contact data, never a business name.
+  if (extractThaiTenDigitPhone(text)) {
+    return { actionable: false, inputType: "PHONE", payload: null };
+  }
 
   if (looksLikeGoogleReviewUrl(text)) {
     const url = (text.match(/https?:\/\/[^\s]+/i) || [])[0] || text;
@@ -6488,20 +6616,19 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
   for (let index = 0; index < parsed.reviewUrls.length; index++) {
     const originalUrl = parsed.reviewUrls[index];
     try {
-      let lookupUrl = originalUrl;
-      try {
-        const resolved = await resolveGoogleShortUrl(originalUrl);
-        if (resolved) lookupUrl = resolved;
-      } catch {}
-
-      const directResult = await getReviewFromDirectUrl(lookupUrl);
+      const directResult = await getReviewFromDirectUrlRobust(originalUrl);
       if (!directResult?.found || !directResult?.review) {
-        errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl}`);
+        const reason = String(directResult?.reason || "UNKNOWN");
+        errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl} (${reason})`);
         continue;
       }
 
       const review = directResult.review;
-      const canonicalUrl = review.reviewUrl || lookupUrl;
+      const canonicalUrl =
+        review.reviewUrl ||
+        directResult.lookupUrl ||
+        directResult.resolvedUrl ||
+        originalUrl;
       const ageDays = getReviewAgeDays(review);
       if (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays))) {
         errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl}`);
@@ -7376,6 +7503,34 @@ let autoConfirmDirectMap =
       customer.id,
       message
     );
+  }
+
+  // =======================================================
+  // GLOBAL 10-DIGIT PHONE CAPTURE — V2.2.15
+  // Store a Thai 10-digit phone whenever the customer sends it,
+  // regardless of the current conversation state. This does not
+  // force a state transition and does not send an extra bot reply.
+  // =======================================================
+  const capturedLocalPhone = extractThaiTenDigitPhone(message);
+  if (capturedLocalPhone) {
+    const capturedPhoneE164 = thaiPhoneToE164(capturedLocalPhone);
+    if (capturedPhoneE164 && String(customer.phone || "").trim() !== capturedPhoneE164) {
+      try {
+        await updateCustomerPhone(customer.id, capturedPhoneE164);
+        customer = { ...customer, phone: capturedPhoneE164 };
+        console.log("GLOBAL CUSTOMER PHONE CAPTURED:", {
+          customerId: customer.id,
+          platform,
+          phone: capturedPhoneE164,
+        });
+      } catch (phoneCaptureError) {
+        console.error("GLOBAL CUSTOMER PHONE CAPTURE FAILED:", {
+          customerId: customer.id,
+          platform,
+          error: phoneCaptureError?.message || String(phoneCaptureError),
+        });
+      }
+    }
   }
 
   // =======================================================
@@ -8784,8 +8939,8 @@ if (
 
 
     const directReviewPreflight =
-      await getReviewFromDirectUrl(
-        reviewLookupUrl
+      await getReviewFromDirectUrlRobust(
+        detectedMapUrl
       );
 
 
@@ -8794,6 +8949,8 @@ if (
       directReviewPreflight?.review
     ) {
       directReviewResolvedUrl =
+        directReviewPreflight.lookupUrl ||
+        directReviewPreflight.resolvedUrl ||
         reviewLookupUrl;
 
       classification = {
@@ -9164,7 +9321,7 @@ const reviewUrl =
 
   try {
     directResult =
-      await getReviewFromDirectUrl(
+      await getReviewFromDirectUrlRobust(
         reviewUrl
       );
   } catch (error) {
