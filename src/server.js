@@ -19869,24 +19869,48 @@ try {
     result?.alreadySent !== true
   ) {
 
-    try {
+    let repliedWithReplyToken = false;
 
-      await sendMessageToCustomer({
-        platform:
-          "line",
+    // V2.2.18: For an immediate response to the inbound LINE webhook,
+    // prefer the reply API. Reply messages do not consume the monthly
+    // push-message quota. Keep push only as a fallback when the reply token
+    // is missing/expired or LINE rejects the reply request.
+    if (event.replyToken) {
+      try {
+        await replyLineTextMessage(
+          event.replyToken,
+          result.botReply
+        );
+        repliedWithReplyToken = true;
+        console.log(
+          "LINE REPLY RESULT SENT:",
+          { platformUserId }
+        );
+      } catch (error) {
+        console.error(
+          "LINE REPLY RESULT FAILED; FALLING BACK TO PUSH:",
+          error
+        );
+      }
+    }
 
-        platformUserId,
+    if (!repliedWithReplyToken) {
+      try {
+        await sendMessageToCustomer({
+          platform:
+            "line",
 
-        text:
-          result.botReply,
-      });
+          platformUserId,
 
-    } catch (error) {
-
-      console.error(
-        "LINE PUSH RESULT FAILED:",
-        error
-      );
+          text:
+            result.botReply,
+        });
+      } catch (error) {
+        console.error(
+          "LINE PUSH RESULT FAILED:",
+          error
+        );
+      }
     }
   }
 
