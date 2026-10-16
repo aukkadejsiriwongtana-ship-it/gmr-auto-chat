@@ -4544,6 +4544,19 @@ export async function setUnknownSalesQuestionLineMessage({
   return data;
 }
 
+export async function getUnknownSalesQuestionByLineGroupMessageId(lineGroupMessageId) {
+  if (!lineGroupMessageId) return null;
+  const { data, error } = await supabase
+    .from("gmr_sales_unknown_questions")
+    .select("*")
+    .eq("line_group_message_id", String(lineGroupMessageId))
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
 // =========================================================
 // REACTIVATION HELPERS
 // =========================================================
