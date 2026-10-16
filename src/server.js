@@ -286,6 +286,7 @@ setReactivationAlertTeamDecision,
 claimWebhookEvent,
 claimUnknownSalesQuestion,
 setUnknownSalesQuestionLineMessage,
+getUnknownSalesQuestionByLineGroupMessageId,
 getPendingReactivationAlertByCustomerId,
 updateReactivationAlertCustomerResponse,
 getCustomerMapById,
@@ -3274,6 +3275,7 @@ async function triggerHumanAttention({
     "",
     `ลูกค้า: ${customerName}`,
     `Platform: ${platformLabel}`,
+    `Customer ID: ${customer?.id || "-"}`,
     `Stage: ${stageLabel}`,
     `State: ${state}`,
     "",
@@ -4351,6 +4353,110 @@ app.use(
 
 
 // =========================================================
+// TELEGRAM UNIVERSAL CUSTOMER CONTEXT — V2.2.19
+//
+// Pricing replies are allowed only when Sales replies to a Telegram
+// message that can be tied to a real customer. This prevents price + URL
+// from ever falling through to an arbitrary pending customer.
+// =========================================================
+function extractCustomerIdFromTelegramQuotedMessage(replyMessage) {
+  const quotedText = String(
+    replyMessage?.text || replyMessage?.caption || ""
+  );
+  const match = quotedText.match(
+    /Customer\s*ID\s*:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+  );
+  return match ? match[1] : null;
+}
+
+async function resolveTelegramPricingCustomerContext({
+  quotedMessageId,
+  quotedMessage = null,
+}) {
+  if (!quotedMessageId) return null;
+
+  // 1) Canonical Sales Lead Card.
+  const leadCard = await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
+  if (leadCard?.customer_id) {
+    return {
+      customerId: leadCard.customer_id,
+      leadCard,
+      source: "sales_lead_card",
+    };
+  }
+
+  // 2) Human-attention / unknown-question cards are already durably linked
+  // to the customer in gmr_sales_unknown_questions. This also fixes older
+  // Telegram cards that were created before Customer ID was shown in text.
+  const unknownQuestion =
+    await getUnknownSalesQuestionByLineGroupMessageId(quotedMessageId);
+  if (unknownQuestion?.customer_id) {
+    return {
+      customerId: unknownQuestion.customer_id,
+      leadCard: {
+        id: null,
+        customer_id: unknownQuestion.customer_id,
+        payload: unknownQuestion.message_text || null,
+        input_type: "HUMAN_ATTENTION",
+      },
+      source: "human_attention",
+    };
+  }
+
+  // 3) Existing Job-linked Sales cards.
+  const job = await getJobByLineGroupMessageId(quotedMessageId);
+  if (job?.customer_id) {
+    return {
+      customerId: job.customer_id,
+      leadCard: {
+        id: null,
+        customer_id: job.customer_id,
+        payload: job.review_url || job.map_url || null,
+        input_type: "JOB_CONTEXT",
+      },
+      source: "job_context",
+    };
+  }
+
+  // 4) Reactivation alert cards.
+  const reactivation =
+    await getReactivationAlertByLineGroupMessageId(quotedMessageId);
+  if (reactivation?.customer_id) {
+    return {
+      customerId: reactivation.customer_id,
+      leadCard: {
+        id: null,
+        customer_id: reactivation.customer_id,
+        payload: reactivation.review_url || null,
+        input_type: "REACTIVATION_CONTEXT",
+      },
+      source: "reactivation",
+    };
+  }
+
+  // 5) Text fallback for bot cards that visibly include Customer ID.
+  const embeddedCustomerId =
+    extractCustomerIdFromTelegramQuotedMessage(quotedMessage);
+  if (embeddedCustomerId) {
+    const customer = await getCustomerById(embeddedCustomerId);
+    if (customer?.id) {
+      return {
+        customerId: customer.id,
+        leadCard: {
+          id: null,
+          customer_id: customer.id,
+          payload: null,
+          input_type: "TELEGRAM_CUSTOMER_ID",
+        },
+        source: "embedded_customer_id",
+      };
+    }
+  }
+
+  return null;
+}
+
+// =========================================================
 // TELEGRAM INTERNAL WEBHOOK — SALES REPLY FLOW
 // =========================================================
 app.post("/telegram/webhook", async (req, res) => {
@@ -4415,6 +4521,14 @@ app.post("/telegram/webhook", async (req, res) => {
       ? String(msg.reply_to_message.message_id)
       : null;
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
+
+    console.log("TELEGRAM SALES INBOUND:", {
+      chatId,
+      messageId: String(msg.message_id || ""),
+      quotedMessageId,
+      actorId,
+      text: groupText.slice(0, 500),
+    });
 
     const reply = async (text) =>
       replyTelegramInternal(chatId, msg.message_id, text);
@@ -4528,71 +4642,123 @@ app.post("/telegram/webhook", async (req, res) => {
         }
       }
 
-      // Reply Lead Card -> price + review links -> START IMMEDIATELY
-      // The Sales reply itself is the final approval for this new/manual lead.
-      // No second "ยืนยันงาน" step is required here.
-      const leadCard = await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
-      if (leadCard) {
-        try {
-          const prepared = await prepareV2SalesOrderDraft({
-            leadCard,
-            groupText,
-            lineUserId: actorId,
-            skipPreview: true,
-          });
+      // UNIVERSAL REPLY PRICING — V2.2.19
+      // Sales may Reply price + Review URL under any known customer-context
+      // bot card (Lead Card, Human Attention, Job card, Reactivation card).
+      // We never fall back to a random/pending customer.
+      const directLeadCard =
+        await getSalesLeadCardByLineGroupMessageId(quotedMessageId);
+      const pricingParsed = parseV2SalesOrderText(groupText);
+      const looksLikePricingCommand = Boolean(
+        Number.isFinite(pricingParsed.price) &&
+        pricingParsed.price > 0 &&
+        pricingParsed.reviewUrls.length > 0
+      );
 
-          if (prepared?.ok) {
-            const confirmed = await confirmV2SalesOrderDraft(prepared.draft);
-            const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
-            const workLines = prepared.reviewItems.map(
-              (item, index) => `${index + 1}. ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน\n   ${item.canonicalUrl}`
-            );
-
-            console.log("V2 LEAD START COMMITTED:", {
-              draftId: prepared.draft.id,
-              customerId: confirmed.customer?.id || null,
-              jobIds: confirmed.startedJobs.map((job) => job.id),
-              customerNotifyOk: confirmed.customerNotifyOk,
-              failedSheetCount: failedSheets.length,
+      if (directLeadCard || looksLikePricingCommand) {
+        const pricingContext = directLeadCard
+          ? {
+              customerId: directLeadCard.customer_id,
+              leadCard: directLeadCard,
+              source: "sales_lead_card",
+            }
+          : await resolveTelegramPricingCustomerContext({
+              quotedMessageId,
+              quotedMessage: msg.reply_to_message,
             });
 
+        if (pricingContext?.leadCard?.customer_id) {
+          console.log("TELEGRAM UNIVERSAL PRICING CONTEXT:", {
+            quotedMessageId,
+            customerId: pricingContext.customerId,
+            source: pricingContext.source,
+            reviewCount: pricingParsed.reviewUrls.length,
+            price: pricingParsed.price,
+            currency: pricingParsed.currency,
+          });
+
+          try {
+            const prepared = await prepareV2SalesOrderDraft({
+              leadCard: pricingContext.leadCard,
+              groupText,
+              lineUserId: actorId,
+              skipPreview: true,
+            });
+
+            if (prepared?.ok) {
+              const confirmed = await confirmV2SalesOrderDraft(prepared.draft);
+              const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
+              const workLines = prepared.reviewItems.map(
+                (item, index) => `${index + 1}. ${item.workType} | ${
+                  item.reviewAgeDays === null || item.reviewAgeDays === undefined
+                    ? "Sales ระบุประเภทเอง"
+                    : `อายุประมาณ ${item.reviewAgeDays} วัน`
+                }\n   ${item.canonicalUrl}`
+              );
+
+              console.log("V2 LEAD START COMMITTED:", {
+                draftId: prepared.draft.id,
+                customerId: confirmed.customer?.id || null,
+                contextSource: pricingContext.source,
+                jobIds: confirmed.startedJobs.map((job) => job.id),
+                customerNotifyOk: confirmed.customerNotifyOk,
+                failedSheetCount: failedSheets.length,
+              });
+
+              try {
+                await reply([
+                  "✅ รับงานและเริ่มดำเนินการแล้ว",
+                  `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
+                  `Platform: ${getPlatformLabel(confirmed.customer)}`,
+                  `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
+                  `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
+                  `Context: ${pricingContext.source}`,
+                  "",
+                  ...workLines,
+                  "",
+                  confirmed.customerNotifyOk
+                    ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
+                    : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+                  failedSheets.length === 0
+                    ? "✅ ลง Sheet ครบแล้ว"
+                    : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+                  "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+                ].join("\n"));
+              } catch (ackError) {
+                console.error("TELEGRAM V2 LEAD START ACK FAILED — JOB ALREADY COMMITTED:", ackError);
+              }
+            }
+          } catch (error) {
+            console.error("TELEGRAM V2 LEAD START FAILED:", error);
             try {
               await reply([
-                "✅ รับงานและเริ่มดำเนินการแล้ว",
-                `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
-                `Platform: ${getPlatformLabel(confirmed.customer)}`,
-                `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
-                `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
+                `❌ รับงาน/เริ่มงานไม่สำเร็จ: ${error.message}`,
                 "",
-                ...workLines,
-                "",
-                confirmed.customerNotifyOk
-                  ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
-                  : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
-                failedSheets.length === 0
-                  ? "✅ ลง Sheet ครบแล้ว"
-                  : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
-                "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
+                "รูปแบบที่ถูกต้อง:",
+                "5500",
+                "https://google.com/maps/reviews/...",
               ].join("\n"));
-            } catch (ackError) {
-              console.error("TELEGRAM V2 LEAD START ACK FAILED — JOB ALREADY COMMITTED:", ackError);
+            } catch (replyError) {
+              console.error("TELEGRAM V2 LEAD START ERROR REPLY FAILED:", replyError);
             }
           }
-        } catch (error) {
-          console.error("TELEGRAM V2 LEAD START FAILED:", error);
-          try {
-            await reply([
-              `❌ รับงาน/เริ่มงานไม่สำเร็จ: ${error.message}`,
-              "",
-              "รูปแบบที่ถูกต้อง:",
-              "5500",
-              "https://google.com/maps/reviews/...",
-            ].join("\n"));
-          } catch (replyError) {
-            console.error("TELEGRAM V2 LEAD START ERROR REPLY FAILED:", replyError);
-          }
+          return res.sendStatus(200);
         }
-        return res.sendStatus(200);
+
+        // A syntactically valid price+URL was Reply'd, but the quoted bot
+        // message has no safe customer mapping. Never guess the customer.
+        if (looksLikePricingCommand) {
+          console.warn("TELEGRAM UNIVERSAL PRICING CONTEXT NOT FOUND:", {
+            quotedMessageId,
+            actorId,
+          });
+          await reply([
+            "⚠️ พบราคา + Review URL แต่ระบุลูกค้าจากข้อความที่ Reply ไม่ได้",
+            "ระบบยังไม่สร้าง Job และยังไม่ส่งข้อความหาลูกค้า",
+            "กรุณา Reply ใต้ข้อความของ GMR Internal Bot ที่เกี่ยวกับลูกค้าคนนั้นโดยตรง",
+          ].join("\n"));
+          return res.sendStatus(200);
+        }
       }
     }
 
