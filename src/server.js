@@ -4649,9 +4649,9 @@ async function resolveTelegramPricingCustomerContext({
 }
 
 // =========================================================
-// TELEGRAM T2 — ON-DEMAND ACTIVE REVIEW CHECK
+// TELEGRAM T0 / T2 — ON-DEMAND ACTIVE REVIEW CHECK
 //
-// Command in TELEGRAM_T2_CHAT_ID:
+// Command in TELEGRAM_T0_CHAT_ID or TELEGRAM_T2_CHAT_ID:
 //   check
 //
 // Behavior:
@@ -4659,7 +4659,7 @@ async function resolveTelegramPricingCustomerContext({
 // - uses the direct Google Review URL only (NO SerpApi)
 // - always bypasses the 10-minute direct-page cache for a fresh manual check
 // - suspected removals are NOT charged automatically
-// - each newly/persistently suspected removal gets a T2 confirmation card
+// - each newly/persistently suspected removal gets a department confirmation card
 // - Reply "อนุมัติ" to that card => existing waiting-payment/customer collection flow
 // - Reply "ยังอยู่" => reset and keep monitoring
 // =========================================================
@@ -4767,7 +4767,12 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
       lookup = await getReviewFromDirectUrl(reviewUrl, { force: true });
     } catch (error) {
       errorCount += 1;
-      errors.push({ jobId: job.id, reviewUrl, error: error?.message || String(error) });
+      errors.push({
+        jobId: job.id,
+        businessName: job?.business_name || "",
+        reviewUrl,
+        error: error?.message || String(error),
+      });
       console.error(`TELEGRAM ${targetCode} MANUAL CHECK LOOKUP ERROR:`, {
         jobId: job.id,
         error: error?.message || String(error),
@@ -4792,7 +4797,12 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
           });
         } catch (resetError) {
           errorCount += 1;
-          errors.push({ jobId: job.id, reviewUrl, error: resetError?.message || String(resetError) });
+          errors.push({
+            jobId: job.id,
+            businessName: job?.business_name || "",
+            reviewUrl,
+            error: resetError?.message || String(resetError),
+          });
         }
       } else {
         await updateJob(job.id, {
@@ -4816,6 +4826,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
       errorCount += 1;
       errors.push({
         jobId: job.id,
+        businessName: job?.business_name || "",
         reviewUrl,
         error: reason || "DIRECT_REVIEW_CHECK_INCONCLUSIVE",
       });
@@ -4823,7 +4834,11 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     }
 
     suspectedRemovedCount += 1;
-    suspected.push({ jobId: job.id, reviewUrl });
+    suspected.push({
+      jobId: job.id,
+      businessName: job?.business_name || "",
+      reviewUrl,
+    });
 
     let removalBatchId = String(job?.removal_detection_batch_id || "").trim() || null;
     if (Number(job?.review_missing_count || 0) < 1) {
@@ -4900,12 +4915,63 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   if (suspected.length > 0) {
     lines.push(
       "",
-      "รายการที่พบว่าอาจออกแล้วถูกส่งเป็นการ์ดแยกด้านบน",
+      "รายการที่พบว่าอาจออกแล้วถูกส่งเป็นการ์ดแยกเพื่อให้ Reply ยืนยัน",
       'Reply การ์ดด้วย "อนุมัติ" หรือ "ยังอยู่" เพื่อยืนยันผล'
     );
   }
 
   await replyTelegramInternal(chatId, triggerMessageId, lines.join("\n"));
+
+  // V2.2.30 — send explicit result lists for BOTH T0 and T2.
+  // Keep the list separate from the summary so Telegram's 4096-char limit
+  // cannot silently truncate a large result set. Confirmation cards remain
+  // separate because operators must Reply to the exact card to approve/reset.
+  const sendResultList = async ({ title, items, includeReason = false }) => {
+    if (!Array.isArray(items) || items.length === 0) {
+      await sendTelegramText({
+        chatId,
+        text: `${title}\nไม่มี`,
+      });
+      return;
+    }
+
+    const chunks = [];
+    let current = `${title}\n`;
+
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index] || {};
+      const entry = [
+        "",
+        `${index + 1}. ${item.businessName || "-"}`,
+        item.reviewUrl || "-",
+        includeReason ? `เหตุผล: ${item.error || "ตรวจไม่ชัดเจน"}` : null,
+      ].filter(Boolean).join("\n") + "\n";
+
+      if ((current + entry).length > 3800 && current.trim() !== title.trim()) {
+        chunks.push(current.trim());
+        current = `${title} (ต่อ)\n${entry}`;
+      } else {
+        current += entry;
+      }
+    }
+
+    if (current.trim()) chunks.push(current.trim());
+
+    for (const chunk of chunks) {
+      await sendTelegramText({ chatId, text: chunk });
+    }
+  };
+
+  await sendResultList({
+    title: `🚨 ${targetCode} — ลิงก์ที่ระบบพบว่ารีวิวไม่แสดง / รอยืนยัน (${suspected.length})`,
+    items: suspected,
+  });
+
+  await sendResultList({
+    title: `⚠️ ${targetCode} — ลิงก์ที่ตรวจไม่ได้ / ผลไม่ชัดเจน (${errors.length})`,
+    items: errors,
+    includeReason: true,
+  });
 
   console.log(`TELEGRAM ${targetCode} MANUAL CHECK COMPLETE:`, {
     monitorVersion,
