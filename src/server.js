@@ -4663,7 +4663,7 @@ async function resolveTelegramPricingCustomerContext({
 // - Reply "อนุมัติ" to that card => existing waiting-payment/customer collection flow
 // - Reply "ยังอยู่" => reset and keep monitoring
 // =========================================================
-let telegramT2ManualCheckRunning = false;
+const telegramDepartmentManualCheckRunning = new Set();
 
 async function getMonitoringJobsForDepartmentCode(departmentCode) {
   const targetCode = String(departmentCode || "").trim().toUpperCase();
@@ -4692,7 +4692,7 @@ async function getMonitoringJobsForDepartmentCode(departmentCode) {
   return matched;
 }
 
-async function sendTelegramT2RemovalConfirmation({ chatId, job, customer, reviewUrl }) {
+async function sendTelegramRemovalConfirmation({ chatId, departmentCode, job, customer, reviewUrl }) {
   const currency = String(job?.currency || "THB").toUpperCase();
   const price = Number(job?.price || 0);
   const priceText = price > 0
@@ -4704,7 +4704,7 @@ async function sendTelegramT2RemovalConfirmation({ chatId, job, customer, review
   const pushed = await sendTelegramText({
     chatId,
     text: [
-      "🚨 T2 — พบรีวิวอาจออกแล้ว / รอยืนยัน",
+      `🚨 ${departmentCode} — พบรีวิวอาจออกแล้ว / รอยืนยัน`,
       "",
       `Customer: ${customer?.display_name || "-"}`,
       `Business: ${job?.business_name || "-"}`,
@@ -4728,9 +4728,14 @@ async function sendTelegramT2RemovalConfirmation({ chatId, job, customer, review
   return pushed;
 }
 
-async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
-  const monitorVersion = "TELEGRAM_T2_CHECK_V1_20261017";
-  const jobs = await getMonitoringJobsForDepartmentCode("T2");
+async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, departmentCode }) {
+  const targetCode = String(departmentCode || "").trim().toUpperCase();
+  if (!["T0", "T2"].includes(targetCode)) {
+    throw new Error(`Unsupported department for manual check: ${targetCode || "-"}`);
+  }
+
+  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V2_20261017`;
+  const jobs = await getMonitoringJobsForDepartmentCode(targetCode);
   const monitorRunId = crypto.randomUUID();
   const monitorRunStartedAt = new Date().toISOString();
   let removalKpiBatchCreated = false;
@@ -4742,7 +4747,7 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
   const suspected = [];
   const errors = [];
 
-  console.log("TELEGRAM T2 MANUAL CHECK START:", {
+  console.log(`TELEGRAM ${targetCode} MANUAL CHECK START:`, {
     monitorVersion,
     monitorRunId,
     jobCount: jobs.length,
@@ -4763,7 +4768,7 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
     } catch (error) {
       errorCount += 1;
       errors.push({ jobId: job.id, reviewUrl, error: error?.message || String(error) });
-      console.error("TELEGRAM T2 MANUAL CHECK LOOKUP ERROR:", {
+      console.error(`TELEGRAM ${targetCode} MANUAL CHECK LOOKUP ERROR:`, {
         jobId: job.id,
         error: error?.message || String(error),
       });
@@ -4849,7 +4854,7 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
           paidAt: "",
         });
       } catch (sheetError) {
-        console.error("TELEGRAM T2 MANUAL CHECK SHEET UPDATE FAILED:", {
+        console.error(`TELEGRAM ${targetCode} MANUAL CHECK SHEET UPDATE FAILED:`, {
           jobId: job.id,
           error: sheetError?.message || String(sheetError),
         });
@@ -4862,14 +4867,15 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
 
     try {
       const customer = await getCustomerById(job.customer_id);
-      await sendTelegramT2RemovalConfirmation({
+      await sendTelegramRemovalConfirmation({
         chatId,
+        departmentCode: targetCode,
         job,
         customer,
         reviewUrl,
       });
     } catch (alertError) {
-      console.error("TELEGRAM T2 MANUAL CHECK ALERT FAILED:", {
+      console.error(`TELEGRAM ${targetCode} MANUAL CHECK ALERT FAILED:`, {
         jobId: job.id,
         error: alertError?.message || String(alertError),
       });
@@ -4880,9 +4886,9 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
   }
 
   const lines = [
-    "✅ T2 CHECK เสร็จแล้ว",
+    `✅ ${targetCode} CHECK เสร็จแล้ว`,
     "",
-    `งาน T2 ที่ตรวจ: ${jobs.length} ลิงก์`,
+    `งาน ${targetCode} ที่ตรวจ: ${jobs.length} ลิงก์`,
     `ยังอยู่: ${visibleCount} ลิงก์`,
     `🚨 พบว่าอาจออกแล้ว: ${suspectedRemovedCount} ลิงก์`,
     `ตรวจไม่ได้/ไม่ชัดเจน: ${errorCount} ลิงก์`,
@@ -4901,7 +4907,7 @@ async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
 
   await replyTelegramInternal(chatId, triggerMessageId, lines.join("\n"));
 
-  console.log("TELEGRAM T2 MANUAL CHECK COMPLETE:", {
+  console.log(`TELEGRAM ${targetCode} MANUAL CHECK COMPLETE:`, {
     monitorVersion,
     checked: jobs.length,
     visibleCount,
@@ -4984,49 +4990,52 @@ app.post("/telegram/webhook", async (req, res) => {
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
     // -----------------------------------------------------
-    // T2 ON-DEMAND REVIEW MONITOR
+    // T0 / T2 ON-DEMAND REVIEW MONITOR
     // -----------------------------------------------------
-    if (chatId === t2ChatId) {
+    if (chatId === t0ChatId || chatId === t2ChatId) {
+      const departmentCode = chatId === t0ChatId ? "T0" : "T2";
+
       if (normalizedGroupText === "check") {
-        if (telegramT2ManualCheckRunning) {
+        if (telegramDepartmentManualCheckRunning.has(departmentCode)) {
           await replyTelegramInternal(
             chatId,
             msg.message_id,
-            "⏳ T2 กำลังตรวจอยู่แล้วครับ รอผลรอบปัจจุบันก่อน"
+            `⏳ ${departmentCode} กำลังตรวจอยู่แล้วครับ รอผลรอบปัจจุบันก่อน`
           );
           return res.sendStatus(200);
         }
 
-        telegramT2ManualCheckRunning = true;
+        telegramDepartmentManualCheckRunning.add(departmentCode);
 
         await replyTelegramInternal(
           chatId,
           msg.message_id,
-          "🔎 เริ่มตรวจงาน T2 ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Direct Google Review โดยตรง และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ"
+          `🔎 เริ่มตรวจงาน ${departmentCode} ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Direct Google Review โดยตรง และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ`
         );
 
-        // Acknowledge Telegram immediately. The scan can take time when T2 has
-        // many active jobs, so run it after the webhook response is closed.
+        // Acknowledge Telegram immediately. The scan can take time when there
+        // are many active jobs, so run it after the webhook response is closed.
         res.sendStatus(200);
 
-        void runTelegramT2ManualCheck({
+        void runTelegramDepartmentManualCheck({
           chatId,
           triggerMessageId: msg.message_id,
+          departmentCode,
         })
           .catch(async (error) => {
-            console.error("TELEGRAM T2 MANUAL CHECK FAILED:", error);
+            console.error(`TELEGRAM ${departmentCode} MANUAL CHECK FAILED:`, error);
             try {
               await replyTelegramInternal(
                 chatId,
                 msg.message_id,
-                `❌ T2 CHECK ไม่สำเร็จ: ${error?.message || String(error)}`
+                `❌ ${departmentCode} CHECK ไม่สำเร็จ: ${error?.message || String(error)}`
               );
             } catch (replyError) {
-              console.error("TELEGRAM T2 MANUAL CHECK ERROR REPLY FAILED:", replyError);
+              console.error(`TELEGRAM ${departmentCode} MANUAL CHECK ERROR REPLY FAILED:`, replyError);
             }
           })
           .finally(() => {
-            telegramT2ManualCheckRunning = false;
+            telegramDepartmentManualCheckRunning.delete(departmentCode);
           });
 
         return;
@@ -5034,7 +5043,7 @@ app.post("/telegram/webhook", async (req, res) => {
 
       if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
         try {
-          const monitoringJobs = await getMonitoringJobsForDepartmentCode("T2");
+          const monitoringJobs = await getMonitoringJobsForDepartmentCode(departmentCode);
           const removalJob = (monitoringJobs || []).find(
             (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
           );
@@ -5043,7 +5052,7 @@ app.post("/telegram/webhook", async (req, res) => {
             await replyTelegramInternal(
               chatId,
               msg.message_id,
-              "⚠️ ไม่พบงาน T2 ที่ผูกกับข้อความนี้ หรือรายการนี้ถูกยืนยันไปแล้ว"
+              `⚠️ ไม่พบงาน ${departmentCode} ที่ผูกกับข้อความนี้ หรือรายการนี้ถูกยืนยันไปแล้ว`
             );
             return res.sendStatus(200);
           }
@@ -5062,16 +5071,16 @@ app.post("/telegram/webhook", async (req, res) => {
             msg.message_id,
             value === "CONFIRM_REMOVED"
               ? [
-                  "✅ ยืนยันว่ารีวิวออกแล้ว",
+                  `✅ ${departmentCode}: ยืนยันว่ารีวิวออกแล้ว`,
                   "ระบบส่งงานเข้า Flow เก็บเงินเรียบร้อย",
                   result?.customerNotified === false
                     ? "⚠️ งานถูกยืนยันแล้ว แต่ยังไม่ได้ส่งข้อความเก็บเงินอัตโนมัติ กรุณาตรวจสถานะลูกค้า"
                     : "แจ้งลูกค้าเก็บเงินตาม Flow แล้ว",
                 ].join("\n")
-              : "✅ ยืนยันว่ารีวิวยังอยู่ ระบบ Reset และจะตรวจต่อในรอบถัดไป"
+              : `✅ ${departmentCode}: ยืนยันว่ารีวิวยังอยู่ ระบบ Reset และจะตรวจต่อในรอบถัดไป`
           );
         } catch (error) {
-          console.error("TELEGRAM T2 REMOVAL CONFIRM FAILED:", error);
+          console.error(`TELEGRAM ${departmentCode} REMOVAL CONFIRM FAILED:`, error);
           await replyTelegramInternal(
             chatId,
             msg.message_id,
@@ -5082,11 +5091,11 @@ app.post("/telegram/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // T2 remains dispatch-only apart from the explicit monitor commands above.
+      // Department groups are dispatch-only apart from the explicit monitor commands above.
       return res.sendStatus(200);
     }
 
-    // T0 remains dispatch-only. Interactive business commands belong to Sales.
+    // Interactive business commands belong to Sales.
     if (chatId !== salesChatId) return res.sendStatus(200);
 
     console.log("TELEGRAM SALES INBOUND:", {
