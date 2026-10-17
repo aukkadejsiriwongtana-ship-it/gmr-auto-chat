@@ -1,5 +1,5 @@
 // =========================================================
-// GMR REVIEW PROVIDER V2.2.25 — SERPAPI COST CONTROL
+// GMR REVIEW PROVIDER V2.2.27 — T2 TELEGRAM ON-DEMAND CHECK
 //
 // Rules:
 // 1) Direct review URL / T0-T2 / active-job monitor = Google direct page only.
@@ -305,14 +305,14 @@ function readMetaFromHtml(html, propertyName) {
   return null;
 }
 
-async function fetchDirectReviewMeta(reviewUrl) {
+async function fetchDirectReviewMeta(reviewUrl, { force = false } = {}) {
   const inputUrl = normalizeInboundUrl(reviewUrl);
   if (!/^https?:\/\//i.test(inputUrl)) {
     throw makeError("Invalid review URL", "INVALID_REVIEW_URL");
   }
 
   const cached = directMetaCache.get(inputUrl);
-  if (cached && Date.now() - cached.cachedAt < DIRECT_META_TTL_MS) {
+  if (!force && cached && Date.now() - cached.cachedAt < DIRECT_META_TTL_MS) {
     return cached.value;
   }
 
@@ -425,7 +425,7 @@ async function fetchDirectReviewMeta(reviewUrl) {
 // DIRECT REVIEW URL — FREE PATH (NO SERPAPI)
 // =========================================================
 
-export async function getReviewFromDirectUrl(reviewUrl) {
+export async function getReviewFromDirectUrl(reviewUrl, { force = false } = {}) {
   const inputUrl = normalizeInboundUrl(reviewUrl);
   if (!inputUrl) {
     return {
@@ -436,7 +436,7 @@ export async function getReviewFromDirectUrl(reviewUrl) {
     };
   }
 
-  const meta = await fetchDirectReviewMeta(inputUrl);
+  const meta = await fetchDirectReviewMeta(inputUrl, { force });
   if (!meta) {
     return {
       found: false,
@@ -679,7 +679,7 @@ export async function getReactivationNewestReviews(placeId) {
 
 function blockedGenericSerpApiCall(name) {
   throw makeError(
-    `${name} is disabled in V2.2.25. SerpApi is reserved for reactivation map watch only.`,
+    `${name} is disabled in V2.2.27. SerpApi is reserved for reactivation map watch only.`,
     "SERPAPI_GENERIC_FLOW_DISABLED"
   );
 }
