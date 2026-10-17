@@ -6502,7 +6502,7 @@ function extractReviewAgeDaysNearIdentityFromHtml(html, ...urlValues) {
         const window = haystack
           .slice(start, end)
           .replace(/<script[^>]*>/gi, " ")
-          .replace(/<\\/script>/gi, " ")
+          .replace(/<\/script>/gi, " ")
           .replace(/<[^>]+>/g, " ")
           .replace(/[\\[\\]{}(),]/g, " ")
           .replace(/\\s+/g, " ");
