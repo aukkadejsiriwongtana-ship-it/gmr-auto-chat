@@ -1029,7 +1029,7 @@ function extractGoogleMapsUrl(
 
   const match =
     text.match(
-      /https?:\/\/(?:www\.)?(?:maps\.google\.com|google\.[^\s/]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps)\/?[^\s]*/i
+      /https?:\/\/(?:www\.)?(?:maps\.google\.com|google\.[^\s/]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps|share\.google)\/?[^\s]*/i
     );
 
   return match
@@ -6115,7 +6115,8 @@ app.get("/test-supabase", async (req, res) => {
 
 
 // =========================================================
-// GLOBAL CUSTOMER PHONE CAPTURE + ROBUST REVIEW URL LOOKUP — V2.2.17
+// GLOBAL CUSTOMER PHONE CAPTURE + ROBUST REVIEW URL LOOKUP — V2.2.20
+// V2.2.20: accept share.google short links end-to-end.
 // =========================================================
 
 function extractThaiTenDigitPhone(value) {
@@ -6698,8 +6699,15 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
 
 function looksLikeGoogleReviewUrl(value) {
   const text = normalizeInboundUrlText(value).trim();
+
+  // Only classify URL shapes that are intrinsically review-specific here.
+  // share.google/<token> is intentionally NOT forced to REVIEW_URL because
+  // Google also uses that host for normal place/map shares. It is accepted
+  // by extractGoogleMapsUrl() as MAP_URL first, then the existing robust
+  // preflight resolves the redirect and upgrades it to REVIEW_URL when the
+  // destination is actually a direct review.
   return /https?:\/\/[^\s]*google[^\s]*\/maps\/reviews/i.test(text) ||
-    /https?:\/\/maps\.app\.goo\.gl\/[^\s]+/i.test(text) && /review/i.test(text);
+    (/https?:\/\/maps\.app\.goo\.gl\/[^\s]+/i.test(text) && /review/i.test(text));
 }
 
 function looksLikeGenericGmrServiceInquiry(value) {
@@ -7130,6 +7138,7 @@ function parseV2SalesOrderText(text) {
   // - google.<tld>/maps/place/...
   // - maps.app.goo.gl/...
   // - goo.gl/maps/...
+  // - share.google/... (Google's newer share-link host)
   // The next stage (getReviewFromDirectUrl) remains the authority that
   // verifies whether the URL actually resolves to a specific review.
   const isPotentialGoogleMapsUrl = (url) => {
@@ -7137,6 +7146,7 @@ function parseV2SalesOrderText(text) {
     if (!value) return false;
     if (/^https?:\/\/maps\.app\.goo\.gl\//i.test(value)) return true;
     if (/^https?:\/\/(?:www\.)?goo\.gl\/maps\//i.test(value)) return true;
+    if (/^https?:\/\/(?:www\.)?share\.google\//i.test(value)) return true;
     if (/^https?:\/\/(?:www\.)?google\.[^/]+\/maps(?:[/?#]|$)/i.test(value)) return true;
     return false;
   };
