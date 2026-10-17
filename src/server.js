@@ -7259,7 +7259,7 @@ async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW
     String(payload || "-"),
     "",
     "ตัวอย่าง:",
-    "5500 t0",
+    "5500",
     "https://google.com/maps/reviews/...",
     "",
     "REPLY ราคาเมื่อลูกค้ายืนยันแล้วเท่านั้น:",
@@ -22320,7 +22320,7 @@ if (!businessName) {
 // ห้ามแจ้งทีมจากรีวิวเก่าที่มีอยู่ก่อนเริ่มระบบ
 //
 // รอบถัดไป:
-// - เช็กเฉพาะ Map ที่ครบ 3 วัน
+// - เช็กเฉพาะ Map ที่ครบ 6 วัน
 // - เอาเฉพาะ 1 ดาว
 // - เอาเฉพาะ review ที่ใหม่กว่า last_checked_at
 // - กัน review/job เดิม
@@ -22354,8 +22354,46 @@ app.post(
 
       const results = [];
 
-      // V2.2.25: default 5 maps per run. If this endpoint runs once daily,
-      // the watcher uses at most about 150 SerpApi searches/month.
+      // V2.2.26: Reactivation interval is enforced here so the older
+      // repository query can stay compatible even if it still returns
+      // maps that have been unchecked for only 3 days.
+      const reactivationIntervalDays = Math.max(
+        1,
+        Number(
+          process.env.REACTIVATION_CHECK_INTERVAL_DAYS ||
+          6
+        )
+      );
+
+      const reactivationIntervalMs =
+        reactivationIntervalDays * 24 * 60 * 60 * 1000;
+
+      const nowMs = Date.now();
+
+      const mapsDueByInterval = maps.filter(
+        (customerMap) => {
+          // New map: allow one baseline check immediately.
+          if (!customerMap?.last_checked_at) {
+            return true;
+          }
+
+          const lastCheckedMs = new Date(
+            customerMap.last_checked_at
+          ).getTime();
+
+          if (!Number.isFinite(lastCheckedMs)) {
+            return true;
+          }
+
+          return (
+            nowMs - lastCheckedMs >=
+            reactivationIntervalMs
+          );
+        }
+      );
+
+      // Default 5 maps per run. With the 6-day interval, one map
+      // normally consumes about 5 SerpApi searches/month.
       const maxMapsPerRun = Math.max(
         1,
         Number(
@@ -22364,7 +22402,10 @@ app.post(
         )
       );
 
-      const mapsToCheck = maps.slice(0, maxMapsPerRun);
+      const mapsToCheck = mapsDueByInterval.slice(
+        0,
+        maxMapsPerRun
+      );
 
       for (const customerMap of mapsToCheck) {
         try {
