@@ -135,6 +135,84 @@ export async function appendDispatchJobToGoogleSheet({
   });
 }
 
+// =========================================================
+// ACTIVE DEPARTMENT SHEET UPDATE
+// Used when a removal is human-confirmed but payment is still pending.
+// The row stays in T0_ACTIVE/T2_ACTIVE, only its status/removed time changes.
+// =========================================================
+export async function updateDispatchJobInGoogleSheet({
+  sheetName,
+  jobId,
+  status,
+  removedAt = "",
+}) {
+  if (!sheetName) {
+    throw new Error(
+      "Missing sheetName in updateDispatchJobInGoogleSheet"
+    );
+  }
+
+  if (!jobId) {
+    throw new Error(
+      "Missing jobId in updateDispatchJobInGoogleSheet"
+    );
+  }
+
+  return postToSheet({
+    action: "dispatch_update",
+    sheetName,
+    jobId,
+    status,
+    removedAt,
+  });
+}
+
+// =========================================================
+// ACTIVE -> DONE
+// Called only after payment has been verified / manually marked paid.
+// Google Apps Script performs an idempotent move by Job ID.
+// =========================================================
+export async function moveDispatchJobToDoneGoogleSheet({
+  sourceSheetName,
+  doneSheetName,
+  jobId,
+  paidAt,
+  completedAt = paidAt,
+  removedAt = "",
+  price = "",
+  currency = "",
+}) {
+  if (!sourceSheetName) {
+    throw new Error(
+      "Missing sourceSheetName in moveDispatchJobToDoneGoogleSheet"
+    );
+  }
+
+  if (!doneSheetName) {
+    throw new Error(
+      "Missing doneSheetName in moveDispatchJobToDoneGoogleSheet"
+    );
+  }
+
+  if (!jobId) {
+    throw new Error(
+      "Missing jobId in moveDispatchJobToDoneGoogleSheet"
+    );
+  }
+
+  return postToSheet({
+    action: "dispatch_move_done",
+    sourceSheetName,
+    doneSheetName,
+    jobId,
+    paidAt,
+    completedAt,
+    removedAt,
+    price,
+    currency,
+  });
+}
+
 export async function updateJobInGoogleSheet({
   jobId,
   status,
