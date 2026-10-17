@@ -8192,12 +8192,39 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     const text = [
       "❌ ยังรับงานไม่ได้ กรุณาตรวจลิงก์ก่อน",
       "",
+      `ลูกค้า: ${customer?.display_name || "-"}`,
+      `Customer ID: ${customer?.id || "-"}`,
+      `Platform: ${getPlatformLabel(customer)}`,
+      "",
       ...errors,
       "",
-      "แก้ข้อมูลแล้ว Reply ข้อความลูกค้าเดิมอีกครั้ง พร้อมราคา + Review URL",
+      "แก้ข้อมูลแล้ว Reply ข้อความนี้ได้เลย พร้อมราคา + Review URL",
       "⚠️ ยังไม่มี Job ถูกสร้าง และยังไม่มีงานลง Sheet",
     ].join("\n");
-    await pushTextToMainLineGroup(text);
+
+    const pushed = await pushTextToMainLineGroup(text);
+
+    // V2.2.24: the validation-error message itself must remain a durable
+    // customer-context anchor. Sales naturally replies to the latest error
+    // message after fixing the links; without this mapping the next reply was
+    // rejected as "cannot identify customer" even though the previous attempt
+    // was already tied to the correct customer.
+    try {
+      if (pushed?.messageId) {
+        await createSalesLeadCard({
+          customerId: customer.id,
+          lineGroupMessageId: pushed.messageId,
+          payload: parsed.reviewUrls.join("\n"),
+          inputType: "REVIEW_URL",
+        });
+      }
+    } catch (contextError) {
+      // Do not hide the validation result if context persistence fails.
+      // Customer ID is also embedded in the visible Telegram text, so the
+      // existing resolver can still recover the customer on the next reply.
+      console.error("V224 VALIDATION ERROR CONTEXT SAVE FAILED:", contextError);
+    }
+
     return { ok: false, validationFailed: true, errors };
   }
 
