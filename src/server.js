@@ -4167,6 +4167,52 @@ function shouldSuppressDuplicateBotReply({
   return previous === next;
 }
 
+// =========================================================
+// FAQ MATCHING — V2.2.21
+// English keywords must match whole words / whole phrases.
+// Thai keeps substring matching because Thai usually has no spaces between words.
+// =========================================================
+function escapeRegexLiteral(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchesFaqKeyword({ text, keyword, language }) {
+  const normalizedText = String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalizedKeyword = String(keyword || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalizedText || !normalizedKeyword) return false;
+
+  if (language !== "en") {
+    if (normalizedKeyword.length <= 1) return normalizedText === normalizedKeyword;
+    return normalizedText.includes(normalizedKeyword);
+  }
+
+  // Very short English keywords are too collision-prone in natural chat.
+  // Allow them only when the customer's whole message is exactly that token.
+  if (!normalizedKeyword.includes(" ") && normalizedKeyword.length <= 2) {
+    return normalizedText === normalizedKeyword;
+  }
+
+  const phrasePattern = normalizedKeyword
+    .split(" ")
+    .filter(Boolean)
+    .map(escapeRegexLiteral)
+    .join("\\s+");
+
+  if (!phrasePattern) return false;
+
+  return new RegExp(
+    `(?:^|[^a-z0-9])${phrasePattern}(?=$|[^a-z0-9])`,
+    "i"
+  ).test(normalizedText);
+}
+
 async function getGlobalFaqReply({
   customer,
   message,
@@ -4208,20 +4254,12 @@ async function getGlobalFaqReply({
 
     const matched =
       safeKeywords.some(
-        (keyword) => {
-          const normalizedKeyword =
-            String(keyword || "")
-              .trim()
-              .toLowerCase();
-
-          if (!normalizedKeyword) {
-            return false;
-          }
-
-          return text.includes(
-            normalizedKeyword
-          );
-        }
+        (keyword) =>
+          matchesFaqKeyword({
+            text,
+            keyword,
+            language,
+          })
       );
 
     if (!matched) {
@@ -4247,11 +4285,7 @@ async function getGlobalFaqReply({
     if (language === "en") {
       reply =
         isRepeat
-          ? (
-              faq.repeat_reply_en ||
-              faq.reply_en ||
-              faq.reply_th
-            )
+          ? faq.repeat_reply_en
           : (
               faq.reply_en ||
               faq.reply_th
@@ -4259,18 +4293,25 @@ async function getGlobalFaqReply({
     } else {
       reply =
         isRepeat
-          ? (
-              faq.repeat_reply_th ||
-              faq.reply_th
-            )
+          ? faq.repeat_reply_th
           : faq.reply_th;
     }
 
     const finalReply =
       String(reply || "").trim();
 
+    // If this FAQ has already been answered and no repeat-specific reply is
+    // configured, do not resend the original answer. Keep it marked as
+    // handled so the same message is not escalated as an unknown question.
     if (!finalReply) {
-      return null;
+      return {
+        faqKey: faq.faq_key,
+        faqTitle: faq.title,
+        reply: null,
+        repeat: isRepeat,
+        suppressed: isRepeat,
+        hitCount: Number(hit?.hit_count || 1),
+      };
     }
 
     return {
@@ -4308,13 +4349,49 @@ async function sendGlobalFaqIfMatched({
     message,
   });
 
-const faqReply =
-  faqMatch?.reply || null;
-
-  if (!faqReply) {
+  if (!faqMatch) {
     return {
       matched: false,
       botReply: null,
+    };
+  }
+
+  const faqReply =
+    faqMatch?.reply || null;
+
+  if (!faqReply) {
+    console.log("FAQ REPEAT SUPPRESSED:", {
+      customerId: customer.id,
+      faqKey: faqMatch?.faqKey || null,
+      hitCount: faqMatch?.hitCount || null,
+    });
+    return {
+      matched: true,
+      botReply: null,
+      faqKey: faqMatch?.faqKey || null,
+      repeat: Boolean(faqMatch?.repeat),
+      suppressed: true,
+      hitCount: faqMatch?.hitCount || null,
+    };
+  }
+
+  if (
+    shouldSuppressDuplicateBotReply({
+      conversation,
+      botReply: faqReply,
+    })
+  ) {
+    console.log("FAQ DUPLICATE BOT REPLY SUPPRESSED:", {
+      customerId: customer.id,
+      faqKey: faqMatch?.faqKey || null,
+    });
+    return {
+      matched: true,
+      botReply: null,
+      faqKey: faqMatch?.faqKey || null,
+      repeat: Boolean(faqMatch?.repeat),
+      suppressed: true,
+      hitCount: faqMatch?.hitCount || null,
     };
   }
 
@@ -6310,83 +6387,220 @@ function decodeBasicHtmlEntities(value) {
     });
 }
 
+const googleReviewShareMetaCache = new Map();
+const GOOGLE_REVIEW_META_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function extractReviewAgeDaysFromMetaText(value) {
+  const text = decodeBasicHtmlEntities(String(value || ""))
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!text) return null;
+
+  if (/\b(today|just now)\b/i.test(text) || /วันนี้/.test(text)) return 0;
+  if (/\byesterday\b/i.test(text) || /เมื่อวาน/.test(text)) return 1;
+
+  const englishRelative = text.match(
+    /\b(\d+)\s*(minute|hour|day|week|month|year)s?\s+ago\b/i
+  );
+  if (englishRelative) {
+    const amount = Number(englishRelative[1]);
+    const unit = englishRelative[2].toLowerCase();
+    if (Number.isFinite(amount)) {
+      if (unit === "minute" || unit === "hour") return 0;
+      if (unit === "day") return amount;
+      if (unit === "week") return amount * 7;
+      if (unit === "month") return amount * 30;
+      if (unit === "year") return amount * 365;
+    }
+  }
+
+  const thaiRelative = text.match(
+    /(\d+)\s*(นาที|ชั่วโมง|วัน|สัปดาห์|เดือน|ปี)(?:ที่)?แล้ว/
+  );
+  if (thaiRelative) {
+    const amount = Number(thaiRelative[1]);
+    const unit = thaiRelative[2];
+    if (Number.isFinite(amount)) {
+      if (unit === "นาที" || unit === "ชั่วโมง") return 0;
+      if (unit === "วัน") return amount;
+      if (unit === "สัปดาห์") return amount * 7;
+      if (unit === "เดือน") return amount * 30;
+      if (unit === "ปี") return amount * 365;
+    }
+  }
+
+  // Only parse explicit absolute dates, never arbitrary standalone numbers.
+  const absolutePatterns = [
+    /\b(20\d{2}-\d{1,2}-\d{1,2})\b/,
+    /\b((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2},?\s+20\d{2})\b/i,
+    /\b(\d{1,2}\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+20\d{2})\b/i,
+  ];
+
+  for (const pattern of absolutePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = new Date(match[1]);
+    if (!Number.isFinite(parsed.getTime())) continue;
+    const diffMs = Date.now() - parsed.getTime();
+    if (diffMs < -24 * 60 * 60 * 1000) continue;
+    return Math.max(0, Math.floor(diffMs / (24 * 60 * 60 * 1000)));
+  }
+
+  return null;
+}
+
+function extractBusinessNameFromReviewMeta(...values) {
+  for (const value of values) {
+    const text = decodeBasicHtmlEntities(String(value || ""))
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) continue;
+
+    const patterns = [
+      /Google review of\s+(.+?)(?=\s*[|–—-]\s*Google Maps|$)/i,
+      /^Review of\s+(.+?)\s*$/i,
+      /รีวิว(?:ของ)?\s*(.+?)(?=\s*[|–—-]\s*Google Maps|$)/i,
+      /^(.+?)\s*[|–—-]\s*Google Maps\s*$/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        const candidate = match[1].trim().replace(/["']+$/g, "");
+        if (candidate && !/^google maps$/i.test(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
 async function getGoogleReviewSharePageMeta(url) {
   const inputUrl = String(url || "").trim();
   if (!/^https?:\/\//i.test(inputUrl)) return null;
 
-  try {
-    const response = await fetch(inputUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
-      },
-    });
-
-    const finalUrl = String(response.url || inputUrl).trim();
-    const html = await response.text();
-
-    const readMeta = (propertyName) => {
-      const escaped = propertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const patterns = [
-        new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, "i"),
-        new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`, "i"),
-      ];
-      for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (match?.[1]) return decodeBasicHtmlEntities(match[1]).trim();
-      }
-      return null;
-    };
-
-    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title =
-      readMeta("og:title") ||
-      (titleMatch?.[1] ? decodeBasicHtmlEntities(titleMatch[1]).replace(/\s+/g, " ").trim() : null);
-    const description =
-      readMeta("og:description") ||
-      readMeta("description") ||
-      null;
-
-    let businessName = null;
-    if (title) {
-      const patterns = [
-        /^Google review of\s+(.+?)\s*$/i,
-        /^Review of\s+(.+?)\s*$/i,
-        /^รีวิว(?:ของ)?\s*(.+?)\s*$/i,
-        /^(.+?)\s*[-|–—]\s*Google Maps\s*$/i,
-      ];
-      for (const pattern of patterns) {
-        const match = title.match(pattern);
-        if (match?.[1]) {
-          businessName = match[1].trim();
-          break;
-        }
-      }
-    }
-
-    console.log("ROBUST REVIEW SHARE PAGE META:", {
-      inputUrl,
-      finalUrl,
-      title: title || null,
-      businessName: businessName || null,
-      hasDescription: Boolean(description),
-    });
-
-    return {
-      finalUrl,
-      title,
-      description,
-      businessName,
-    };
-  } catch (error) {
-    console.log("ROBUST REVIEW SHARE PAGE META FAILED:", {
-      inputUrl,
-      error: error?.message || String(error),
-    });
-    return null;
+  const cached = googleReviewShareMetaCache.get(inputUrl);
+  if (
+    cached &&
+    Date.now() - Number(cached.cachedAt || 0) < GOOGLE_REVIEW_META_CACHE_TTL_MS
+  ) {
+    return cached.value;
   }
+
+  const userAgents = [
+    "Mozilla/5.0",
+    "TelegramBot (like TwitterBot)",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+  ];
+
+  let best = null;
+
+  for (const userAgent of userAgents) {
+    try {
+      const response = await fetch(inputUrl, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent": userAgent,
+          "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+        },
+      });
+
+      const finalUrl = String(response.url || inputUrl).trim();
+      const html = await response.text();
+
+      const readMeta = (propertyName) => {
+        const escaped = propertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const patterns = [
+          new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']*)["'][^>]*>`, "i"),
+          new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${escaped}["'][^>]*>`, "i"),
+        ];
+        for (const pattern of patterns) {
+          const match = html.match(pattern);
+          if (match?.[1]) return decodeBasicHtmlEntities(match[1]).trim();
+        }
+        return null;
+      };
+
+      const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      const inlineReviewTitleMatch = html.match(/Google review of\s+([^<"'\n\r]{2,180})/i);
+
+      const title =
+        readMeta("og:title") ||
+        readMeta("twitter:title") ||
+        (inlineReviewTitleMatch?.[0]
+          ? decodeBasicHtmlEntities(inlineReviewTitleMatch[0]).replace(/\s+/g, " ").trim()
+          : null) ||
+        (titleMatch?.[1]
+          ? decodeBasicHtmlEntities(titleMatch[1]).replace(/\s+/g, " ").trim()
+          : null);
+
+      const description =
+        readMeta("og:description") ||
+        readMeta("twitter:description") ||
+        readMeta("description") ||
+        null;
+
+      const businessName = extractBusinessNameFromReviewMeta(
+        title,
+        description,
+        inlineReviewTitleMatch?.[0] || null
+      );
+
+      // Only trust an age extracted from social-preview metadata when the
+      // destination is a direct review URL or the metadata explicitly says review.
+      const looksReviewSpecific =
+        /google\.[^/]+\/maps\/reviews\/data=/i.test(finalUrl) ||
+        Boolean(extractGoogleReviewSkid(finalUrl)) ||
+        /\breview\b|รีวิว/i.test(`${title || ""} ${description || ""}`);
+
+      const reviewAgeDays = looksReviewSpecific
+        ? extractReviewAgeDaysFromMetaText(`${title || ""} ${description || ""}`)
+        : null;
+
+      const current = {
+        finalUrl,
+        title,
+        description,
+        businessName,
+        reviewAgeDays,
+        userAgent,
+      };
+
+      console.log("ROBUST REVIEW SHARE PAGE META:", {
+        inputUrl,
+        finalUrl,
+        userAgent,
+        title: title || null,
+        businessName: businessName || null,
+        reviewAgeDays,
+        hasDescription: Boolean(description),
+      });
+
+      if (
+        !best ||
+        (!best.businessName && businessName) ||
+        (best.reviewAgeDays == null && reviewAgeDays != null)
+      ) {
+        best = current;
+      }
+
+      if (businessName && reviewAgeDays != null) break;
+    } catch (error) {
+      console.log("ROBUST REVIEW SHARE PAGE META FAILED:", {
+        inputUrl,
+        userAgent,
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  googleReviewShareMetaCache.set(inputUrl, {
+    cachedAt: Date.now(),
+    value: best,
+  });
+
+  return best;
 }
 
 async function resolvePlaceFromDirectReviewUrl({ originalUrl, resolvedUrl }) {
@@ -6502,6 +6716,8 @@ async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl })
   const reviewResults = await Promise.allSettled([
     getNewestReviews(placeId),
     getLowestReviews(placeId),
+    getRecentReviews(placeId),
+    getOneStarReviews(placeId),
     getPlaceReviews(placeId),
   ]);
 
@@ -6652,10 +6868,11 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
   }
 
   // Final automatic fallback: resolve the business from the Google URL,
-  // fetch newest + lowest review lists, then match ONLY by exact skid/id/URL.
-  // We never guess from rating/text/name.
+  // fetch every review list available in this service, then match ONLY by
+  // exact skid/id/URL. We never guess from rating/text/reviewer name.
+  let placeListResult = null;
   try {
-    const placeListResult = await getReviewFromDirectUrlViaPlaceLists({
+    placeListResult = await getReviewFromDirectUrlViaPlaceLists({
       originalUrl,
       resolvedUrl,
     });
@@ -6672,12 +6889,26 @@ async function getReviewFromDirectUrlRobust(rawUrl) {
     });
   }
 
+  // Last safe metadata fallback for T0/T2 classification. This does NOT
+  // identify a review by text/rating. It only reads explicit date/relative-age
+  // information from the exact Google review share page.
+  let googleMeta = null;
+  try {
+    googleMeta = await getGoogleReviewSharePageMeta(originalUrl);
+  } catch {}
+
   return {
     found: false,
     review: null,
     reason: lastReason || lastError?.message || "REVIEW_NOT_FOUND",
     lookupUrl: null,
-    resolvedUrl,
+    resolvedUrl: googleMeta?.finalUrl || resolvedUrl,
+    businessName: placeListResult?.businessName || googleMeta?.businessName || null,
+    googleMetaAgeDays:
+      googleMeta?.reviewAgeDays == null
+        ? null
+        : Number(googleMeta.reviewAgeDays),
+    googleMeta,
   };
 }
 
@@ -7251,6 +7482,35 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
         originalUrl;
       let ageDays = review ? getReviewAgeDays(review) : null;
       let forcedWorkType = null;
+      let autoAgeSource = null;
+
+      // Some provider payloads expose only a relative date string rather than
+      // the field expected by getReviewAgeDays(). Reuse the strict metadata
+      // age parser before giving up.
+      if (
+        review &&
+        (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays)))
+      ) {
+        const reviewDateText = [
+          review.isoDate,
+          review.iso_date,
+          review.reviewDate,
+          review.review_date,
+          review.date,
+          review.relativeDate,
+          review.relative_date,
+          review.timeDescription,
+          review.time_description,
+          review.publishedAt,
+          review.published_at,
+        ].filter(Boolean).join(" ");
+
+        const parsedReviewAge = extractReviewAgeDaysFromMetaText(reviewDateText);
+        if (parsedReviewAge != null && Number.isFinite(Number(parsedReviewAge))) {
+          ageDays = Number(parsedReviewAge);
+          autoAgeSource = "PROVIDER_DATE_TEXT";
+        }
+      }
 
       if (!directResult?.found || !review) {
         const resolvedDirectUrl = String(directResult?.resolvedUrl || "").trim();
@@ -7258,6 +7518,8 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
           /google\.[^/]+\/maps\/reviews\/data=/i.test(resolvedDirectUrl) ||
           Boolean(extractGoogleReviewSkid(resolvedDirectUrl));
 
+        // Explicit Sales override always wins when supplied. It remains the
+        // emergency fallback, not the normal workflow.
         if (parsed.workTypeOverride && looksLikeResolvedDirectReview) {
           forcedWorkType = parsed.workTypeOverride;
           canonicalUrl = resolvedDirectUrl || originalUrl;
@@ -7278,17 +7540,91 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
             providerReason: directResult?.reason || null,
           });
         } else {
-          const reason = String(directResult?.reason || "UNKNOWN");
-          const suffix = looksLikeResolvedDirectReview
-            ? " — Google ยืนยันว่าเป็น direct review link แต่ Provider อ่าน metadata ไม่ได้; Reply ใหม่โดยเพิ่ม T0 หรือ T2 เช่น `3500 T2` + URL"
-            : "";
-          errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl} (${reason})${suffix}`);
-          continue;
+          // V2.2.21 normal path: if Google itself exposes an explicit date or
+          // relative age for this exact direct-review share page, classify T0/T2
+          // automatically without asking Sales to type T0/T2.
+          let googleMetaAgeDays =
+            directResult?.googleMetaAgeDays == null
+              ? null
+              : Number(directResult.googleMetaAgeDays);
+
+          let googleMeta = directResult?.googleMeta || null;
+          if (
+            looksLikeResolvedDirectReview &&
+            (googleMetaAgeDays == null || !Number.isFinite(googleMetaAgeDays))
+          ) {
+            googleMeta = await getGoogleReviewSharePageMeta(originalUrl);
+            googleMetaAgeDays =
+              googleMeta?.reviewAgeDays == null
+                ? null
+                : Number(googleMeta.reviewAgeDays);
+          }
+
+          if (
+            looksLikeResolvedDirectReview &&
+            googleMetaAgeDays != null &&
+            Number.isFinite(googleMetaAgeDays)
+          ) {
+            canonicalUrl = resolvedDirectUrl || googleMeta?.finalUrl || originalUrl;
+            ageDays = googleMetaAgeDays;
+            autoAgeSource = "GOOGLE_REVIEW_META";
+            review = {
+              reviewUrl: canonicalUrl,
+              reviewerName: null,
+              rating: null,
+              text: null,
+              reviewText: null,
+              isoDate: null,
+              reviewId: extractGoogleReviewSkid(canonicalUrl),
+            };
+
+            console.log("V2 SALES REVIEW AUTO T0/T2 META FALLBACK:", {
+              originalUrl,
+              canonicalUrl,
+              ageDays,
+              workType: Number(ageDays) <= 14 ? "T0" : "T2",
+              businessName:
+                directResult?.businessName ||
+                googleMeta?.businessName ||
+                null,
+              providerReason: directResult?.reason || null,
+            });
+          } else {
+            const reason = String(directResult?.reason || "UNKNOWN");
+            const suffix = looksLikeResolvedDirectReview
+              ? " — ระบบลองตรวจอายุอัตโนมัติแล้วแต่ Google/Provider ไม่ส่งวันที่กลับมา; ใช้ T0 หรือ T2 เฉพาะเคสนี้ เช่น `3500 T2` + URL"
+              : "";
+            errors.push(`${index + 1}. ตรวจ Review URL ไม่สำเร็จ: ${originalUrl} (${reason})${suffix}`);
+            continue;
+          }
+        }
+      }
+
+      // A provider may find the exact review but omit a usable date. Try the
+      // exact Google share metadata one last time before asking for override.
+      if (
+        !forcedWorkType &&
+        (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays)))
+      ) {
+        const googleMeta = await getGoogleReviewSharePageMeta(originalUrl);
+        const metaAge =
+          googleMeta?.reviewAgeDays == null
+            ? null
+            : Number(googleMeta.reviewAgeDays);
+
+        if (metaAge != null && Number.isFinite(metaAge)) {
+          ageDays = metaAge;
+          autoAgeSource = "GOOGLE_REVIEW_META";
+          console.log("V2 SALES REVIEW AUTO AGE RECOVERED:", {
+            originalUrl,
+            ageDays,
+            workType: Number(ageDays) <= 14 ? "T0" : "T2",
+          });
         }
       }
 
       if (!forcedWorkType && (ageDays === null || ageDays === undefined || !Number.isFinite(Number(ageDays)))) {
-        errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl} — Reply ใหม่โดยเพิ่ม T0 หรือ T2 เช่น 3500 T2 + URL`);
+        errors.push(`${index + 1}. ระบุอายุรีวิวไม่ได้: ${originalUrl} — ระบบลอง Auto T0/T2 แล้ว; ใช้ T0 หรือ T2 เฉพาะเคสนี้ เช่น 3500 T2 + URL`);
         continue;
       }
 
@@ -7319,6 +7655,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
         providerReviewId: review.reviewId || null,
         reviewAgeDays: forcedWorkType ? null : Number(ageDays),
         workType: forcedWorkType || (Number(ageDays) <= 14 ? "T0" : "T2"),
+        ageSource: forcedWorkType ? "MANUAL_OVERRIDE" : (autoAgeSource || "PROVIDER"),
         departmentId: department.id,
       });
     } catch (error) {
