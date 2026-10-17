@@ -7259,7 +7259,7 @@ async function sendV2SalesLeadCard({ customer, payload, inputType, reason = "NEW
     String(payload || "-"),
     "",
     "ตัวอย่าง:",
-    "5500",
+    "5500 t0",
     "https://google.com/maps/reviews/...",
     "",
     "REPLY ราคาเมื่อลูกค้ายืนยันแล้วเท่านั้น:",
