@@ -6401,11 +6401,11 @@ function extractReviewAgeDaysFromMetaText(value) {
   if (/\byesterday\b/i.test(text) || /เมื่อวาน/.test(text)) return 1;
 
   const englishRelative = text.match(
-    /\b(\d+)\s*(minute|hour|day|week|month|year)s?\s+ago\b/i
+    /\b(?:(\d+)|(a|an|one))\s*(minute|hour|day|week|month|year)s?\s+ago\b/i
   );
   if (englishRelative) {
-    const amount = Number(englishRelative[1]);
-    const unit = englishRelative[2].toLowerCase();
+    const amount = englishRelative[1] ? Number(englishRelative[1]) : 1;
+    const unit = englishRelative[3].toLowerCase();
     if (Number.isFinite(amount)) {
       if (unit === "minute" || unit === "hour") return 0;
       if (unit === "day") return amount;
@@ -6445,6 +6445,124 @@ function extractReviewAgeDaysFromMetaText(value) {
     const diffMs = Date.now() - parsed.getTime();
     if (diffMs < -24 * 60 * 60 * 1000) continue;
     return Math.max(0, Math.floor(diffMs / (24 * 60 * 60 * 1000)));
+  }
+
+  return null;
+}
+
+function decodeGooglePageText(value) {
+  return decodeBasicHtmlEntities(String(value || ""))
+    .replace(/\\u003d/gi, "=")
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\u003a/gi, ":")
+    .replace(/\\u0022/gi, '"')
+    .replace(/\\x3d/gi, "=")
+    .replace(/\\x26/gi, "&")
+    .replace(/\\x2f/gi, "/")
+    .replace(/\\x3a/gi, ":")
+    .replace(/\\x22/gi, '"');
+}
+
+function extractReviewAgeDaysNearIdentityFromHtml(html, ...urlValues) {
+  const rawHtml = String(html || "");
+  if (!rawHtml) return null;
+
+  const decodedHtml = decodeGooglePageText(rawHtml);
+  const identityTokens = new Set();
+
+  for (const value of urlValues) {
+    for (const token of extractGoogleReviewIdentityTokens(value)) {
+      const safe = String(token || "").trim();
+      if (!safe) continue;
+      identityTokens.add(safe);
+      try { identityTokens.add(decodeURIComponent(safe)); } catch {}
+      try { identityTokens.add(encodeURIComponent(safe)); } catch {}
+    }
+  }
+
+  // Only trust a date/relative age found close to the exact review identity.
+  // Google often embeds the review UUID / provider review id in page JSON even
+  // when social meta does not expose the review date.
+  for (const token of identityTokens) {
+    if (!token || token.length < 8) continue;
+
+    const haystacks = [rawHtml, decodedHtml];
+    for (const haystack of haystacks) {
+      const lowerHaystack = haystack.toLowerCase();
+      const lowerToken = token.toLowerCase();
+      let from = 0;
+
+      while (from < lowerHaystack.length) {
+        const index = lowerHaystack.indexOf(lowerToken, from);
+        if (index < 0) break;
+
+        const start = Math.max(0, index - 12000);
+        const end = Math.min(haystack.length, index + token.length + 12000);
+        const window = haystack
+          .slice(start, end)
+          .replace(/<script[^>]*>/gi, " ")
+          .replace(/<\\/script>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/[\\[\\]{}(),]/g, " ")
+          .replace(/\\s+/g, " ");
+
+        const ageDays = extractReviewAgeDaysFromMetaText(window);
+        if (ageDays != null && Number.isFinite(Number(ageDays))) {
+          console.log("ROBUST REVIEW DIRECT PAGE ID-LOCAL AGE:", {
+            token: lowerToken.slice(0, 80),
+            ageDays: Number(ageDays),
+          });
+          return Number(ageDays);
+        }
+
+        // Some Google payloads store an absolute Unix timestamp next to the
+        // review identity instead of human-readable "x days ago" text.
+        // Accept only timestamps very close to the identity and within a sane
+        // review-date range; this prevents arbitrary page timestamps from being
+        // treated as the review date.
+        const localStart = Math.max(0, index - 2500);
+        const localEnd = Math.min(haystack.length, index + token.length + 2500);
+        const localWindow = haystack.slice(localStart, localEnd);
+        const timestampMatches = [...localWindow.matchAll(/(?<!\\d)(1[3-9]\\d{8}|2\\d{9}|1[3-9]\\d{11}|2\\d{12})(?!\\d)/g)];
+        const now = Date.now();
+        const minDate = new Date("2010-01-01T00:00:00Z").getTime();
+        const maxDate = now + 24 * 60 * 60 * 1000;
+        const plausible = [];
+
+        for (const match of timestampMatches) {
+          let n = Number(match[1]);
+          if (!Number.isFinite(n)) continue;
+          if (String(match[1]).length >= 12) n = Math.floor(n / 1000);
+          const ms = n * 1000;
+          if (ms < minDate || ms > maxDate) continue;
+          const distance = Math.abs((localStart + (match.index || 0)) - index);
+          plausible.push({ ms, distance });
+        }
+
+        plausible.sort((a, b) => a.distance - b.distance);
+        if (plausible.length) {
+          const nearest = plausible[0];
+          // Require the nearest timestamp to be materially closer than any
+          // alternative timestamp so we do not guess from unrelated page data.
+          const second = plausible[1];
+          if (!second || nearest.distance + 250 < second.distance) {
+            const ageDays = Math.max(
+              0,
+              Math.floor((now - nearest.ms) / (24 * 60 * 60 * 1000))
+            );
+            console.log("ROBUST REVIEW DIRECT PAGE ID-LOCAL UNIX AGE:", {
+              token: lowerToken.slice(0, 80),
+              ageDays,
+              distance: nearest.distance,
+            });
+            return ageDays;
+          }
+        }
+
+        from = index + lowerToken.length;
+      }
+    }
   }
 
   return null;
@@ -6554,9 +6672,20 @@ async function getGoogleReviewSharePageMeta(url) {
         Boolean(extractGoogleReviewSkid(finalUrl)) ||
         /\breview\b|รีวิว/i.test(`${title || ""} ${description || ""}`);
 
-      const reviewAgeDays = looksReviewSpecific
+      let reviewAgeDays = looksReviewSpecific
         ? extractReviewAgeDaysFromMetaText(`${title || ""} ${description || ""}`)
         : null;
+
+      if (
+        looksReviewSpecific &&
+        (reviewAgeDays == null || !Number.isFinite(Number(reviewAgeDays)))
+      ) {
+        reviewAgeDays = extractReviewAgeDaysNearIdentityFromHtml(
+          html,
+          inputUrl,
+          finalUrl
+        );
+      }
 
       const current = {
         finalUrl,
@@ -7540,7 +7669,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
             providerReason: directResult?.reason || null,
           });
         } else {
-          // V2.2.21 normal path: if Google itself exposes an explicit date or
+          // V2.2.22 normal path: if Google itself exposes an explicit date or
           // relative age for this exact direct-review share page, classify T0/T2
           // automatically without asking Sales to type T0/T2.
           let googleMetaAgeDays =
