@@ -1169,6 +1169,7 @@ import {
   getOneStarReviews,
   getReviewFromDirectUrl,
   getReviewAgeDays,
+  getReactivationNewestReviews,
 } from "./services/reviewProvider.js";
 
 import {
@@ -6504,8 +6505,8 @@ function extractReviewAgeDaysNearIdentityFromHtml(html, ...urlValues) {
           .replace(/<script[^>]*>/gi, " ")
           .replace(/<\/script>/gi, " ")
           .replace(/<[^>]+>/g, " ")
-          .replace(/[\\[\\]{}(),]/g, " ")
-          .replace(/\\s+/g, " ");
+          .replace(/[\[\]{}(),]/g, " ")
+          .replace(/\s+/g, " ");
 
         const ageDays = extractReviewAgeDaysFromMetaText(window);
         if (ageDays != null && Number.isFinite(Number(ageDays))) {
@@ -6524,7 +6525,7 @@ function extractReviewAgeDaysNearIdentityFromHtml(html, ...urlValues) {
         const localStart = Math.max(0, index - 2500);
         const localEnd = Math.min(haystack.length, index + token.length + 2500);
         const localWindow = haystack.slice(localStart, localEnd);
-        const timestampMatches = [...localWindow.matchAll(/(?<!\\d)(1[3-9]\\d{8}|2\\d{9}|1[3-9]\\d{11}|2\\d{12})(?!\\d)/g)];
+        const timestampMatches = [...localWindow.matchAll(/(?<!\d)(1[3-9]\d{8}|2\d{9}|1[3-9]\d{11}|2\d{12})(?!\d)/g)];
         const now = Date.now();
         const minDate = new Date("2010-01-01T00:00:00Z").getTime();
         const maxDate = now + 24 * 60 * 60 * 1000;
@@ -6923,121 +6924,102 @@ async function getReviewFromDirectUrlViaPlaceLists({ originalUrl, resolvedUrl })
 async function getReviewFromDirectUrlRobust(rawUrl) {
   const originalUrl = String(rawUrl || "").trim();
   if (!originalUrl) {
-    return { found: false, review: null, reason: "EMPTY_URL", lookupUrl: null, resolvedUrl: null };
+    return {
+      found: false,
+      review: null,
+      reason: "EMPTY_URL",
+      lookupUrl: null,
+      resolvedUrl: null,
+    };
   }
 
-  let lastReason = null;
-  let lastError = null;
-
-  // First try the exact URL Sales supplied. Some provider paths understand
-  // maps.app.goo.gl directly better than the expanded Google /maps/reviews URL.
+  let resolvedUrl = originalUrl;
   try {
-    const firstResult = await getReviewFromDirectUrl(originalUrl);
-    if (firstResult?.found && firstResult?.review) {
-      console.log("ROBUST REVIEW ORIGINAL URL MATCHED:", {
-        originalUrl,
-        reviewerName: firstResult.review?.reviewerName || null,
-        rating: firstResult.review?.rating || null,
-      });
-      return {
-        ...firstResult,
-        lookupUrl: originalUrl,
-        resolvedUrl: originalUrl,
-      };
-    }
-    lastReason = firstResult?.reason || lastReason;
+    resolvedUrl = (await resolveGoogleShortUrl(originalUrl)) || originalUrl;
   } catch (error) {
-    lastError = error;
-  }
-
-  let resolvedUrl = null;
-  try {
-    resolvedUrl = await resolveGoogleShortUrl(originalUrl);
-  } catch (error) {
-    console.error("ROBUST REVIEW URL RESOLVE FAILED:", {
+    console.log("V225 DIRECT REVIEW RESOLVE FAILED:", {
       originalUrl,
       error: error?.message || String(error),
     });
   }
 
-  const candidates = buildDirectReviewLookupCandidates(originalUrl, resolvedUrl)
-    .filter((candidate) => candidate !== originalUrl);
-
-  for (const candidate of candidates) {
-    try {
-      const result = await getReviewFromDirectUrl(candidate);
-      if (result?.found && result?.review) {
-        console.log("ROBUST REVIEW URL MATCHED:", {
-          originalUrl,
-          resolvedUrl,
-          lookupUrl: candidate,
-          reviewerName: result.review?.reviewerName || null,
-          rating: result.review?.rating || null,
-        });
-        return {
-          ...result,
-          lookupUrl: candidate,
-          resolvedUrl: resolvedUrl || candidate,
-        };
-      }
-      lastReason = result?.reason || lastReason;
-      console.log("ROBUST REVIEW URL CANDIDATE NOT FOUND:", {
-        originalUrl,
-        candidate,
-        reason: result?.reason || null,
-      });
-    } catch (error) {
-      lastError = error;
-      console.log("ROBUST REVIEW URL CANDIDATE FAILED:", {
-        originalUrl,
-        candidate,
-        error: error?.message || String(error),
-      });
-    }
-  }
-
-  // Final automatic fallback: resolve the business from the Google URL,
-  // fetch every review list available in this service, then match ONLY by
-  // exact skid/id/URL. We never guess from rating/text/reviewer name.
-  let placeListResult = null;
-  try {
-    placeListResult = await getReviewFromDirectUrlViaPlaceLists({
-      originalUrl,
-      resolvedUrl,
-    });
-    if (placeListResult?.found && placeListResult?.review) {
-      return placeListResult;
-    }
-    lastReason = placeListResult?.reason || lastReason;
-  } catch (error) {
-    lastError = error;
-    console.log("ROBUST REVIEW PLACE-LIST FALLBACK FAILED:", {
-      originalUrl,
-      resolvedUrl,
-      error: error?.message || String(error),
-    });
-  }
-
-  // Last safe metadata fallback for T0/T2 classification. This does NOT
-  // identify a review by text/rating. It only reads explicit date/relative-age
-  // information from the exact Google review share page.
   let googleMeta = null;
   try {
     googleMeta = await getGoogleReviewSharePageMeta(originalUrl);
-  } catch {}
+  } catch (error) {
+    return {
+      found: false,
+      review: null,
+      reason: "DIRECT_REVIEW_META_FETCH_FAILED",
+      lookupUrl: null,
+      resolvedUrl,
+      error: error?.message || String(error),
+    };
+  }
+
+  const finalUrl =
+    String(googleMeta?.finalUrl || resolvedUrl || originalUrl).trim();
+
+  const titleText = String(googleMeta?.title || "").trim();
+  const reviewSpecificTitle =
+    /\bgoogle review of\b|^review of\b|รีวิว/i.test(titleText);
+
+  const looksLikeDirectReview =
+    /google\.[^/]+\/maps\/reviews\/data=/i.test(finalUrl) ||
+    Boolean(extractGoogleReviewSkid(finalUrl)) ||
+    extractGoogleReviewIdentityTokens(finalUrl).length > 0;
+
+  if (!reviewSpecificTitle) {
+    return {
+      found: false,
+      review: null,
+      reason: looksLikeDirectReview
+        ? "DIRECT_REVIEW_NOT_VISIBLE"
+        : "NOT_DIRECT_REVIEW_URL",
+      lookupUrl: null,
+      resolvedUrl: finalUrl,
+      businessName: googleMeta?.businessName || null,
+      googleMetaAgeDays:
+        googleMeta?.reviewAgeDays == null
+          ? null
+          : Number(googleMeta.reviewAgeDays),
+      googleMeta,
+    };
+  }
+
+  const ageDays =
+    googleMeta?.reviewAgeDays == null
+      ? null
+      : Number(googleMeta.reviewAgeDays);
+
+  const reviewId =
+    extractGoogleReviewSkid(finalUrl) ||
+    extractGoogleReviewIdentityTokens(finalUrl)[0] ||
+    extractGoogleReviewIdentityTokens(originalUrl)[0] ||
+    null;
 
   return {
-    found: false,
-    review: null,
-    reason: lastReason || lastError?.message || "REVIEW_NOT_FOUND",
-    lookupUrl: null,
-    resolvedUrl: googleMeta?.finalUrl || resolvedUrl,
-    businessName: placeListResult?.businessName || googleMeta?.businessName || null,
+    found: true,
+    reason: null,
+    lookupUrl: finalUrl,
+    resolvedUrl: finalUrl,
+    businessName: googleMeta?.businessName || null,
     googleMetaAgeDays:
-      googleMeta?.reviewAgeDays == null
-        ? null
-        : Number(googleMeta.reviewAgeDays),
+      Number.isFinite(ageDays) ? ageDays : null,
     googleMeta,
+    matchedVia: "GOOGLE_DIRECT_PAGE",
+    review: {
+      reviewUrl: finalUrl,
+      reviewerName: null,
+      rating: null,
+      text: null,
+      reviewText: null,
+      isoDate: null,
+      ageDays:
+        Number.isFinite(ageDays) ? ageDays : null,
+      reviewId,
+      source: "google_direct_page",
+    },
   };
 }
 
@@ -7585,362 +7567,66 @@ function buildV2CustomerQuoteText({ customer, draft, reviewItems }) {
 
 
 // =========================================================
-// V2.2.23 — SALES DIRECT REVIEW CLASSIFIER (SERPAPI-EFFICIENT)
-//
-// Purpose:
-// - Resolve the Sales-supplied direct review URL first.
-// - Query SerpApi newestFirst directly by the data_id embedded in that URL.
-// - Match the exact review_id when it is in the recent pages.
-// - If the newest-first scan has already crossed the 14-day boundary and the
-//   exact review was not among the newer reviews, classify it as T2 without
-//   burning extra searches on lowest/recent/one-star fallbacks.
-// - Cache pages per business for 10 minutes so multiple review links from the
-//   same business reuse the same SerpApi searches.
-// - Surface quota exhaustion explicitly; do NOT retry the old multi-provider
-//   cascade when SerpApi says the account has no searches remaining.
+// V2.2.25 — SALES DIRECT REVIEW CLASSIFIER (NO SERPAPI)
+// Sales T0/T2 classification uses the exact Google direct-review page only.
 // =========================================================
-
-const v223SerpReviewCache = new Map();
-const V223_SERP_CACHE_TTL_MS = 10 * 60 * 1000;
-const V223_T0_MAX_AGE_DAYS = 14;
-const V223_MAX_SERP_PAGES = 8;
-
-function v223NormalizeReviewId(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function v223AgeDaysFromSerpReview(review) {
-  if (!review || typeof review !== "object") return null;
-
-  const iso =
-    review.iso_date ||
-    review.isoDate ||
-    review.published_at ||
-    review.publishedAt ||
-    null;
-
-  if (iso) {
-    const ms = new Date(iso).getTime();
-    if (Number.isFinite(ms)) {
-      const diff = Date.now() - ms;
-      if (diff >= -24 * 60 * 60 * 1000) {
-        return Math.max(0, Math.floor(diff / (24 * 60 * 60 * 1000)));
-      }
-    }
-  }
-
-  const relative =
-    review.date ||
-    review.relative_date ||
-    review.relativeDate ||
-    null;
-
-  const parsed = extractReviewAgeDaysFromMetaText(relative);
-  return parsed == null || !Number.isFinite(Number(parsed))
-    ? null
-    : Number(parsed);
-}
-
-function v223SerpRowMatchesTarget(review, targetTokens) {
-  if (!review || typeof review !== "object") return false;
-  const rowTokens = new Set();
-
-  const add = (value) => {
-    const safe = v223NormalizeReviewId(value);
-    if (safe) rowTokens.add(safe);
-  };
-
-  add(review.review_id);
-  add(review.reviewId);
-  add(review.id);
-
-  const rowLink = String(review.link || review.reviewUrl || review.review_url || "").trim();
-  for (const token of extractGoogleReviewIdentityTokens(rowLink)) add(token);
-
-  for (const target of targetTokens) {
-    if (rowTokens.has(v223NormalizeReviewId(target))) return true;
-  }
-  return false;
-}
-
-function v223MapSerpReview(review, canonicalUrl) {
-  return {
-    reviewUrl: review?.link || canonicalUrl || null,
-    reviewerName: review?.user?.name || review?.reviewer_name || null,
-    rating: Number(review?.rating) || null,
-    text:
-      review?.extracted_snippet?.original ||
-      review?.snippet ||
-      review?.text ||
-      null,
-    reviewText:
-      review?.extracted_snippet?.original ||
-      review?.snippet ||
-      review?.text ||
-      null,
-    isoDate: review?.iso_date || review?.isoDate || null,
-    reviewId: review?.review_id || review?.reviewId || null,
-  };
-}
-
-async function v223FetchSerpReviewPage({ dataId, nextPageToken = null }) {
-  const apiKey = String(process.env.SERPAPI_API_KEY || "").trim();
-  if (!apiKey) {
-    return {
-      ok: false,
-      code: "SERPAPI_KEY_MISSING",
-      error: "Missing SERPAPI_API_KEY",
-    };
-  }
-
-  const endpoint = new URL("https://serpapi.com/search.json");
-  endpoint.searchParams.set("engine", "google_maps_reviews");
-  endpoint.searchParams.set("api_key", apiKey);
-  endpoint.searchParams.set("data_id", dataId);
-  endpoint.searchParams.set("sort_by", "newestFirst");
-  endpoint.searchParams.set("hl", "en");
-
-  if (nextPageToken) {
-    endpoint.searchParams.set("next_page_token", nextPageToken);
-    endpoint.searchParams.set("num", "20");
-  }
-
-  let response;
-  let payload;
-  try {
-    response = await fetch(endpoint.toString(), {
-      method: "GET",
-      headers: { "User-Agent": "GMR-Sales/2.2.23" },
-    });
-    payload = await response.json();
-  } catch (error) {
-    return {
-      ok: false,
-      code: "SERPAPI_NETWORK_ERROR",
-      error: error?.message || String(error),
-    };
-  }
-
-  const providerError = String(payload?.error || "").trim();
-  if (!response.ok || providerError) {
-    const quotaExhausted =
-      /run out of searches|no searches remaining|searches remaining[^0-9]*0|quota/i.test(providerError);
-
-    console.error("V223 SERPAPI REVIEW LOOKUP ERROR:", {
-      dataId,
-      status: response.status,
-      error: providerError || `HTTP ${response.status}`,
-      quotaExhausted,
-    });
-
-    return {
-      ok: false,
-      code: quotaExhausted ? "SERPAPI_QUOTA_EXHAUSTED" : "SERPAPI_HTTP_ERROR",
-      error: providerError || `HTTP ${response.status}`,
-    };
-  }
-
-  return {
-    ok: true,
-    reviews: Array.isArray(payload?.reviews) ? payload.reviews : [],
-    nextPageToken: payload?.serpapi_pagination?.next_page_token || null,
-    placeInfo: payload?.place_info || null,
-  };
-}
-
-function v223GetReviewCache(dataId) {
-  const now = Date.now();
-  const cached = v223SerpReviewCache.get(dataId);
-  if (cached && now - Number(cached.createdAt || 0) < V223_SERP_CACHE_TTL_MS) {
-    return cached;
-  }
-
-  const fresh = {
-    createdAt: now,
-    rows: [],
-    nextPageToken: null,
-    started: false,
-    done: false,
-    pagesFetched: 0,
-    maxAgeDaysSeen: null,
-    placeInfo: null,
-  };
-  v223SerpReviewCache.set(dataId, fresh);
-  return fresh;
-}
-
 async function getV223SalesDirectReviewClassification(rawUrl) {
   const originalUrl = String(rawUrl || "").trim();
-  if (!originalUrl) return { ok: false, code: "EMPTY_URL" };
+  if (!originalUrl) {
+    return { ok: false, code: "EMPTY_URL", hardError: false };
+  }
 
-  let resolvedUrl = originalUrl;
-  try {
-    resolvedUrl = (await resolveGoogleShortUrl(originalUrl)) || originalUrl;
-  } catch {}
+  const directResult = await getReviewFromDirectUrlRobust(originalUrl);
 
-  const canonicalUrl = stripGoogleTrackingParams(resolvedUrl) || resolvedUrl;
-  const entity = extractGoogleMapsBusinessEntity(canonicalUrl);
-  const targetTokens = Array.from(new Set([
-    ...extractGoogleReviewIdentityTokens(originalUrl),
-    ...extractGoogleReviewIdentityTokens(canonicalUrl),
-  ].map(v223NormalizeReviewId).filter(Boolean)));
-
-  if (!entity?.dataId || !targetTokens.length) {
+  if (!directResult?.found || !directResult?.review) {
     return {
       ok: false,
-      code: !entity?.dataId ? "DATA_ID_NOT_FOUND" : "REVIEW_ID_NOT_FOUND",
-      resolvedUrl: canonicalUrl,
+      code: directResult?.reason || "DIRECT_REVIEW_NOT_FOUND",
+      resolvedUrl:
+        directResult?.resolvedUrl ||
+        directResult?.lookupUrl ||
+        originalUrl,
+      businessName: directResult?.businessName || null,
       hardError: false,
+      googleMeta: directResult?.googleMeta || null,
+      googleMetaAgeDays: directResult?.googleMetaAgeDays ?? null,
     };
   }
 
-  // Do not fetch the Google share page here. The resolved direct URL already
-  // gives us the business data_id + exact review identity. Avoiding this extra
-  // HTTP request also prevents duplicate work; Google metadata remains a
-  // last-resort fallback in prepareV2SalesOrderDraft().
-  const googleMeta = null;
+  const ageDays = getReviewAgeDays(directResult.review);
 
-  const cache = v223GetReviewCache(entity.dataId);
-
-  const inspectCache = () => {
-    for (const row of cache.rows) {
-      if (!v223SerpRowMatchesTarget(row, targetTokens)) continue;
-      const exactAgeDays = v223AgeDaysFromSerpReview(row);
-      if (exactAgeDays == null) {
-        return {
-          ok: false,
-          code: "EXACT_REVIEW_DATE_MISSING",
-          hardError: false,
-        };
-      }
-
-      return {
-        ok: true,
-        foundExact: true,
-        ageDays: exactAgeDays,
-        workType: exactAgeDays <= V223_T0_MAX_AGE_DAYS ? "T0" : "T2",
-        ageSource: "SERPAPI_EXACT_REVIEW",
-        review: v223MapSerpReview(row, canonicalUrl),
-        resolvedUrl: canonicalUrl,
-        businessName:
-          cache.placeInfo?.title ||
-          cache.placeInfo?.name ||
-          googleMeta?.businessName ||
-          null,
-        dataId: entity.dataId,
-      };
-    }
-
-    if (
-      cache.maxAgeDaysSeen != null &&
-      Number(cache.maxAgeDaysSeen) > V223_T0_MAX_AGE_DAYS
-    ) {
-      // The feed is newestFirst. Once we have scanned continuously from the
-      // newest review through reviews older than 14 days, an exact target that
-      // was not in that newer window is necessarily T2. Keep ageDays=15 only
-      // as the minimum routing age; UI text labels this as >14 days, not "15".
-      return {
-        ok: true,
-        foundExact: false,
-        ageDays: 15,
-        workType: "T2",
-        ageSource: "SERPAPI_NEWEST_CUTOFF",
-        review: {
-          reviewUrl: canonicalUrl,
-          reviewerName: null,
-          rating: null,
-          text: null,
-          reviewText: null,
-          isoDate: null,
-          reviewId: targetTokens[0] || null,
-        },
-        resolvedUrl: canonicalUrl,
-        businessName:
-          cache.placeInfo?.title ||
-          cache.placeInfo?.name ||
-          googleMeta?.businessName ||
-          null,
-        dataId: entity.dataId,
-      };
-    }
-
-    return null;
-  };
-
-  let classified = inspectCache();
-  if (classified) return classified;
-
-  while (!cache.done && cache.pagesFetched < V223_MAX_SERP_PAGES) {
-    const page = await v223FetchSerpReviewPage({
-      dataId: entity.dataId,
-      nextPageToken: cache.started ? cache.nextPageToken : null,
-    });
-
-    if (!page.ok) {
-      return {
-        ok: false,
-        code: page.code,
-        error: page.error,
-        resolvedUrl: canonicalUrl,
-        hardError:
-          page.code === "SERPAPI_QUOTA_EXHAUSTED" ||
-          page.code === "SERPAPI_KEY_MISSING",
-      };
-    }
-
-    cache.started = true;
-    cache.pagesFetched += 1;
-    cache.placeInfo = cache.placeInfo || page.placeInfo || null;
-
-    for (const row of page.reviews) {
-      const key =
-        v223NormalizeReviewId(row?.review_id || row?.reviewId || row?.id) ||
-        normalizeReviewUrlForExactMatch(row?.link || "");
-      const duplicate = key && cache.rows.some((existing) => {
-        const existingKey =
-          v223NormalizeReviewId(existing?.review_id || existing?.reviewId || existing?.id) ||
-          normalizeReviewUrlForExactMatch(existing?.link || "");
-        return existingKey === key;
-      });
-      if (!duplicate) cache.rows.push(row);
-
-      const age = v223AgeDaysFromSerpReview(row);
-      if (age != null && Number.isFinite(Number(age))) {
-        cache.maxAgeDaysSeen = cache.maxAgeDaysSeen == null
-          ? Number(age)
-          : Math.max(Number(cache.maxAgeDaysSeen), Number(age));
-      }
-    }
-
-    cache.nextPageToken = page.nextPageToken || null;
-    if (!cache.nextPageToken || page.reviews.length === 0) cache.done = true;
-
-    classified = inspectCache();
-    if (classified) {
-      console.log("V223 SALES REVIEW CLASSIFIED:", {
+  if (ageDays == null || !Number.isFinite(Number(ageDays))) {
+    return {
+      ok: false,
+      code: "DIRECT_REVIEW_DATE_NOT_EXPOSED",
+      resolvedUrl:
+        directResult?.resolvedUrl ||
+        directResult?.lookupUrl ||
         originalUrl,
-        resolvedUrl: canonicalUrl,
-        dataId: entity.dataId,
-        workType: classified.workType,
-        ageDays: classified.ageDays,
-        ageSource: classified.ageSource,
-        pagesFetched: cache.pagesFetched,
-        cachedReviews: cache.rows.length,
-      });
-      return classified;
-    }
+      businessName: directResult?.businessName || null,
+      hardError: false,
+      googleMeta: directResult?.googleMeta || null,
+      googleMetaAgeDays: directResult?.googleMetaAgeDays ?? null,
+    };
   }
 
+  const numericAge = Number(ageDays);
   return {
-    ok: false,
-    code: cache.done ? "REVIEW_ID_NOT_FOUND_IN_NEWEST_FEED" : "REVIEW_SCAN_LIMIT_REACHED",
-    resolvedUrl: canonicalUrl,
-    businessName:
-      cache.placeInfo?.title ||
-      cache.placeInfo?.name ||
-      googleMeta?.businessName ||
-      null,
-    hardError: false,
+    ok: true,
+    foundExact: true,
+    ageDays: numericAge,
+    workType: numericAge <= 14 ? "T0" : "T2",
+    ageSource: "GOOGLE_DIRECT_PAGE",
+    review: directResult.review,
+    resolvedUrl:
+      directResult?.resolvedUrl ||
+      directResult?.lookupUrl ||
+      originalUrl,
+    businessName: directResult?.businessName || null,
+    dataId:
+      extractGoogleMapsBusinessEntity(
+        directResult?.resolvedUrl || originalUrl
+      )?.dataId || null,
   };
 }
 
@@ -7964,19 +7650,8 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     try {
       const v223Result = await getV223SalesDirectReviewClassification(originalUrl);
 
-      if (v223Result?.hardError) {
-        const providerMessage = v223Result.code === "SERPAPI_QUOTA_EXHAUSTED"
-          ? "SerpApi search quota หมด กรุณาเติม searches/เปลี่ยน SERPAPI_API_KEY ก่อน ระบบหยุดไว้เพื่อไม่สร้าง Job ผิด"
-          : "ไม่พบ SERPAPI_API_KEY ใน Render Environment";
-        errors.push(`${index + 1}. ${providerMessage}: ${originalUrl}`);
-        continue;
-      }
-
-      // IMPORTANT: the Sales path must not fall back to the old robust lookup
-      // here. That legacy cascade can call SerpApi repeatedly (newest, lowest,
-      // recent, one-star, place reviews, etc.) and was the reason one Telegram
-      // message could burn many searches. V2.2.23 uses exactly one newest-first
-      // pagination stream per business, with a 10-minute cache.
+      // V2.2.25: Sales classification is direct-Google only. No SerpApi
+      // request is allowed in this path.
       const directResult = v223Result?.ok
         ? {
             found: true,
@@ -8244,8 +7919,8 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
 
   const reviewLines = reviewItems.flatMap((item, index) => [
     `${index + 1}. ${item.canonicalUrl}`,
-    item.ageSource === "SERPAPI_NEWEST_CUTOFF"
-      ? `   ประเภท: ${item.workType} | อายุ >14 วัน`
+    item.reviewAgeDays == null
+      ? `   ประเภท: ${item.workType}`
       : `   ประเภท: ${item.workType} | อายุประมาณ ${item.reviewAgeDays} วัน`,
   ]);
 
@@ -12565,6 +12240,63 @@ const imageReviews =
   };
 }
     
+  // =====================================================
+  // V2.2.25 — SERPAPI COST CONTROL
+  //
+  // New-customer map flow no longer scans newest/lowest reviews automatically.
+  // Ask for the exact Review URL instead. This keeps SerpApi reserved for
+  // reactivation-map monitoring only.
+  // =====================================================
+
+  {
+    const botReply = getCustomerText(
+      customer,
+      "ได้รับ Google Maps แล้วครับ รบกวนส่งลิงก์รีวิวที่ต้องการดำเนินการมาได้เลยครับ",
+      "We received the Google Maps listing. Please send the exact review link you would like us to process."
+    );
+
+    const nextState = GMR_STATES.WAITING_MAP;
+
+    await updateConversationState({
+      customerId: customer.id,
+      state: nextState,
+      handoff: false,
+      handoffReason: null,
+    });
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: botReply,
+    });
+
+    await updateLastBotMessage(customer.id, botReply);
+
+    try {
+      await sendMessageToCustomer({
+        platform,
+        platformUserId,
+        text: botReply,
+      });
+    } catch (error) {
+      console.error("V225 DIRECT REVIEW LINK REQUEST SEND FAILED:", error);
+    }
+
+    return {
+      ok: true,
+      customerId: customer.id,
+      jobId: latestJob.id,
+      stateBefore: conversation.state,
+      stateAfter: nextState,
+      mapConfirmed: true,
+      reviewCase: "exact_review_url_required",
+      botReply: null,
+      sentBotReply: botReply,
+    };
+  }
+
   // -----------------------------------------------------
   // 2. ตรวจรีวิวล่าสุด
   // -----------------------------------------------------
@@ -19312,6 +19044,31 @@ if (
 }
 
 
+// =====================================================
+// V2.2.25 — Screenshot matching no longer scans Google Maps through SerpApi.
+// Ask for the exact review link so this flow stays free.
+// =====================================================
+
+{
+  const botReply = getCustomerText(
+    customer,
+    "ได้รับรูปรีวิวแล้วครับ เพื่อให้ตรวจตรงรีวิวและไม่ค้นทั้ง Map รบกวนส่งลิงก์รีวิวตัวนี้มาอีกครั้งครับ",
+    "We received the review screenshot. Please send the exact link to this review so we can check that specific review directly."
+  );
+
+  await saveMessage({
+    customerId: customer.id,
+    platform: "line",
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+
+  await updateLastBotMessage(customer.id, botReply);
+  await replyLineTextMessage(replyToken, botReply);
+  continue;
+}
+
 // ========================================
 // STEP 3
 // ดึง Review จาก Map จริง
@@ -22597,7 +22354,19 @@ app.post(
 
       const results = [];
 
-      for (const customerMap of maps) {
+      // V2.2.25: default 5 maps per run. If this endpoint runs once daily,
+      // the watcher uses at most about 150 SerpApi searches/month.
+      const maxMapsPerRun = Math.max(
+        1,
+        Number(
+          process.env.SERPAPI_REACTIVATION_MAX_MAPS_PER_RUN ||
+          5
+        )
+      );
+
+      const mapsToCheck = maps.slice(0, maxMapsPerRun);
+
+      for (const customerMap of mapsToCheck) {
         try {
           const placeId =
             String(
@@ -22610,7 +22379,7 @@ app.post(
           }
 
           const newestResult =
-            await getNewestReviews(
+            await getReactivationNewestReviews(
               placeId
             );
 
