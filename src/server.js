@@ -28,6 +28,8 @@ import {
 import {
   appendJobToGoogleSheet,
   appendDispatchJobToGoogleSheet,
+  updateDispatchJobInGoogleSheet,
+  moveDispatchJobToDoneGoogleSheet,
   updateJobInGoogleSheet,
 } from "./services/googleSheetsService.js";
 
@@ -1607,6 +1609,118 @@ async function getRemovalKpiWorkType(job, departmentCodeById = null) {
   }
 
   return null;
+}
+
+
+// =========================================================
+// DEPARTMENT SHEET LIFECYCLE — V2.2.28
+//
+// processing             -> stays in T0_ACTIVE / T2_ACTIVE
+// CONFIRM_REMOVED         -> stays in Active as waiting_payment
+// verified payment/paid   -> moves Active -> T0_DONE / T2_DONE
+//
+// Job ID is the canonical key. Google Apps Script makes the move
+// idempotent so a webhook/payment retry cannot create duplicate rows.
+// =========================================================
+async function getDepartmentSheetRouteForJob(job) {
+  const departments = await getActiveDepartments();
+  const departmentCodeById = new Map(
+    (departments || []).map((department) => [
+      String(department?.id || ""),
+      String(department?.code || "").trim().toUpperCase(),
+    ])
+  );
+
+  const departmentId = String(
+    job?.department_id || job?.departmentId || ""
+  );
+
+  const directDepartment = (departments || []).find(
+    (department) =>
+      String(department?.id || "") === departmentId
+  ) || null;
+
+  let code = String(directDepartment?.code || "")
+    .trim()
+    .toUpperCase();
+
+  if (code !== "T0" && code !== "T2") {
+    code = await getRemovalKpiWorkType(job, departmentCodeById);
+  }
+
+  if (code !== "T0" && code !== "T2") {
+    return null;
+  }
+
+  const activeSheetName = String(
+    directDepartment?.active_sheet_name || `${code}_ACTIVE`
+  ).trim();
+
+  const doneSheetName = /_ACTIVE$/i.test(activeSheetName)
+    ? activeSheetName.replace(/_ACTIVE$/i, "_DONE")
+    : `${code}_DONE`;
+
+  return {
+    code,
+    activeSheetName,
+    doneSheetName,
+  };
+}
+
+async function syncWaitingPaymentToDepartmentActiveSheet(job, removedAt) {
+  try {
+    const route = await getDepartmentSheetRouteForJob(job);
+    if (!route) {
+      console.warn("ACTIVE SHEET ROUTE NOT FOUND:", {
+        jobId: job?.id || null,
+      });
+      return { ok: false, skipped: true, reason: "DEPARTMENT_NOT_FOUND" };
+    }
+
+    return await updateDispatchJobInGoogleSheet({
+      sheetName: route.activeSheetName,
+      jobId: job.id,
+      status: "waiting_payment",
+      removedAt: removedAt || job?.removed_at || "",
+    });
+  } catch (error) {
+    console.error("ACTIVE SHEET WAITING PAYMENT SYNC FAILED:", {
+      jobId: job?.id || null,
+      error: error?.message || String(error),
+    });
+    return { ok: false, error: error?.message || String(error) };
+  }
+}
+
+async function movePaidJobToDepartmentDoneSheet(job, paidAt) {
+  try {
+    const route = await getDepartmentSheetRouteForJob(job);
+    if (!route) {
+      console.warn("DONE SHEET ROUTE NOT FOUND:", {
+        jobId: job?.id || null,
+      });
+      return { ok: false, skipped: true, reason: "DEPARTMENT_NOT_FOUND" };
+    }
+
+    const completedAt = paidAt || new Date().toISOString();
+
+    return await moveDispatchJobToDoneGoogleSheet({
+      sourceSheetName: route.activeSheetName,
+      doneSheetName: route.doneSheetName,
+      jobId: job.id,
+      paidAt: completedAt,
+      completedAt,
+      removedAt: job?.removed_at || job?.review_removed_detected_at || "",
+      price: job?.price ?? "",
+      currency: job?.currency || "",
+    });
+  } catch (error) {
+    console.error("ACTIVE TO DONE SHEET MOVE FAILED:", {
+      jobId: job?.id || null,
+      error: error?.message || String(error),
+    });
+    return { ok: false, error: error?.message || String(error) };
+  }
 }
 
 function formatBangkokDateTime(value) {
@@ -4535,6 +4649,277 @@ async function resolveTelegramPricingCustomerContext({
 }
 
 // =========================================================
+// TELEGRAM T2 — ON-DEMAND ACTIVE REVIEW CHECK
+//
+// Command in TELEGRAM_T2_CHAT_ID:
+//   check
+//
+// Behavior:
+// - scans every currently monitored T2 job
+// - uses the direct Google Review URL only (NO SerpApi)
+// - always bypasses the 10-minute direct-page cache for a fresh manual check
+// - suspected removals are NOT charged automatically
+// - each newly/persistently suspected removal gets a T2 confirmation card
+// - Reply "อนุมัติ" to that card => existing waiting-payment/customer collection flow
+// - Reply "ยังอยู่" => reset and keep monitoring
+// =========================================================
+let telegramT2ManualCheckRunning = false;
+
+async function getMonitoringJobsForDepartmentCode(departmentCode) {
+  const targetCode = String(departmentCode || "").trim().toUpperCase();
+  const [jobs, departments] = await Promise.all([
+    getJobsForReviewMonitoring(),
+    getActiveDepartments(),
+  ]);
+
+  const departmentCodeById = new Map(
+    (departments || []).map((department) => [
+      String(department?.id || ""),
+      String(department?.code || "").trim().toUpperCase(),
+    ])
+  );
+
+  const matched = [];
+  for (const job of (jobs || [])) {
+    const directCode = String(
+      departmentCodeById.get(String(job?.department_id || job?.departmentId || "")) || ""
+    ).trim().toUpperCase();
+
+    const workType = directCode || await getRemovalKpiWorkType(job, departmentCodeById);
+    if (workType === targetCode) matched.push(job);
+  }
+
+  return matched;
+}
+
+async function sendTelegramT2RemovalConfirmation({ chatId, job, customer, reviewUrl }) {
+  const currency = String(job?.currency || "THB").toUpperCase();
+  const price = Number(job?.price || 0);
+  const priceText = price > 0
+    ? (currency === "THB"
+        ? `${price.toLocaleString("th-TH")} บาท`
+        : `$${price.toLocaleString("en-US")} ${currency}`)
+    : "-";
+
+  const pushed = await sendTelegramText({
+    chatId,
+    text: [
+      "🚨 T2 — พบรีวิวอาจออกแล้ว / รอยืนยัน",
+      "",
+      `Customer: ${customer?.display_name || "-"}`,
+      `Business: ${job?.business_name || "-"}`,
+      `ราคา: ${priceText}`,
+      `Job: ${job?.id || "-"}`,
+      "",
+      "Review URL:",
+      reviewUrl || "-",
+      "",
+      "Reply ข้อความนี้:",
+      '✅ "อนุมัติ" = ยืนยันว่าออกแล้ว → เข้า Flow เก็บเงิน',
+      '❌ "ยังอยู่" = รีวิวยังอยู่ → Reset และตรวจต่อ',
+    ].join("\n"),
+  });
+
+  await updateJob(job.id, {
+    removal_team_alerted_at: new Date().toISOString(),
+    removal_team_alert_message_id: pushed.messageId,
+  });
+
+  return pushed;
+}
+
+async function runTelegramT2ManualCheck({ chatId, triggerMessageId }) {
+  const monitorVersion = "TELEGRAM_T2_CHECK_V1_20261017";
+  const jobs = await getMonitoringJobsForDepartmentCode("T2");
+  const monitorRunId = crypto.randomUUID();
+  const monitorRunStartedAt = new Date().toISOString();
+  let removalKpiBatchCreated = false;
+
+  let visibleCount = 0;
+  let suspectedRemovedCount = 0;
+  let errorCount = 0;
+  let skippedCount = 0;
+  const suspected = [];
+  const errors = [];
+
+  console.log("TELEGRAM T2 MANUAL CHECK START:", {
+    monitorVersion,
+    monitorRunId,
+    jobCount: jobs.length,
+  });
+
+  for (const job of jobs) {
+    const reviewUrl = String(job?.review_url || "").trim();
+    if (!reviewUrl) {
+      skippedCount += 1;
+      continue;
+    }
+
+    let lookup;
+    try {
+      // force:true is important for an operator-triggered check: do not reuse
+      // a direct-page result cached before the operator typed "check".
+      lookup = await getReviewFromDirectUrl(reviewUrl, { force: true });
+    } catch (error) {
+      errorCount += 1;
+      errors.push({ jobId: job.id, reviewUrl, error: error?.message || String(error) });
+      console.error("TELEGRAM T2 MANUAL CHECK LOOKUP ERROR:", {
+        jobId: job.id,
+        error: error?.message || String(error),
+      });
+      continue;
+    }
+
+    const found = Boolean(lookup?.found && lookup?.review);
+    const reason = String(lookup?.reason || "").trim();
+    const checkedAt = new Date().toISOString();
+
+    if (found) {
+      visibleCount += 1;
+
+      // If a previous run had already flagged this job, use the existing
+      // human-control path so KPI batches are closed correctly.
+      if (Number(job?.review_missing_count || 0) >= 1) {
+        try {
+          await callSheetControlInternally({
+            jobId: job.id,
+            value: "REVIEW_STILL_VISIBLE",
+          });
+        } catch (resetError) {
+          errorCount += 1;
+          errors.push({ jobId: job.id, reviewUrl, error: resetError?.message || String(resetError) });
+        }
+      } else {
+        await updateJob(job.id, {
+          status: "processing",
+          review_missing_count: 0,
+          last_review_check_at: checkedAt,
+          review_removed_detected_at: null,
+          removal_detection_batch_id: null,
+          removal_team_alerted_at: null,
+          removal_team_alert_message_id: null,
+          removed_at: null,
+        });
+      }
+
+      continue;
+    }
+
+    // Fail closed. Only the direct-review "not visible" result is allowed to
+    // enter suspected-removal flow. URL-shape/meta failures are CHECK_ERROR.
+    if (reason !== "DIRECT_REVIEW_NOT_VISIBLE") {
+      errorCount += 1;
+      errors.push({
+        jobId: job.id,
+        reviewUrl,
+        error: reason || "DIRECT_REVIEW_CHECK_INCONCLUSIVE",
+      });
+      continue;
+    }
+
+    suspectedRemovedCount += 1;
+    suspected.push({ jobId: job.id, reviewUrl });
+
+    let removalBatchId = String(job?.removal_detection_batch_id || "").trim() || null;
+    if (Number(job?.review_missing_count || 0) < 1) {
+      if (!removalKpiBatchCreated) {
+        await upsertRemovalKpiBatch({
+          batchId: monitorRunId,
+          detectedAt: monitorRunStartedAt,
+        });
+        removalKpiBatchCreated = true;
+      }
+      removalBatchId = monitorRunId;
+
+      await updateJob(job.id, {
+        status: "processing",
+        review_missing_count: 1,
+        last_review_check_at: checkedAt,
+        review_removed_detected_at: checkedAt,
+        removal_detection_batch_id: removalBatchId,
+        removal_kpi_notified_at: null,
+        removed_at: null,
+      });
+
+      try {
+        await updateJobInGoogleSheet({
+          jobId: job.id,
+          status: "processing",
+          removedAt: "",
+          paidAt: "",
+        });
+      } catch (sheetError) {
+        console.error("TELEGRAM T2 MANUAL CHECK SHEET UPDATE FAILED:", {
+          jobId: job.id,
+          error: sheetError?.message || String(sheetError),
+        });
+      }
+    } else {
+      await updateJob(job.id, {
+        last_review_check_at: checkedAt,
+      });
+    }
+
+    try {
+      const customer = await getCustomerById(job.customer_id);
+      await sendTelegramT2RemovalConfirmation({
+        chatId,
+        job,
+        customer,
+        reviewUrl,
+      });
+    } catch (alertError) {
+      console.error("TELEGRAM T2 MANUAL CHECK ALERT FAILED:", {
+        jobId: job.id,
+        error: alertError?.message || String(alertError),
+      });
+    }
+
+    // Small spacing reduces the chance of Google throttling a large manual run.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  const lines = [
+    "✅ T2 CHECK เสร็จแล้ว",
+    "",
+    `งาน T2 ที่ตรวจ: ${jobs.length} ลิงก์`,
+    `ยังอยู่: ${visibleCount} ลิงก์`,
+    `🚨 พบว่าอาจออกแล้ว: ${suspectedRemovedCount} ลิงก์`,
+    `ตรวจไม่ได้/ไม่ชัดเจน: ${errorCount} ลิงก์`,
+    skippedCount > 0 ? `ไม่มี Review URL: ${skippedCount} งาน` : null,
+    "",
+    "ระบบนี้ตรวจ Direct Google Review โดยตรง — ไม่ใช้ SerpApi",
+  ].filter(Boolean);
+
+  if (suspected.length > 0) {
+    lines.push(
+      "",
+      "รายการที่พบว่าอาจออกแล้วถูกส่งเป็นการ์ดแยกด้านบน",
+      'Reply การ์ดด้วย "อนุมัติ" หรือ "ยังอยู่" เพื่อยืนยันผล'
+    );
+  }
+
+  await replyTelegramInternal(chatId, triggerMessageId, lines.join("\n"));
+
+  console.log("TELEGRAM T2 MANUAL CHECK COMPLETE:", {
+    monitorVersion,
+    checked: jobs.length,
+    visibleCount,
+    suspectedRemovedCount,
+    errorCount,
+    skippedCount,
+  });
+
+  return {
+    checked: jobs.length,
+    visibleCount,
+    suspectedRemovedCount,
+    errorCount,
+    skippedCount,
+  };
+}
+
+// =========================================================
 // TELEGRAM INTERNAL WEBHOOK — SALES REPLY FLOW
 // =========================================================
 app.post("/telegram/webhook", async (req, res) => {
@@ -4593,12 +4978,116 @@ app.post("/telegram/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // T0/T2 are dispatch-only. Interactive business commands belong to Sales.
-    if (chatId !== salesChatId) return res.sendStatus(200);
     const quotedMessageId = msg?.reply_to_message?.message_id
       ? String(msg.reply_to_message.message_id)
       : null;
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
+
+    // -----------------------------------------------------
+    // T2 ON-DEMAND REVIEW MONITOR
+    // -----------------------------------------------------
+    if (chatId === t2ChatId) {
+      if (normalizedGroupText === "check") {
+        if (telegramT2ManualCheckRunning) {
+          await replyTelegramInternal(
+            chatId,
+            msg.message_id,
+            "⏳ T2 กำลังตรวจอยู่แล้วครับ รอผลรอบปัจจุบันก่อน"
+          );
+          return res.sendStatus(200);
+        }
+
+        telegramT2ManualCheckRunning = true;
+
+        await replyTelegramInternal(
+          chatId,
+          msg.message_id,
+          "🔎 เริ่มตรวจงาน T2 ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Direct Google Review โดยตรง และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ"
+        );
+
+        // Acknowledge Telegram immediately. The scan can take time when T2 has
+        // many active jobs, so run it after the webhook response is closed.
+        res.sendStatus(200);
+
+        void runTelegramT2ManualCheck({
+          chatId,
+          triggerMessageId: msg.message_id,
+        })
+          .catch(async (error) => {
+            console.error("TELEGRAM T2 MANUAL CHECK FAILED:", error);
+            try {
+              await replyTelegramInternal(
+                chatId,
+                msg.message_id,
+                `❌ T2 CHECK ไม่สำเร็จ: ${error?.message || String(error)}`
+              );
+            } catch (replyError) {
+              console.error("TELEGRAM T2 MANUAL CHECK ERROR REPLY FAILED:", replyError);
+            }
+          })
+          .finally(() => {
+            telegramT2ManualCheckRunning = false;
+          });
+
+        return;
+      }
+
+      if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
+        try {
+          const monitoringJobs = await getMonitoringJobsForDepartmentCode("T2");
+          const removalJob = (monitoringJobs || []).find(
+            (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
+          );
+
+          if (!removalJob) {
+            await replyTelegramInternal(
+              chatId,
+              msg.message_id,
+              "⚠️ ไม่พบงาน T2 ที่ผูกกับข้อความนี้ หรือรายการนี้ถูกยืนยันไปแล้ว"
+            );
+            return res.sendStatus(200);
+          }
+
+          const value = normalizedGroupText === "อนุมัติ"
+            ? "CONFIRM_REMOVED"
+            : "REVIEW_STILL_VISIBLE";
+
+          const result = await callSheetControlInternally({
+            jobId: removalJob.id,
+            value,
+          });
+
+          await replyTelegramInternal(
+            chatId,
+            msg.message_id,
+            value === "CONFIRM_REMOVED"
+              ? [
+                  "✅ ยืนยันว่ารีวิวออกแล้ว",
+                  "ระบบส่งงานเข้า Flow เก็บเงินเรียบร้อย",
+                  result?.customerNotified === false
+                    ? "⚠️ งานถูกยืนยันแล้ว แต่ยังไม่ได้ส่งข้อความเก็บเงินอัตโนมัติ กรุณาตรวจสถานะลูกค้า"
+                    : "แจ้งลูกค้าเก็บเงินตาม Flow แล้ว",
+                ].join("\n")
+              : "✅ ยืนยันว่ารีวิวยังอยู่ ระบบ Reset และจะตรวจต่อในรอบถัดไป"
+          );
+        } catch (error) {
+          console.error("TELEGRAM T2 REMOVAL CONFIRM FAILED:", error);
+          await replyTelegramInternal(
+            chatId,
+            msg.message_id,
+            `❌ ยืนยันผลไม่สำเร็จ: ${error?.message || String(error)}`
+          );
+        }
+
+        return res.sendStatus(200);
+      }
+
+      // T2 remains dispatch-only apart from the explicit monitor commands above.
+      return res.sendStatus(200);
+    }
+
+    // T0 remains dispatch-only. Interactive business commands belong to Sales.
+    if (chatId !== salesChatId) return res.sendStatus(200);
 
     console.log("TELEGRAM SALES INBOUND:", {
       chatId,
@@ -4966,6 +5455,9 @@ app.post("/telegram/webhook", async (req, res) => {
         } catch (e) {
           console.error("TELEGRAM PAYMENT SHEET UPDATE FAILED:", e);
         }
+
+        await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
+
         const customerReply = "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
         try {
           await sendMessageToCustomer({
@@ -5572,6 +6064,8 @@ app.post(
             }
           );
         }
+
+        await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
 
 
         paidJobs.push(
@@ -17904,6 +18398,8 @@ if (pendingPayment.slip_file_path) {
       );
     }
 
+    await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
+
 
     const customerReply =
       "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
@@ -20344,6 +20840,8 @@ if (
     );
   }
 
+  await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
+
 
   const customerReply =
     getCustomerText(
@@ -22354,7 +22852,7 @@ app.post(
 
       const results = [];
 
-      // V2.2.26: Reactivation interval is enforced here so the older
+      // V2.2.27: Reactivation interval is enforced here so the older
       // repository query can stay compatible even if it still returns
       // maps that have been unchecked for only 3 days.
       const reactivationIntervalDays = Math.max(
@@ -24156,12 +24654,32 @@ app.post("/sheet-control", async (req, res) => {
 ) {
 
   // Idempotency: a retry must never charge/notify/KPI twice.
+  // V2.2.28 also uses the retry to self-heal Sheet state if a previous
+  // Sheet call failed after the database status was already committed.
+  const existingJobStatus =
+    String(job.status || "").trim().toLowerCase();
+
   if (
-    ["waiting_payment", "paid"].includes(
-      String(job.status || "").trim().toLowerCase()
-    ) ||
+    ["waiting_payment", "paid"].includes(existingJobStatus) ||
     Boolean(job.removed_at)
   ) {
+    const existingRemovedAt =
+      job.removed_at || job.review_removed_detected_at || null;
+
+    if (existingJobStatus === "waiting_payment") {
+      await syncWaitingPaymentToDepartmentActiveSheet(
+        job,
+        existingRemovedAt
+      );
+    }
+
+    if (existingJobStatus === "paid") {
+      await movePaidJobToDepartmentDoneSheet(
+        job,
+        job.paid_at || new Date().toISOString()
+      );
+    }
+
     return res.status(200).json({
       ok: true,
       action: "manual_action",
@@ -24170,7 +24688,7 @@ app.post("/sheet-control", async (req, res) => {
       customerId: customer.id,
       alreadyConfirmed: true,
       status: job.status,
-      removedAt: job.removed_at || job.review_removed_detected_at || null,
+      removedAt: existingRemovedAt,
     });
   }
 
@@ -24574,6 +25092,10 @@ if (
     );
   }
 
+  // Keep the department row visible until payment is actually verified.
+  // This changes only T0_ACTIVE/T2_ACTIVE -> waiting_payment.
+  await syncWaitingPaymentToDepartmentActiveSheet(job, removedAt);
+
 
   // ========================================
   // 7-9. CUSTOMER NOTIFICATION
@@ -24890,6 +25412,8 @@ if (
             }
           );
         }
+
+        await movePaidJobToDepartmentDoneSheet(job, paidAt);
 
 
         console.log(
