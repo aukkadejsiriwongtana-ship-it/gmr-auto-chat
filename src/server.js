@@ -107,10 +107,16 @@ function getManychatApiTokenForPlatform(platform) {
   return "";
 }
 
-async function sendManychatFacebookText({ platform, platformUserId, text }) {
+async function sendManychatFacebookContent({
+  platform,
+  platformUserId,
+  text = "",
+  imageUrl = "",
+}) {
   const token = getManychatApiTokenForPlatform(platform);
   const subscriberId = String(platformUserId || "").trim();
   const safeText = String(text || "").trim();
+  const safeImageUrl = String(imageUrl || "").trim();
 
   if (!token) {
     throw new Error(
@@ -119,7 +125,27 @@ async function sendManychatFacebookText({ platform, platformUserId, text }) {
   }
 
   if (!subscriberId) throw new Error("Missing ManyChat subscriber_id");
-  if (!safeText) throw new Error("Missing customer message text");
+
+  const messages = [];
+
+  if (safeText) {
+    messages.push({
+      type: "text",
+      text: safeText,
+    });
+  }
+
+  if (safeImageUrl) {
+    messages.push({
+      type: "image",
+      url: safeImageUrl,
+      buttons: [],
+    });
+  }
+
+  if (messages.length === 0) {
+    throw new Error("Missing customer message content");
+  }
 
   const response = await fetchWithNetworkRetry(
     "https://api.manychat.com/fb/sending/sendContent",
@@ -135,12 +161,7 @@ async function sendManychatFacebookText({ platform, platformUserId, text }) {
         data: {
           version: "v2",
           content: {
-            messages: [
-              {
-                type: "text",
-                text: safeText,
-              },
-            ],
+            messages,
           },
         },
       }),
@@ -159,6 +180,7 @@ async function sendManychatFacebookText({ platform, platformUserId, text }) {
   console.log("MANYCHAT CUSTOMER SEND RESPONSE:", {
     platform,
     subscriberId,
+    messageTypes: messages.map((item) => item.type),
     httpStatus: response.status,
     ok: response.ok,
     manychatStatus: data?.status || null,
@@ -185,10 +207,11 @@ async function sendMessageToCustomer({ platform, platformUserId, text, ...rest }
     const manychatToken = getManychatApiTokenForPlatform(normalized);
 
     if (manychatToken) {
-      return sendManychatFacebookText({
+      return sendManychatFacebookContent({
         platform: normalized,
         platformUserId,
         text,
+        imageUrl: rest?.imageUrl || "",
       });
     }
 
@@ -1929,7 +1952,11 @@ async function tryFinalizeRemovalKpiBatch(batchId) {
   }
 }
 
-async function callSheetControlInternally({ jobId, value }) {
+async function callSheetControlInternally({
+  jobId,
+  value,
+  suppressCustomerNotify = false,
+}) {
   const secret = process.env.SHEET_CONTROL_SECRET;
 
   if (!secret) throw new Error("Missing SHEET_CONTROL_SECRET");
@@ -1944,6 +1971,7 @@ async function callSheetControlInternally({ jobId, value }) {
         jobId,
         action: "manual_action",
         value,
+        suppressCustomerNotify: Boolean(suppressCustomerNotify),
       }),
     }
   );
@@ -4943,7 +4971,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     throw new Error(`Unsupported department for manual check: ${targetCode || "-"}`);
   }
 
-  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V31_APIFY_20261018`;
+  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V32_APIFY_BATCH_APPROVE_20261018`;
   const jobs = await getMonitoringJobsForDepartmentCode(targetCode);
   const monitorRunId = crypto.randomUUID();
   const monitorRunStartedAt = new Date().toISOString();
@@ -5055,6 +5083,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
       suspectedRemovedCount += 1;
       suspected.push({
         jobId: job.id,
+        customerId: job?.customer_id || null,
         businessName: job?.business_name || result?.business_name || "",
         reviewUrl,
       });
@@ -5099,104 +5128,117 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
           last_review_check_at: checkedAt,
         });
       }
-
-      try {
-        const customer = await getCustomerById(job.customer_id);
-        await sendTelegramRemovalConfirmation({
-          chatId,
-          departmentCode: targetCode,
-          job,
-          customer,
-          reviewUrl,
-        });
-      } catch (alertError) {
-        operationalErrorCount += 1;
-        console.error(`TELEGRAM ${targetCode} APIFY REMOVAL ALERT FAILED:`, {
-          jobId: job.id,
-          error: alertError?.message || String(alertError),
-        });
-      }
     }
   }
 
-  const lines = [
+  // V32: one result/approval card per CHECK run. All REMOVED jobs from this
+  // run are bound to the same Telegram message_id. Replying "อนุมัติ" once
+  // confirms the entire REMOVED batch.
+  const resultLines = [
     `✅ ${targetCode} CHECK เสร็จแล้ว`,
-    "",
-    `งาน ${targetCode} ที่ตรวจ: ${jobs.length} ลิงก์`,
-    `ยังอยู่: ${visibleCount} ลิงก์`,
-    `🚨 พบว่าออกแล้ว / รอยืนยัน: ${suspectedRemovedCount} ลิงก์`,
-    `ตรวจไม่ได้/ไม่ชัดเจน: ${errorCount} ลิงก์`,
-    skippedCount > 0 ? `ไม่มี Review URL: ${skippedCount} งาน` : null,
-    operationalErrorCount > 0 ? `⚠️ System sync warning: ${operationalErrorCount} รายการ` : null,
-    "",
-    "ตรวจด้วย Apify Specific Review Verification — ไม่ใช้ SerpApi",
+    `ตรวจทั้งหมด: ${jobs.length} ลิงก์`,
+    `ยังอยู่: ${visibleCount}`,
+    `🚨 ออกแล้ว / รอยืนยัน: ${suspectedRemovedCount}`,
+    `⚠️ ไม่ชัดเจน: ${errorCount}`,
+    skippedCount > 0 ? `ไม่มี Review URL: ${skippedCount}` : null,
+    operationalErrorCount > 0 ? `System sync warning: ${operationalErrorCount}` : null,
   ].filter(Boolean);
 
   if (suspected.length > 0) {
-    lines.push(
+    resultLines.push("", `🚨 REMOVED (${suspected.length})`);
+    suspected.forEach((item, index) => {
+      resultLines.push(
+        `${index + 1}. ${item.businessName || "-"}`,
+        item.reviewUrl || "-"
+      );
+    });
+  }
+
+  if (errors.length > 0) {
+    resultLines.push("", `⚠️ ไม่ชัดเจน (${errors.length})`);
+    errors.forEach((item, index) => {
+      resultLines.push(
+        `${index + 1}. ${item.businessName || "-"}`,
+        item.reviewUrl || "-",
+        `เหตุผล: ${item.error || "UNKNOWN"}`
+      );
+    });
+  }
+
+  resultLines.push("", "ตรวจด้วย Apify — ไม่ใช้ SerpApi");
+
+  if (suspected.length > 0) {
+    resultLines.push(
       "",
-      "รายการ REMOVED ถูกส่งเป็นการ์ดแยกเพื่อให้ Reply ยืนยัน",
-      'Reply การ์ดด้วย "อนุมัติ" หรือ "ยังอยู่" เพื่อยืนยันผล'
+      `Reply ข้อความนี้ว่า \"อนุมัติ\" = ยืนยัน REMOVED ทั้งหมด ${suspected.length} ลิงก์`,
+      'Reply "ยังอยู่" = Reset REMOVED ทั้งหมดในรอบนี้'
     );
   }
 
-  await replyTelegramInternal(chatId, triggerMessageId, lines.join("\n"));
+  let resultText = resultLines.join("\n");
+  if (resultText.length > 4050) {
+    // Telegram has a 4096-character message limit. Keep the approval card
+    // single-message and retain every Job ID even if very long URLs must be
+    // omitted from the display. The database binding still covers all jobs.
+    const compactLines = [
+      `✅ ${targetCode} CHECK เสร็จแล้ว`,
+      `ตรวจทั้งหมด: ${jobs.length} | ยังอยู่: ${visibleCount} | REMOVED: ${suspectedRemovedCount} | ไม่ชัดเจน: ${errorCount}`,
+    ];
 
-  const sendResultList = async ({ title, items, includeReason = false }) => {
-    if (!Array.isArray(items) || items.length === 0) {
-      await sendTelegramText({
-        chatId,
-        text: `${title}\nไม่มี`,
+    if (suspected.length > 0) {
+      compactLines.push("", `🚨 REMOVED (${suspected.length})`);
+      suspected.forEach((item, index) => {
+        compactLines.push(`${index + 1}. ${item.businessName || "-"} | Job ${item.jobId}`);
       });
-      return;
+      compactLines.push(
+        "",
+        `Reply ข้อความนี้ว่า \"อนุมัติ\" = ยืนยันทั้งหมด ${suspected.length} ลิงก์`
+      );
     }
 
-    const chunks = [];
-    let current = `${title}\n`;
+    if (errors.length > 0) {
+      compactLines.push("", `⚠️ ไม่ชัดเจน (${errors.length}) — ดู URL จาก JOBS_MASTER/Log`);
+    }
 
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index] || {};
-      const entry = [
-        "",
-        `${index + 1}. ${item.businessName || "-"}`,
-        item.reviewUrl || "-",
-        includeReason ? `เหตุผล: ${item.error || "ตรวจไม่ชัดเจน"}` : null,
-      ].filter(Boolean).join("\n") + "\n";
+    compactLines.push("", "ตรวจด้วย Apify — ไม่ใช้ SerpApi");
+    resultText = compactLines.join("\n");
+  }
 
-      if ((current + entry).length > 3800 && current.trim() !== title.trim()) {
-        chunks.push(current.trim());
-        current = `${title} (ต่อ)\n${entry}`;
-      } else {
-        current += entry;
+  const resultMessage = await replyTelegramInternal(
+    chatId,
+    triggerMessageId,
+    resultText
+  );
+
+  if (suspected.length > 0) {
+    const alertedAt = new Date().toISOString();
+    for (const item of suspected) {
+      try {
+        await updateJob(item.jobId, {
+          removal_team_alerted_at: alertedAt,
+          removal_team_alert_message_id: resultMessage.messageId,
+        });
+      } catch (alertBindError) {
+        operationalErrorCount += 1;
+        console.error(`TELEGRAM ${targetCode} BATCH APPROVAL BIND FAILED:`, {
+          jobId: item.jobId,
+          messageId: resultMessage.messageId,
+          error: alertBindError?.message || String(alertBindError),
+        });
       }
     }
-
-    if (current.trim()) chunks.push(current.trim());
-
-    for (const chunk of chunks) {
-      await sendTelegramText({ chatId, text: chunk });
-    }
-  };
-
-  await sendResultList({
-    title: `🚨 ${targetCode} — ลิงก์ที่ Apify ระบุ REMOVED / รอยืนยัน (${suspected.length})`,
-    items: suspected,
-  });
-
-  await sendResultList({
-    title: `⚠️ ${targetCode} — ลิงก์ที่ตรวจไม่ได้ / ผลไม่ชัดเจน (${errors.length})`,
-    items: errors,
-    includeReason: true,
-  });
+  }
 
   console.log(`TELEGRAM ${targetCode} MANUAL CHECK COMPLETE:`, {
     monitorVersion,
+    monitorRunId,
     checked: jobs.length,
     visibleCount,
     suspectedRemovedCount,
     errorCount,
     skippedCount,
     operationalErrorCount,
+    batchApprovalMessageId: resultMessage?.messageId || null,
   });
 
   return {
@@ -5206,6 +5248,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     errorCount,
     skippedCount,
     operationalErrorCount,
+    batchApprovalMessageId: resultMessage?.messageId || null,
   };
 }
 
@@ -5291,14 +5334,7 @@ app.post("/telegram/webhook", async (req, res) => {
 
         telegramDepartmentManualCheckRunning.add(departmentCode);
 
-        await replyTelegramInternal(
-          chatId,
-          msg.message_id,
-          `🔎 เริ่มตรวจงาน ${departmentCode} ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Specific Review ด้วย Apify และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ`
-        );
-
-        // Acknowledge Telegram immediately. The scan can take time when there
-        // are many active jobs, so run it after the webhook response is closed.
+        // V32: reply only once after the scan completes.
         res.sendStatus(200);
 
         void runTelegramDepartmentManualCheck({
@@ -5328,15 +5364,15 @@ app.post("/telegram/webhook", async (req, res) => {
       if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
         try {
           const monitoringJobs = await getMonitoringJobsForDepartmentCode(departmentCode);
-          const removalJob = (monitoringJobs || []).find(
+          const removalJobs = (monitoringJobs || []).filter(
             (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
           );
 
-          if (!removalJob) {
+          if (removalJobs.length === 0) {
             await replyTelegramInternal(
               chatId,
               msg.message_id,
-              `⚠️ ไม่พบงาน ${departmentCode} ที่ผูกกับข้อความนี้ หรือรายการนี้ถูกยืนยันไปแล้ว`
+              `⚠️ ไม่พบงาน ${departmentCode} ที่ผูกกับข้อความนี้ หรือ Batch นี้ถูกยืนยันไปแล้ว`
             );
             return res.sendStatus(200);
           }
@@ -5345,30 +5381,219 @@ app.post("/telegram/webhook", async (req, res) => {
             ? "CONFIRM_REMOVED"
             : "REVIEW_STILL_VISIBLE";
 
-          const result = await callSheetControlInternally({
-            jobId: removalJob.id,
-            value,
-          });
+          if (value === "REVIEW_STILL_VISIBLE") {
+            let resetCount = 0;
+            const resetFailures = [];
+
+            for (const removalJob of removalJobs) {
+              try {
+                await callSheetControlInternally({
+                  jobId: removalJob.id,
+                  value,
+                });
+                resetCount += 1;
+              } catch (jobError) {
+                resetFailures.push({
+                  jobId: removalJob.id,
+                  businessName: removalJob?.business_name || "-",
+                  error: jobError?.message || String(jobError),
+                });
+              }
+            }
+
+            const resetLines = [
+              `✅ ${departmentCode}: Reset Batch แล้ว`,
+              `กลับไปตรวจต่อ: ${resetCount}/${removalJobs.length} ลิงก์`,
+            ];
+
+            if (resetFailures.length > 0) {
+              resetLines.push("", `❌ Reset ไม่สำเร็จ ${resetFailures.length} ลิงก์`);
+              resetFailures.forEach((item, index) => {
+                resetLines.push(
+                  `${index + 1}. ${item.businessName}`,
+                  `Job: ${item.jobId}`,
+                  `เหตุผล: ${item.error}`
+                );
+              });
+            }
+
+            await replyTelegramInternal(
+              chatId,
+              msg.message_id,
+              resetLines.join("\n")
+            );
+
+            return res.sendStatus(200);
+          }
+
+          // V32 BATCH APPROVAL:
+          // Confirm every REMOVED job in the Telegram result card.
+          // For multiple jobs belonging to the same customer + currency,
+          // suppress intermediate notifications so the customer receives only
+          // one consolidated payment message after the final job is confirmed.
+          const approvalGroups = new Map();
+
+          for (const removalJob of removalJobs) {
+            const groupCurrency = getCurrencyFromUnitPrice({
+              price: Number(removalJob?.price || 0),
+              currency: removalJob?.currency,
+            });
+            const groupKey = `${String(removalJob?.customer_id || "-")}|${groupCurrency}`;
+
+            if (!approvalGroups.has(groupKey)) approvalGroups.set(groupKey, []);
+            approvalGroups.get(groupKey).push(removalJob);
+          }
+
+          let confirmedCount = 0;
+          let notificationSuccessCount = 0;
+          let notificationManualCount = 0;
+          const approvalFailures = [];
+          const notificationWarnings = [];
+
+          for (const groupJobs of approvalGroups.values()) {
+            for (let index = 0; index < groupJobs.length; index += 1) {
+              const removalJob = groupJobs[index];
+              const isLastInPaymentGroup = index === groupJobs.length - 1;
+
+              try {
+                const result = await callSheetControlInternally({
+                  jobId: removalJob.id,
+                  value: "CONFIRM_REMOVED",
+                  suppressCustomerNotify: !isLastInPaymentGroup,
+                });
+
+                confirmedCount += 1;
+
+                if (isLastInPaymentGroup) {
+                  if (result?.customerNotified === true) {
+                    notificationSuccessCount += 1;
+                  } else if (result?.notificationSuppressed === true) {
+                    // Defensive only; the final job in a group should not be suppressed.
+                  } else {
+                    notificationManualCount += 1;
+
+                    const rawError = String(
+                      result?.customerNotificationError || ""
+                    ).trim();
+
+                    let friendlyError = rawError || "ระบบไม่ได้ส่งข้อความอัตโนมัติให้ลูกค้ารายนี้";
+
+                    if (
+                      /over\s*24h|more than 24 hours|without a message tag|code[\"']?:?\s*3011/i.test(rawError)
+                    ) {
+                      friendlyError =
+                        "Facebook/ManyChat เกิน 24 ชม. จึงส่ง Automation ไม่ได้ — งานเข้า waiting_payment แล้ว แต่ต้องติดต่อลูกค้าผ่านช่องทางที่ Meta อนุญาต";
+                    }
+
+                    let customerName = "-";
+                    try {
+                      const customer = await getCustomerById(removalJob.customer_id);
+                      customerName = customer?.display_name || "-";
+                    } catch {}
+
+                    notificationWarnings.push({
+                      customerName,
+                      businessName: removalJob?.business_name || "-",
+                      error: friendlyError,
+                      manualPaymentText: String(result?.manualPaymentText || "").trim(),
+                      paymentQrUrl: String(result?.paymentQrUrl || "").trim(),
+                      paymentLink: String(result?.paymentLink || "").trim(),
+                    });
+                  }
+                }
+              } catch (jobError) {
+                approvalFailures.push({
+                  jobId: removalJob.id,
+                  businessName: removalJob?.business_name || "-",
+                  error: jobError?.message || String(jobError),
+                });
+              }
+            }
+          }
+
+          const approvalLines = [
+            `✅ ${departmentCode}: อนุมัติ Batch เสร็จแล้ว`,
+            `ยืนยันเข้า waiting_payment: ${confirmedCount}/${removalJobs.length} ลิงก์`,
+            `แจ้งลูกค้าอัตโนมัติสำเร็จ: ${notificationSuccessCount} ชุด`,
+            notificationManualCount > 0
+              ? `⚠️ ต้องติดต่อลูกค้าเอง: ${notificationManualCount} ชุด`
+              : null,
+          ].filter(Boolean);
+
+          if (notificationWarnings.length > 0) {
+            approvalLines.push("", "⚠️ รายการที่ส่งข้อความอัตโนมัติไม่ได้");
+            notificationWarnings.forEach((item, index) => {
+              approvalLines.push(
+                `${index + 1}. ${item.customerName} — ${item.businessName}`,
+                item.error
+              );
+            });
+          }
+
+          if (approvalFailures.length > 0) {
+            approvalLines.push("", `❌ ยืนยันงานไม่สำเร็จ ${approvalFailures.length} ลิงก์`);
+            approvalFailures.forEach((item, index) => {
+              approvalLines.push(
+                `${index + 1}. ${item.businessName}`,
+                `Job: ${item.jobId}`,
+                `เหตุผล: ${item.error}`
+              );
+            });
+          }
 
           await replyTelegramInternal(
             chatId,
             msg.message_id,
-            value === "CONFIRM_REMOVED"
-              ? [
-                  `✅ ${departmentCode}: ยืนยันว่ารีวิวออกแล้ว`,
-                  "ระบบส่งงานเข้า Flow เก็บเงินเรียบร้อย",
-                  result?.customerNotified === false
-                    ? "⚠️ งานถูกยืนยันแล้ว แต่ยังไม่ได้ส่งข้อความเก็บเงินอัตโนมัติ กรุณาตรวจสถานะลูกค้า"
-                    : "แจ้งลูกค้าเก็บเงินตาม Flow แล้ว",
-                ].join("\n")
-              : `✅ ${departmentCode}: ยืนยันว่ารีวิวยังอยู่ ระบบ Reset และจะตรวจต่อในรอบถัดไป`
+            approvalLines.join("\n")
           );
+
+          // V33: if any customer-channel notification failed, immediately
+          // send the exact customer-facing payment reminder into Telegram so
+          // staff can copy/paste it manually. Send one message per customer to
+          // avoid Telegram's 4096-character truncation and to keep each copy
+          // block clearly separated.
+          for (const item of notificationWarnings) {
+            const manualLines = [
+              `📋 ${departmentCode} — ข้อความเก็บเงินสำหรับส่งเอง`,
+              `ลูกค้า: ${item.customerName || "-"}`,
+              `ธุรกิจ: ${item.businessName || "-"}`,
+              "",
+              "COPY ข้อความด้านล่างส่งลูกค้าได้เลย:",
+              "",
+              item.manualPaymentText || "⚠️ ระบบสร้างข้อความเก็บเงินไม่สำเร็จ กรุณาตรวจสอบ Job/ราคาในระบบ",
+            ];
+
+            if (item.paymentQrUrl) {
+              manualLines.push(
+                "",
+                "QR ชำระเงิน:",
+                item.paymentQrUrl
+              );
+            } else if (item.paymentLink) {
+              manualLines.push(
+                "",
+                "Payment link:",
+                item.paymentLink
+              );
+            }
+
+            manualLines.push(
+              "",
+              `เหตุผลที่ส่งอัตโนมัติไม่ได้: ${item.error || "-"}`
+            );
+
+            await replyTelegramInternal(
+              chatId,
+              msg.message_id,
+              manualLines.join("\n")
+            );
+          }
         } catch (error) {
-          console.error(`TELEGRAM ${departmentCode} REMOVAL CONFIRM FAILED:`, error);
+          console.error(`TELEGRAM ${departmentCode} REMOVAL BATCH CONFIRM FAILED:`, error);
           await replyTelegramInternal(
             chatId,
             msg.message_id,
-            `❌ ยืนยันผลไม่สำเร็จ: ${error?.message || String(error)}`
+            `❌ ยืนยัน Batch ไม่สำเร็จ: ${error?.message || String(error)}`
           );
         }
 
@@ -24649,6 +24874,7 @@ app.post("/sheet-control", async (req, res) => {
       jobId,
       action,
       value,
+      suppressCustomerNotify = false,
     } = req.body || {};
 
 
@@ -25400,35 +25626,72 @@ if (
   // ========================================
 
   const shouldNotifyCustomer =
+    suppressCustomerNotify !== true &&
     job?.customer_notify !== false &&
     customer?.customer_notify !== false &&
     customer?.platform !== "manual";
 
-  if (shouldNotifyCustomer) {
-    await sendMessageToCustomer({
-      platform: customer.platform,
-      platformUserId: customer.platform_user_id,
-      text: botReply,
-    });
+  let customerNotified = false;
+  let customerNotificationError = null;
 
-    if (paymentCurrency === "THB") {
-      await sendMessageToCustomer({
+  if (shouldNotifyCustomer) {
+    try {
+      const normalizedCustomerPlatform =
+        String(customer.platform || "").trim().toLowerCase();
+
+      // Facebook/ManyChat can send the text + QR image in one Content API call.
+      // This also fixes the old "Missing customer message text" error that
+      // happened when an image-only send was routed through the text sender.
+      if (
+        normalizedCustomerPlatform === "facebook_th" ||
+        normalizedCustomerPlatform === "facebook_en"
+      ) {
+        await sendMessageToCustomer({
+          platform: customer.platform,
+          platformUserId: customer.platform_user_id,
+          text: botReply,
+          imageUrl: paymentCurrency === "THB" ? thbPaymentQrUrl : "",
+        });
+      } else {
+        await sendMessageToCustomer({
+          platform: customer.platform,
+          platformUserId: customer.platform_user_id,
+          text: botReply,
+        });
+
+        if (paymentCurrency === "THB" && thbPaymentQrUrl) {
+          await sendMessageToCustomer({
+            platform: customer.platform,
+            platformUserId: customer.platform_user_id,
+            imageUrl: thbPaymentQrUrl,
+          });
+        }
+      }
+
+      await saveMessage({
+        customerId: customer.id,
         platform: customer.platform,
-        platformUserId: customer.platform_user_id,
-        imageUrl: thbPaymentQrUrl,
+        direction: "outbound",
+        messageType: "text",
+        messageText: botReply,
+      });
+
+      await updateLastBotMessage(customer.id, botReply);
+      customerNotified = true;
+    } catch (notifyError) {
+      customerNotificationError =
+        notifyError?.message || String(notifyError);
+
+      // IMPORTANT: customer-channel failure must never roll the job back.
+      // The removal is already confirmed and the job stays waiting_payment.
+      console.error("CONFIRM REMOVED CUSTOMER NOTIFY FAILED:", {
+        jobId: job.id,
+        customerId: customer.id,
+        platform: customer.platform,
+        error: customerNotificationError,
       });
     }
-
-    await saveMessage({
-      customerId: customer.id,
-      platform: customer.platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
-    });
-
-    await updateLastBotMessage(customer.id, botReply);
-  } else {
+  } else if (suppressCustomerNotify !== true) {
     try {
       await triggerHumanAttention({
         customer,
@@ -25510,8 +25773,28 @@ if (
 
       removedAt,
 
-      customerNotified:
-        shouldNotifyCustomer,
+      customerNotified,
+
+      customerNotificationError,
+
+      // V33: expose the exact customer-facing payment message to the internal
+      // Telegram batch handler. If automatic delivery fails, staff can copy
+      // this text and send it manually without reconstructing the amount or
+      // breakdown by hand.
+      manualPaymentText: botReply,
+
+      paymentQrUrl:
+        paymentCurrency === "THB"
+          ? thbPaymentQrUrl
+          : null,
+
+      paymentLink:
+        paymentCurrency === "USD"
+          ? stripePaymentLink
+          : null,
+
+      notificationSuppressed:
+        suppressCustomerNotify === true,
     });
 }
 
