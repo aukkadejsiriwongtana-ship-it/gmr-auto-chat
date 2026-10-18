@@ -4649,21 +4649,188 @@ async function resolveTelegramPricingCustomerContext({
 }
 
 // =========================================================
-// TELEGRAM T0 / T2 — ON-DEMAND ACTIVE REVIEW CHECK
+// TELEGRAM T0 / T2 — ON-DEMAND ACTIVE REVIEW CHECK — V2.2.31
 //
 // Command in TELEGRAM_T0_CHAT_ID or TELEGRAM_T2_CHAT_ID:
 //   check
 //
-// Behavior:
-// - scans every currently monitored T2 job
-// - uses the direct Google Review URL only (NO SerpApi)
-// - always bypasses the 10-minute direct-page cache for a fresh manual check
-// - suspected removals are NOT charged automatically
-// - each newly/persistently suspected removal gets a department confirmation card
-// - Reply "อนุมัติ" to that card => existing waiting-payment/customer collection flow
-// - Reply "ยังอยู่" => reset and keep monitoring
+// Verification authority for this operator command:
+// - Apify actor: unitbytes/google-maps-reviews-tracker
+// - ACTIVE  => review is still public
+// - REMOVED => review is removed/hidden; human confirmation still required
+// - UNKNOWN / UNSUPPORTED / missing output => inconclusive; NEVER treated as removed
+//
+// Important:
+// - ONE Apify Actor run per Telegram check, containing all review URLs in the
+//   selected department. This is much cheaper/faster than one run per job.
+// - This flow does NOT use SerpApi.
+// - Direct Google HTML metadata is deliberately NOT used as the authority here,
+//   because Google can keep a direct-review shell/title after a review is gone.
 // =========================================================
 const telegramDepartmentManualCheckRunning = new Set();
+
+const APIFY_REVIEW_TRACKER_SYNC_URL =
+  "https://api.apify.com/v2/actors/unitbytes~google-maps-reviews-tracker/run-sync-get-dataset-items";
+
+function normalizeReviewUrlKey(rawUrl) {
+  const raw = String(rawUrl || "")
+    .trim()
+    .replace(/\\&/g, "&")
+    .replace(/&amp;/gi, "&");
+
+  if (!raw) return "";
+
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function getApifyReviewResultUrl(item) {
+  return String(
+    item?.input_url ||
+    item?.inputUrl ||
+    item?.url ||
+    item?.review_url ||
+    item?.reviewUrl ||
+    ""
+  ).trim();
+}
+
+async function verifyReviewUrlsWithApify(reviewUrls) {
+  const token = String(process.env.APIFY_API_TOKEN || "").trim();
+  if (!token) {
+    throw new Error("Missing APIFY_API_TOKEN");
+  }
+
+  const uniqueUrls = [...new Set(
+    (reviewUrls || [])
+      .map((url) => String(url || "").trim())
+      .filter(Boolean)
+  )];
+
+  if (uniqueUrls.length === 0) {
+    return {
+      items: [],
+      byUrl: new Map(),
+      inputUrls: [],
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = Math.max(
+    30000,
+    Number(process.env.APIFY_REVIEW_CHECK_TIMEOUT_MS || 180000)
+  );
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response;
+  let responseText = "";
+
+  try {
+    const endpoint =
+      `${APIFY_REVIEW_TRACKER_SYNC_URL}?token=${encodeURIComponent(token)}`;
+
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        reviewsToCheck: uniqueUrls,
+        proxyConfiguration: {
+          useApifyProxy: true,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    responseText = await response.text();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`APIFY_REVIEW_CHECK_TIMEOUT_${timeoutMs}MS`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response?.ok) {
+    throw new Error(
+      `APIFY_REVIEW_CHECK_HTTP_${response?.status || "UNKNOWN"}: ${responseText.slice(0, 500)}`
+    );
+  }
+
+  let items;
+  try {
+    items = responseText ? JSON.parse(responseText) : [];
+  } catch {
+    throw new Error(
+      `APIFY_REVIEW_CHECK_INVALID_JSON: ${responseText.slice(0, 500)}`
+    );
+  }
+
+  if (!Array.isArray(items)) {
+    throw new Error("APIFY_REVIEW_CHECK_INVALID_RESPONSE");
+  }
+
+  const byUrl = new Map();
+  items.forEach((item, index) => {
+    const resultUrl = getApifyReviewResultUrl(item);
+    if (resultUrl) {
+      byUrl.set(normalizeReviewUrlKey(resultUrl), item);
+      byUrl.set(resultUrl, item);
+    }
+
+    // Keep the input position as a safe fallback. The actor returns one result
+    // per supplied review URL; URL fields can be canonicalized by Google.
+    const inputUrl = uniqueUrls[index];
+    if (inputUrl && !byUrl.has(normalizeReviewUrlKey(inputUrl))) {
+      byUrl.set(normalizeReviewUrlKey(inputUrl), item);
+      byUrl.set(inputUrl, item);
+    }
+  });
+
+  console.log("APIFY REVIEW CHECK BATCH COMPLETE:", {
+    inputCount: uniqueUrls.length,
+    outputCount: items.length,
+    statuses: items.reduce((acc, item) => {
+      const status = String(item?.status || "UNKNOWN").trim().toUpperCase();
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {}),
+  });
+
+  return {
+    items,
+    byUrl,
+    inputUrls: uniqueUrls,
+  };
+}
+
+function getApifyResultForReviewUrl(batch, reviewUrl) {
+  if (!batch) return null;
+
+  const direct = batch.byUrl?.get(reviewUrl);
+  if (direct) return direct;
+
+  const normalized = normalizeReviewUrlKey(reviewUrl);
+  const normalizedMatch = batch.byUrl?.get(normalized);
+  if (normalizedMatch) return normalizedMatch;
+
+  const inputIndex = (batch.inputUrls || []).findIndex(
+    (url) => normalizeReviewUrlKey(url) === normalized
+  );
+
+  if (inputIndex >= 0 && Array.isArray(batch.items)) {
+    return batch.items[inputIndex] || null;
+  }
+
+  return null;
+}
 
 async function getMonitoringJobsForDepartmentCode(departmentCode) {
   const targetCode = String(departmentCode || "").trim().toUpperCase();
@@ -4704,7 +4871,7 @@ async function sendTelegramRemovalConfirmation({ chatId, departmentCode, job, cu
   const pushed = await sendTelegramText({
     chatId,
     text: [
-      `🚨 ${departmentCode} — พบรีวิวอาจออกแล้ว / รอยืนยัน`,
+      `🚨 ${departmentCode} — พบรีวิวออกแล้ว / รอยืนยัน`,
       "",
       `Customer: ${customer?.display_name || "-"}`,
       `Business: ${job?.business_name || "-"}`,
@@ -4728,13 +4895,55 @@ async function sendTelegramRemovalConfirmation({ chatId, departmentCode, job, cu
   return pushed;
 }
 
+async function resetMonitoringJobAsVisible(job, checkedAt) {
+  const previousRemovalBatchId =
+    String(job?.removal_detection_batch_id || "").trim() || null;
+
+  await updateJob(job.id, {
+    status: "processing",
+    review_missing_count: 0,
+    last_review_check_at: checkedAt,
+    review_removed_detected_at: null,
+    removal_detection_batch_id: null,
+    removal_team_alerted_at: null,
+    removal_team_alert_message_id: null,
+    removed_at: null,
+  });
+
+  if (previousRemovalBatchId) {
+    try {
+      await tryFinalizeRemovalKpiBatch(previousRemovalBatchId);
+    } catch (kpiError) {
+      console.error("REMOVAL KPI FINALIZE AFTER APIFY ACTIVE FAILED:", {
+        jobId: job.id,
+        batchId: previousRemovalBatchId,
+        error: kpiError?.message || String(kpiError),
+      });
+    }
+  }
+
+  try {
+    await updateJobInGoogleSheet({
+      jobId: job.id,
+      status: "processing",
+      removedAt: "",
+      paidAt: "",
+    });
+  } catch (sheetError) {
+    console.error("APIFY ACTIVE JOBS_MASTER RESET FAILED:", {
+      jobId: job.id,
+      error: sheetError?.message || String(sheetError),
+    });
+  }
+}
+
 async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, departmentCode }) {
   const targetCode = String(departmentCode || "").trim().toUpperCase();
   if (!["T0", "T2"].includes(targetCode)) {
     throw new Error(`Unsupported department for manual check: ${targetCode || "-"}`);
   }
 
-  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V30_DIAG_20261018`;
+  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V31_APIFY_20261018`;
   const jobs = await getMonitoringJobsForDepartmentCode(targetCode);
   const monitorRunId = crypto.randomUUID();
   const monitorRunStartedAt = new Date().toISOString();
@@ -4744,6 +4953,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   let suspectedRemovedCount = 0;
   let errorCount = 0;
   let skippedCount = 0;
+  let operationalErrorCount = 0;
   const suspected = [];
   const errors = [];
 
@@ -4751,176 +4961,162 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     monitorVersion,
     monitorRunId,
     jobCount: jobs.length,
+    verificationProvider: "APIFY_SPECIFIC_REVIEW_TRACKER",
   });
 
+  const jobsWithUrls = [];
   for (const job of jobs) {
     const reviewUrl = String(job?.review_url || "").trim();
     if (!reviewUrl) {
       skippedCount += 1;
       continue;
     }
+    jobsWithUrls.push({ job, reviewUrl });
+  }
 
-    let lookup;
+  let apifyBatch = null;
+  if (jobsWithUrls.length > 0) {
     try {
-      // force:true is important for an operator-triggered check: do not reuse
-      // a direct-page result cached before the operator typed "check".
-      lookup = await getReviewFromDirectUrl(reviewUrl, { force: true });
+      apifyBatch = await verifyReviewUrlsWithApify(
+        jobsWithUrls.map((item) => item.reviewUrl)
+      );
     } catch (error) {
-      errorCount += 1;
-      errors.push({
-        jobId: job.id,
-        businessName: job?.business_name || "",
-        reviewUrl,
+      console.error(`TELEGRAM ${targetCode} APIFY BATCH FAILED:`, {
+        monitorRunId,
         error: error?.message || String(error),
       });
-      console.error(`TELEGRAM ${targetCode} MANUAL CHECK LOOKUP ERROR:`, {
-        jobId: job.id,
-        error: error?.message || String(error),
-      });
-      continue;
+
+      for (const { job, reviewUrl } of jobsWithUrls) {
+        errorCount += 1;
+        errors.push({
+          jobId: job.id,
+          businessName: job?.business_name || "",
+          reviewUrl,
+          error: error?.message || "APIFY_BATCH_FAILED",
+        });
+      }
     }
+  }
 
-    const found = Boolean(lookup?.found && lookup?.review);
-    const reason = String(lookup?.reason || "").trim();
-    const checkedAt = new Date().toISOString();
+  if (apifyBatch) {
+    for (const { job, reviewUrl } of jobsWithUrls) {
+      const checkedAt = new Date().toISOString();
+      const result = getApifyResultForReviewUrl(apifyBatch, reviewUrl);
+      const status = String(result?.status || "UNKNOWN").trim().toUpperCase();
+      const actorError = String(
+        result?.error ||
+        result?.text_snippet ||
+        result?.message ||
+        ""
+      ).trim();
 
-    // V30-DIAG — observation only. This does NOT change the decision logic.
-    // It tells us exactly which direct-Google signal caused each review to be
-    // treated as visible so production behaviour can be fixed from evidence.
-    const directMeta = lookup?.directMeta || {};
-    console.log(`TELEGRAM ${targetCode} MANUAL CHECK DIAG:`, {
-      monitorVersion,
-      monitorRunId,
-      jobId: job?.id || null,
-      businessName: job?.business_name || null,
-      reviewUrl,
-      found,
-      reason: reason || null,
-      title: directMeta?.title || null,
-      titleReviewSpecific: Boolean(directMeta?.titleReviewSpecific),
-      identityPresent: Boolean(directMeta?.identityPresent),
-      resolvedLooksDirect: Boolean(directMeta?.resolvedLooksDirect),
-      finalUrl: directMeta?.finalUrl || lookup?.resolvedUrl || null,
-      reviewAgeDays:
-        directMeta?.reviewAgeDays == null
-          ? null
-          : Number(directMeta.reviewAgeDays),
-    });
+      console.log(`TELEGRAM ${targetCode} APIFY REVIEW RESULT:`, {
+        monitorVersion,
+        monitorRunId,
+        jobId: job?.id || null,
+        businessName: job?.business_name || null,
+        status,
+        outputBusinessName: result?.business_name || null,
+        reviewerName: result?.reviewer_name || null,
+        reviewStars: result?.review_stars ?? null,
+        outputUrl: getApifyReviewResultUrl(result) || null,
+        error: result?.error || null,
+      });
 
-    if (found) {
-      visibleCount += 1;
+      if (status === "ACTIVE") {
+        visibleCount += 1;
 
-      // If a previous run had already flagged this job, use the existing
-      // human-control path so KPI batches are closed correctly.
-      if (Number(job?.review_missing_count || 0) >= 1) {
         try {
-          await callSheetControlInternally({
-            jobId: job.id,
-            value: "REVIEW_STILL_VISIBLE",
-          });
+          await resetMonitoringJobAsVisible(job, checkedAt);
         } catch (resetError) {
-          errorCount += 1;
-          errors.push({
+          operationalErrorCount += 1;
+          console.error(`TELEGRAM ${targetCode} APIFY ACTIVE RESET FAILED:`, {
             jobId: job.id,
-            businessName: job?.business_name || "",
-            reviewUrl,
             error: resetError?.message || String(resetError),
+          });
+        }
+
+        continue;
+      }
+
+      if (status !== "REMOVED") {
+        errorCount += 1;
+        errors.push({
+          jobId: job.id,
+          businessName: job?.business_name || result?.business_name || "",
+          reviewUrl,
+          error: actorError
+            ? `${status}: ${actorError}`
+            : status,
+        });
+        continue;
+      }
+
+      suspectedRemovedCount += 1;
+      suspected.push({
+        jobId: job.id,
+        businessName: job?.business_name || result?.business_name || "",
+        reviewUrl,
+      });
+
+      let removalBatchId = String(job?.removal_detection_batch_id || "").trim() || null;
+      if (Number(job?.review_missing_count || 0) < 1) {
+        if (!removalKpiBatchCreated) {
+          await upsertRemovalKpiBatch({
+            batchId: monitorRunId,
+            detectedAt: monitorRunStartedAt,
+          });
+          removalKpiBatchCreated = true;
+        }
+        removalBatchId = monitorRunId;
+
+        await updateJob(job.id, {
+          status: "processing",
+          review_missing_count: 1,
+          last_review_check_at: checkedAt,
+          review_removed_detected_at: checkedAt,
+          removal_detection_batch_id: removalBatchId,
+          removal_kpi_notified_at: null,
+          removed_at: null,
+        });
+
+        try {
+          await updateJobInGoogleSheet({
+            jobId: job.id,
+            status: "processing",
+            removedAt: "",
+            paidAt: "",
+          });
+        } catch (sheetError) {
+          operationalErrorCount += 1;
+          console.error(`TELEGRAM ${targetCode} APIFY REMOVED SHEET UPDATE FAILED:`, {
+            jobId: job.id,
+            error: sheetError?.message || String(sheetError),
           });
         }
       } else {
         await updateJob(job.id, {
-          status: "processing",
-          review_missing_count: 0,
           last_review_check_at: checkedAt,
-          review_removed_detected_at: null,
-          removal_detection_batch_id: null,
-          removal_team_alerted_at: null,
-          removal_team_alert_message_id: null,
-          removed_at: null,
         });
       }
-
-      continue;
-    }
-
-    // Fail closed. Only the direct-review "not visible" result is allowed to
-    // enter suspected-removal flow. URL-shape/meta failures are CHECK_ERROR.
-    if (reason !== "DIRECT_REVIEW_NOT_VISIBLE") {
-      errorCount += 1;
-      errors.push({
-        jobId: job.id,
-        businessName: job?.business_name || "",
-        reviewUrl,
-        error: reason || "DIRECT_REVIEW_CHECK_INCONCLUSIVE",
-      });
-      continue;
-    }
-
-    suspectedRemovedCount += 1;
-    suspected.push({
-      jobId: job.id,
-      businessName: job?.business_name || "",
-      reviewUrl,
-    });
-
-    let removalBatchId = String(job?.removal_detection_batch_id || "").trim() || null;
-    if (Number(job?.review_missing_count || 0) < 1) {
-      if (!removalKpiBatchCreated) {
-        await upsertRemovalKpiBatch({
-          batchId: monitorRunId,
-          detectedAt: monitorRunStartedAt,
-        });
-        removalKpiBatchCreated = true;
-      }
-      removalBatchId = monitorRunId;
-
-      await updateJob(job.id, {
-        status: "processing",
-        review_missing_count: 1,
-        last_review_check_at: checkedAt,
-        review_removed_detected_at: checkedAt,
-        removal_detection_batch_id: removalBatchId,
-        removal_kpi_notified_at: null,
-        removed_at: null,
-      });
 
       try {
-        await updateJobInGoogleSheet({
-          jobId: job.id,
-          status: "processing",
-          removedAt: "",
-          paidAt: "",
+        const customer = await getCustomerById(job.customer_id);
+        await sendTelegramRemovalConfirmation({
+          chatId,
+          departmentCode: targetCode,
+          job,
+          customer,
+          reviewUrl,
         });
-      } catch (sheetError) {
-        console.error(`TELEGRAM ${targetCode} MANUAL CHECK SHEET UPDATE FAILED:`, {
+      } catch (alertError) {
+        operationalErrorCount += 1;
+        console.error(`TELEGRAM ${targetCode} APIFY REMOVAL ALERT FAILED:`, {
           jobId: job.id,
-          error: sheetError?.message || String(sheetError),
+          error: alertError?.message || String(alertError),
         });
       }
-    } else {
-      await updateJob(job.id, {
-        last_review_check_at: checkedAt,
-      });
     }
-
-    try {
-      const customer = await getCustomerById(job.customer_id);
-      await sendTelegramRemovalConfirmation({
-        chatId,
-        departmentCode: targetCode,
-        job,
-        customer,
-        reviewUrl,
-      });
-    } catch (alertError) {
-      console.error(`TELEGRAM ${targetCode} MANUAL CHECK ALERT FAILED:`, {
-        jobId: job.id,
-        error: alertError?.message || String(alertError),
-      });
-    }
-
-    // Small spacing reduces the chance of Google throttling a large manual run.
-    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   const lines = [
@@ -4928,27 +5124,24 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     "",
     `งาน ${targetCode} ที่ตรวจ: ${jobs.length} ลิงก์`,
     `ยังอยู่: ${visibleCount} ลิงก์`,
-    `🚨 พบว่าอาจออกแล้ว: ${suspectedRemovedCount} ลิงก์`,
+    `🚨 พบว่าออกแล้ว / รอยืนยัน: ${suspectedRemovedCount} ลิงก์`,
     `ตรวจไม่ได้/ไม่ชัดเจน: ${errorCount} ลิงก์`,
     skippedCount > 0 ? `ไม่มี Review URL: ${skippedCount} งาน` : null,
+    operationalErrorCount > 0 ? `⚠️ System sync warning: ${operationalErrorCount} รายการ` : null,
     "",
-    "ระบบนี้ตรวจ Direct Google Review โดยตรง — ไม่ใช้ SerpApi",
+    "ตรวจด้วย Apify Specific Review Verification — ไม่ใช้ SerpApi",
   ].filter(Boolean);
 
   if (suspected.length > 0) {
     lines.push(
       "",
-      "รายการที่พบว่าอาจออกแล้วถูกส่งเป็นการ์ดแยกเพื่อให้ Reply ยืนยัน",
+      "รายการ REMOVED ถูกส่งเป็นการ์ดแยกเพื่อให้ Reply ยืนยัน",
       'Reply การ์ดด้วย "อนุมัติ" หรือ "ยังอยู่" เพื่อยืนยันผล'
     );
   }
 
   await replyTelegramInternal(chatId, triggerMessageId, lines.join("\n"));
 
-  // V2.2.30 — send explicit result lists for BOTH T0 and T2.
-  // Keep the list separate from the summary so Telegram's 4096-char limit
-  // cannot silently truncate a large result set. Confirmation cards remain
-  // separate because operators must Reply to the exact card to approve/reset.
   const sendResultList = async ({ title, items, includeReason = false }) => {
     if (!Array.isArray(items) || items.length === 0) {
       await sendTelegramText({
@@ -4986,7 +5179,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   };
 
   await sendResultList({
-    title: `🚨 ${targetCode} — ลิงก์ที่ระบบพบว่ารีวิวไม่แสดง / รอยืนยัน (${suspected.length})`,
+    title: `🚨 ${targetCode} — ลิงก์ที่ Apify ระบุ REMOVED / รอยืนยัน (${suspected.length})`,
     items: suspected,
   });
 
@@ -5003,6 +5196,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     suspectedRemovedCount,
     errorCount,
     skippedCount,
+    operationalErrorCount,
   });
 
   return {
@@ -5011,6 +5205,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     suspectedRemovedCount,
     errorCount,
     skippedCount,
+    operationalErrorCount,
   };
 }
 
@@ -5099,7 +5294,7 @@ app.post("/telegram/webhook", async (req, res) => {
         await replyTelegramInternal(
           chatId,
           msg.message_id,
-          `🔎 เริ่มตรวจงาน ${departmentCode} ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Direct Google Review โดยตรง และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ`
+          `🔎 เริ่มตรวจงาน ${departmentCode} ที่กำลังดำเนินการทั้งหมดแล้วครับ\nตรวจ Specific Review ด้วย Apify และไม่ใช้ SerpApi\nระบบจะแจ้งผลในกลุ่มนี้เมื่อเสร็จ`
         );
 
         // Acknowledge Telegram immediately. The scan can take time when there
@@ -24512,18 +24707,13 @@ app.post("/sheet-control", async (req, res) => {
     }
 
 
+    // V2.2.31: manual/internal jobs may legitimately have no customer
+    // conversation. Manual actions can still update the job and department
+    // sheets. Bot-control actions still require a conversation.
     const conversation =
       await getConversationByCustomerId(
         customer.id
       );
-
-
-    if (!conversation) {
-      return res.status(404).json({
-        ok: false,
-        error: "Conversation not found",
-      });
-    }
 
 
     const normalizedValue =
@@ -24559,6 +24749,13 @@ app.post("/sheet-control", async (req, res) => {
     if (
       action === "bot_control"
     ) {
+
+      if (!conversation) {
+        return res.status(404).json({
+          ok: false,
+          error: "Conversation not found",
+        });
+      }
 
       // ---------------------------------------------------
       // HANDOFF
@@ -25141,20 +25338,22 @@ if (
   // 5. CONVERSATION
   // ========================================
 
-  await updateConversationState({
-    customerId:
-      customer.id,
+  if (conversation) {
+    await updateConversationState({
+      customerId:
+        customer.id,
 
-    state:
-      GMR_STATES
-        .REMOVED_WAITING_PAYMENT,
+      state:
+        GMR_STATES
+          .REMOVED_WAITING_PAYMENT,
 
-    handoff:
-      false,
+      handoff:
+        false,
 
-    handoffReason:
-      null,
-  });
+      handoffReason:
+        null,
+    });
+  }
 
 
   // ========================================
@@ -25469,20 +25668,22 @@ if (
         );
 
 
-        await updateConversationState({
-          customerId:
-            customer.id,
+        if (conversation) {
+          await updateConversationState({
+            customerId:
+              customer.id,
 
-          state:
-            GMR_STATES
-              .WAITING_MAP,
+            state:
+              GMR_STATES
+                .WAITING_MAP,
 
-          handoff:
-            false,
+            handoff:
+              false,
 
-          handoffReason:
-            null,
-        });
+            handoffReason:
+              null,
+          });
+        }
 
 
         try {
