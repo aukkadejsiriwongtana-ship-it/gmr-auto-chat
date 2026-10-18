@@ -382,6 +382,7 @@ rollbackLegacyCustomerImport,
 rollbackLegacyCustomerAutoMatch,
   getLegacyImportedJob,
 getVerifiedPaymentByJobId,
+syncCustomerMapsForExistingCustomer,
 backfillExistingCustomerMaps,
 getCustomerMapsWaitingForResolve,
 updateResolvedCustomerMap,
@@ -673,6 +674,134 @@ async function getExistingCustomerRates(
 
     historyCount:
       history.length,
+  };
+}
+
+// =========================================================
+// V2.2.37 — VERIFIED PAYMENT -> EXISTING CUSTOMER PROMOTION
+//
+// Every successful payment path must leave the customer in the
+// same durable state:
+// 1) gmr_payments.payment_verified = true
+// 2) job = paid
+// 3) customer is recognized as EXISTING_CUSTOMER
+// 4) customer Maps are synced into gmr_customer_maps
+//
+// This is intentionally best-effort for the map sync: payment
+// confirmation must not be rolled back just because Google Map
+// enrichment is temporarily unavailable.
+// =========================================================
+
+async function syncExistingCustomerAfterVerifiedPayment(
+  customerId,
+  source = "PAYMENT"
+) {
+  if (!customerId) {
+    return {
+      synced: false,
+      reason: "missing_customer_id",
+      count: 0,
+    };
+  }
+
+  try {
+    const result =
+      await syncCustomerMapsForExistingCustomer(
+        customerId
+      );
+
+    console.log(
+      "V37 EXISTING CUSTOMER MAP SYNC:",
+      {
+        source,
+        customerId,
+        result,
+      }
+    );
+
+    return result;
+  } catch (error) {
+    console.error(
+      "V37 EXISTING CUSTOMER MAP SYNC FAILED:",
+      {
+        source,
+        customerId,
+        error:
+          error?.message ||
+          String(error),
+      }
+    );
+
+    return {
+      synced: false,
+      reason: "sync_failed",
+      count: 0,
+      error:
+        error?.message ||
+        String(error),
+    };
+  }
+}
+
+async function ensureVerifiedPaymentForManualPaidJob(
+  job,
+  verifiedAt
+) {
+  if (!job?.id) {
+    throw new Error(
+      "Missing job in ensureVerifiedPaymentForManualPaidJob"
+    );
+  }
+
+  const existingPayment =
+    await getVerifiedPaymentByJobId(
+      job.id
+    );
+
+  if (existingPayment) {
+    return {
+      payment:
+        existingPayment,
+      created:
+        false,
+    };
+  }
+
+  const amount =
+    Number(job.price || 0);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Cannot MARK_PAID without a valid job price"
+    );
+  }
+
+  const payment =
+    await createPayment({
+      jobId:
+        job.id,
+
+      amount,
+
+      paymentMethod:
+        "MANUAL_MARK_PAID",
+
+      slipReceived:
+        false,
+
+      paymentVerified:
+        true,
+
+      verifiedAt,
+    });
+
+  return {
+    payment,
+    created:
+      true,
   };
 }
 
@@ -6141,6 +6270,11 @@ app.post("/telegram/webhook", async (req, res) => {
 
         await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
 
+        await syncExistingCustomerAfterVerifiedPayment(
+          customer.id,
+          "TELEGRAM_MANUAL_PAYMENT_APPROVAL"
+        );
+
         const customerReply = "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
         try {
           await sendMessageToCustomer({
@@ -6771,6 +6905,11 @@ app.post(
         customer &&
         paidJobs.length > 0
       ) {
+
+        await syncExistingCustomerAfterVerifiedPayment(
+          customer.id,
+          "STRIPE_PAYMENT"
+        );
 
        const paymentReceivedReply =
   getCustomerText(
@@ -19153,6 +19292,11 @@ if (pendingPayment.slip_file_path) {
 
     await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
 
+    await syncExistingCustomerAfterVerifiedPayment(
+      paymentCustomer.id,
+      "LINE_MANUAL_PAYMENT_APPROVAL"
+    );
+
 
     const customerReply =
       "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
@@ -21595,6 +21739,11 @@ if (
 
   await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
 
+  await syncExistingCustomerAfterVerifiedPayment(
+    customer.id,
+    "LINE_AUTO_PAYMENT"
+  );
+
 
   const customerReply =
     getCustomerText(
@@ -22390,6 +22539,11 @@ async function processManychatPaymentSlipImage({
 
     await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
 
+    await syncExistingCustomerAfterVerifiedPayment(
+      customer.id,
+      "MANYCHAT_AUTO_PAYMENT"
+    );
+
     const customerReply = getCustomerText(
       customer,
       "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ",
@@ -22588,6 +22742,77 @@ app.post("/manychat/payment-slip", async (req, res) => {
   }
 });
 
+
+// =========================================================
+// MANYCHAT WAITING-PAYMENT IMAGE FALLBACK — V2.2.36
+//
+// Why this exists:
+// - Older jobs may already be REMOVED_WAITING_PAYMENT before the dedicated
+//   ManyChat Payment Slip automation was introduced.
+// - ManyChat's Default Reply can surface an inbound Messenger image as a
+//   temporary Facebook CDN URL (for example scontent.xx.fbcdn.net/...jpg).
+// - In that state, an image must bypass the normal FAQ / NON_FAQ classifier
+//   and enter the same payment-slip verifier used by /manychat/payment-slip.
+//
+// Fail-safe behavior:
+// - Only activates while the existing conversation is REMOVED_WAITING_PAYMENT.
+// - Only activates when the inbound payload contains a plausible image URL.
+// - Classification/verification still decides whether the image is actually
+//   a payment slip; unrelated images are NOT marked paid.
+// =========================================================
+function normalizeManychatInboundImageUrl(value) {
+  let candidate = String(value || "").trim();
+  if (!candidate) return "";
+
+  // Some bridges/templating layers can wrap the URL in quotes.
+  candidate = candidate.replace(/^["']+|["']+$/g, "").trim();
+
+  if (!/^https?:\/\//i.test(candidate)) return "";
+
+  try {
+    const parsed = new URL(candidate);
+    const host = String(parsed.hostname || "").toLowerCase();
+    const path = String(parsed.pathname || "").toLowerCase();
+
+    const isFacebookImageCdn =
+      host === "fbcdn.net" ||
+      host.endsWith(".fbcdn.net") ||
+      host === "fbsbx.com" ||
+      host.endsWith(".fbsbx.com") ||
+      host.startsWith("scontent.") ||
+      host.includes("scontent-");
+
+    const hasImageExtension =
+      /\.(?:jpe?g|png|webp|gif|heic|heif)$/i.test(path);
+
+    return (isFacebookImageCdn || hasImageExtension)
+      ? candidate
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function getManychatInboundImageUrl(body, message) {
+  const payload = body || {};
+  const candidates = [
+    payload.image_url,
+    payload.imageUrl,
+    payload.attachment_url,
+    payload.attachmentUrl,
+    payload.media_url,
+    payload.mediaUrl,
+    message,
+  ];
+
+  for (const value of candidates) {
+    const normalized = normalizeManychatInboundImageUrl(value);
+    if (normalized) return normalized;
+  }
+
+  return "";
+}
+
 // =========================================================
 // MANYCHAT -> GMR CORE BRIDGE
 // รองรับทั้ง Facebook Page TH / EN
@@ -22692,6 +22917,13 @@ app.post("/manychat/inbound", async (req, res) => {
       ).trim();
 
 
+    const inboundImageUrl =
+      getManychatInboundImageUrl(
+        body,
+        message
+      );
+
+
     const firstName =
       String(
         body.first_name || ""
@@ -22734,7 +22966,7 @@ app.post("/manychat/inbound", async (req, res) => {
     }
 
 
-    if (!message) {
+    if (!message && !inboundImageUrl) {
       return res.status(400).json({
         ok: false,
         error: "Missing message",
@@ -22760,6 +22992,8 @@ app.post("/manychat/inbound", async (req, res) => {
         platformUserId,
         displayName,
         message,
+        inboundImageUrl:
+          inboundImageUrl || null,
       }
     );
 
@@ -22809,6 +23043,63 @@ app.post("/manychat/inbound", async (req, res) => {
       }
     }
 
+
+    // ========================================
+    // 5B. WAITING-PAYMENT IMAGE FALLBACK — V2.2.36
+    //
+    // If an older waiting-payment customer sends an image through the
+    // normal Default Reply, process it as a candidate payment slip instead
+    // of sending the CDN URL into V2_NEW_CUSTOMER_NON_FAQ.
+    // ========================================
+    if (inboundImageUrl) {
+      const existingCustomer =
+        await getCustomerByPlatformUserId(
+          platform,
+          platformUserId
+        );
+
+      if (existingCustomer) {
+        const existingConversation =
+          await getConversationByCustomerId(
+            existingCustomer.id
+          );
+
+        if (
+          existingConversation?.state ===
+          GMR_STATES.REMOVED_WAITING_PAYMENT
+        ) {
+          console.log(
+            "MANYCHAT WAITING PAYMENT IMAGE FALLBACK:",
+            {
+              customerId: existingCustomer.id,
+              platform,
+              platformUserId,
+              state: existingConversation.state,
+              imageUrl: inboundImageUrl,
+            }
+          );
+
+          const paymentSlipResult =
+            await processManychatPaymentSlipImage({
+              platform,
+              platformUserId,
+              displayName,
+              imageUrl: inboundImageUrl,
+            });
+
+          return res.status(200).json({
+            ok: true,
+            payment_slip_fallback: true,
+            reply: null,
+            should_reply: false,
+            customer_id: existingCustomer.id,
+            state_before: existingConversation.state,
+            state_after: existingConversation.state,
+            payment_result: paymentSlipResult,
+          });
+        }
+      }
+    }
 
     // ========================================
     // 6. BOT CONTROL
@@ -26760,21 +27051,40 @@ if (
         "MARK_PAID"
       ) {
 
+        // V2.2.37: MARK_PAID must create the same verified-payment
+        // history as an auto/manual slip approval. This is also
+        // intentionally idempotent so re-selecting MARK_PAID on an
+        // older paid job backfills the missing verified payment.
         const paidAt =
+          job.paid_at ||
           new Date()
             .toISOString();
 
 
-        await updateJob(
-          job.id,
-          {
-            status:
-              "paid",
+        const paymentResult =
+          await ensureVerifiedPaymentForManualPaidJob(
+            job,
+            paidAt
+          );
 
-            paid_at:
-              paidAt,
-          }
-        );
+
+        if (
+          String(job.status || "")
+            .trim()
+            .toLowerCase() !== "paid" ||
+          !job.paid_at
+        ) {
+          await updateJob(
+            job.id,
+            {
+              status:
+                "paid",
+
+              paid_at:
+                paidAt,
+            }
+          );
+        }
 
 
         if (conversation) {
@@ -26823,6 +27133,12 @@ if (
 
         await movePaidJobToDepartmentDoneSheet(job, paidAt);
 
+        const mapSync =
+          await syncExistingCustomerAfterVerifiedPayment(
+            customer.id,
+            "MARK_PAID"
+          );
+
 
         console.log(
           "SHEET MANUAL MARK PAID:",
@@ -26834,6 +27150,15 @@ if (
               customer.id,
 
             paidAt,
+
+            paymentCreated:
+              paymentResult.created,
+
+            paymentId:
+              paymentResult.payment?.id ||
+              null,
+
+            mapSync,
           }
         );
 
@@ -26857,6 +27182,17 @@ if (
               job.id,
 
             paidAt,
+
+            paymentCreated:
+              paymentResult.created,
+
+            paymentVerified:
+              true,
+
+            existingCustomer:
+              true,
+
+            mapSync,
           });
       }
 
