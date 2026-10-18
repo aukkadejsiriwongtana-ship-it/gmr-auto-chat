@@ -4734,7 +4734,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     throw new Error(`Unsupported department for manual check: ${targetCode || "-"}`);
   }
 
-  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V2_20261017`;
+  const monitorVersion = `TELEGRAM_${targetCode}_CHECK_V30_DIAG_20261018`;
   const jobs = await getMonitoringJobsForDepartmentCode(targetCode);
   const monitorRunId = crypto.randomUUID();
   const monitorRunStartedAt = new Date().toISOString();
@@ -4783,6 +4783,29 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     const found = Boolean(lookup?.found && lookup?.review);
     const reason = String(lookup?.reason || "").trim();
     const checkedAt = new Date().toISOString();
+
+    // V30-DIAG — observation only. This does NOT change the decision logic.
+    // It tells us exactly which direct-Google signal caused each review to be
+    // treated as visible so production behaviour can be fixed from evidence.
+    const directMeta = lookup?.directMeta || {};
+    console.log(`TELEGRAM ${targetCode} MANUAL CHECK DIAG:`, {
+      monitorVersion,
+      monitorRunId,
+      jobId: job?.id || null,
+      businessName: job?.business_name || null,
+      reviewUrl,
+      found,
+      reason: reason || null,
+      title: directMeta?.title || null,
+      titleReviewSpecific: Boolean(directMeta?.titleReviewSpecific),
+      identityPresent: Boolean(directMeta?.identityPresent),
+      resolvedLooksDirect: Boolean(directMeta?.resolvedLooksDirect),
+      finalUrl: directMeta?.finalUrl || lookup?.resolvedUrl || null,
+      reviewAgeDays:
+        directMeta?.reviewAgeDays == null
+          ? null
+          : Number(directMeta.reviewAgeDays),
+    });
 
     if (found) {
       visibleCount += 1;
