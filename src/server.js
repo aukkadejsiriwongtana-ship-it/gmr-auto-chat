@@ -5704,6 +5704,75 @@ app.post("/telegram/webhook", async (req, res) => {
     const reply = async (text) =>
       replyTelegramInternal(chatId, msg.message_id, text);
 
+
+
+    // -----------------------------------------------------
+    // V2.2.35 — REPAIR / RESYNC ONE EXISTING JOB TO JOBS_MASTER
+    //
+    // Usage in GMR Sales:
+    //   sync sheet <job-id>
+    // Or reply under a Job-linked bot card and type:
+    //   sync sheet
+    //
+    // This NEVER creates a new Job and NEVER messages the customer.
+    // -----------------------------------------------------
+    if (
+      normalizedGroupText === "sync sheet" ||
+      normalizedGroupText.startsWith("sync sheet ") ||
+      normalizedGroupText === "syncsheet" ||
+      normalizedGroupText.startsWith("syncsheet ")
+    ) {
+      try {
+        const explicitJobIdMatch = groupText.match(
+          /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i
+        );
+
+        let job = null;
+        let resolvedBy = null;
+
+        if (explicitJobIdMatch?.[1]) {
+          job = await getJobById(explicitJobIdMatch[1]);
+          resolvedBy = "job_id";
+        }
+
+        if (!job && quotedMessageId) {
+          job = await getJobByLineGroupMessageId(quotedMessageId);
+          if (job) resolvedBy = "quoted_job_card";
+        }
+
+        if (!job) {
+          await reply([
+            "⚠️ หา Job ที่ต้อง Sync ไม่เจอ",
+            "พิมพ์คำสั่งพร้อม Job ID แบบนี้:",
+            "sync sheet xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "",
+            "คำสั่งนี้จะซ่อมเฉพาะ Sheet ไม่สร้างงานซ้ำ และไม่ส่งข้อความหาลูกค้า",
+          ].join("\n"));
+          return res.sendStatus(200);
+        }
+
+        const result = await syncExistingJobToMasterSheet(job);
+
+        await reply([
+          result.alreadyExists
+            ? "✅ Job นี้มีใน JOBS_MASTER อยู่แล้ว — อัปเดตสถานะให้ตรงกับระบบแล้ว"
+            : "✅ Sync Job เข้า JOBS_MASTER สำเร็จแล้ว",
+          `Job ID: ${job.id}`,
+          `ลูกค้า: ${result.customer?.display_name || "-"}`,
+          `ธุรกิจ: ${job.business_name || "-"}`,
+          `สถานะ: ${job.status || "-"}`,
+          `Resolved by: ${resolvedBy || "unknown"}`,
+          "",
+          "ไม่มีการสร้าง Job ใหม่ และไม่มีการส่งข้อความหาลูกค้า",
+        ].join("\n"));
+      } catch (error) {
+        console.error("TELEGRAM SHEET RESYNC FAILED:", error);
+        await reply(`❌ Sync Sheet ไม่สำเร็จ: ${error?.message || String(error)}`);
+      }
+
+      return res.sendStatus(200);
+    }
+
     // -----------------------------------------------------
     // V2 SALES: Preview confirm/cancel + existing customer approval
     // -----------------------------------------------------
@@ -5745,7 +5814,12 @@ app.post("/telegram/webhook", async (req, res) => {
                 : "⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
               failedSheets.length === 0
                 ? "ลง Sheet ครบแล้ว"
-                : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+                : [
+                    `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน`,
+                    ...failedSheets.map((item) =>
+                      `Job ID: ${item.jobId}\nซ่อมได้โดยพิมพ์: sync sheet ${item.jobId}`
+                    ),
+                  ].join("\n"),
             ].join("\n"));
           } catch (error) {
             console.error("TELEGRAM V2 SALES ORDER CONFIRM FAILED:", error);
@@ -5892,7 +5966,12 @@ app.post("/telegram/webhook", async (req, res) => {
                     : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
                   failedSheets.length === 0
                     ? "✅ ลง Sheet ครบแล้ว"
-                    : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
+                    : [
+                        `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน`,
+                        ...failedSheets.map((item) =>
+                          `Job ID: ${item.jobId}\nซ่อมได้โดยพิมพ์: sync sheet ${item.jobId}`
+                        ),
+                      ].join("\n"),
                   "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
                 ].join("\n"));
               } catch (ackError) {
@@ -9082,6 +9161,76 @@ async function appendV2StartedJobsToMasterSheet({ customer, jobs, source = "sale
     }
   }
   return results;
+}
+
+
+
+// =========================================================
+// V2.2.35 — SAFE JOBS_MASTER RESYNC
+//
+// Repairs a Job that already exists in Supabase but failed to be
+// written to JOBS_MASTER. First probes JOBS_MASTER with an update.
+// If the Job already exists, no duplicate append is performed.
+// =========================================================
+async function syncExistingJobToMasterSheet(job) {
+  if (!job?.id) throw new Error("Missing Job for Sheet sync");
+
+  const customer = await getCustomerById(job.customer_id);
+  if (!customer) throw new Error("ไม่พบข้อมูลลูกค้าของ Job นี้");
+
+  // Probe by Job ID first. If present, this also refreshes the current status.
+  try {
+    await updateJobInGoogleSheet({
+      jobId: job.id,
+      status: job.status || "",
+      removedAt: job.removed_at || "",
+      paidAt: job.paid_at || "",
+    });
+
+    return {
+      ok: true,
+      alreadyExists: true,
+      job,
+      customer,
+    };
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (!/Job ID not found/i.test(message)) {
+      throw error;
+    }
+  }
+
+  const startedAt =
+    job.started_at ||
+    job.queued_at ||
+    job.created_at ||
+    new Date().toISOString();
+
+  await appendJobToGoogleSheet({
+    jobId: job.id,
+    customerId: customer.id,
+    customerName: customer.display_name || "",
+    platform: customer.platform || "",
+    phone: customer.phone || "",
+    businessName: job.business_name || "",
+    reviewUrl: job.review_url || "",
+    price: Number(job.price || 0),
+    status: job.status || "queued",
+    startedAt,
+    removedAt: job.removed_at || "",
+    paidAt: job.paid_at || "",
+    email: customer.email || "",
+    currency: job.currency || "THB",
+    source: job.source || "sheet_resync",
+    customerNotify: job.customer_notify !== false,
+  });
+
+  return {
+    ok: true,
+    alreadyExists: false,
+    job,
+    customer,
+  };
 }
 
 async function confirmV2SalesOrderDraft(draft) {
