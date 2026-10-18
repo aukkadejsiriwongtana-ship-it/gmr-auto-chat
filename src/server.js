@@ -200,6 +200,92 @@ async function sendManychatFacebookContent({
   };
 }
 
+function getManychatPaymentSlipFlowNsForPlatform(platform) {
+  const normalized = String(platform || "").trim().toLowerCase();
+
+  if (normalized === "facebook_en") {
+    return String(
+      process.env.MANYCHAT_PAYMENT_SLIP_FLOW_NS_EN ||
+      process.env.MANYCHAT_PAYMENT_SLIP_FLOW_NS ||
+      ""
+    ).trim();
+  }
+
+  if (normalized === "facebook_th") {
+    return String(
+      process.env.MANYCHAT_PAYMENT_SLIP_FLOW_NS_TH ||
+      process.env.MANYCHAT_PAYMENT_SLIP_FLOW_NS ||
+      ""
+    ).trim();
+  }
+
+  return "";
+}
+
+async function startManychatPaymentSlipFlow({
+  platform,
+  platformUserId,
+}) {
+  const normalized = String(platform || "").trim().toLowerCase();
+  const token = getManychatApiTokenForPlatform(normalized);
+  const flowNs = getManychatPaymentSlipFlowNsForPlatform(normalized);
+  const subscriberId = String(platformUserId || "").trim();
+
+  if (!token) {
+    throw new Error(`Missing ManyChat API Token for ${normalized}`);
+  }
+
+  if (!subscriberId) {
+    throw new Error("Missing ManyChat subscriber_id for payment-slip flow");
+  }
+
+  if (!flowNs) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "PAYMENT_SLIP_FLOW_NS_NOT_CONFIGURED",
+    };
+  }
+
+  const response = await fetchWithNetworkRetry(
+    "https://api.manychat.com/fb/sending/sendFlow",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscriber_id: subscriberId,
+        flow_ns: flowNs,
+      }),
+    },
+    {
+      attempts: 2,
+      timeoutMs: 15000,
+      label: "MANYCHAT PAYMENT SLIP FLOW",
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok || data?.status === "error") {
+    throw new Error(
+      `ManyChat payment-slip flow failed ${response.status}: ${responseText}`
+    );
+  }
+
+  console.log("MANYCHAT PAYMENT SLIP FLOW STARTED:", {
+    platform: normalized,
+    subscriberId,
+    flowNs,
+  });
+
+  return { ok: true, platform: normalized, subscriberId, flowNs };
+}
+
 async function sendMessageToCustomer({ platform, platformUserId, text, ...rest }) {
   const normalized = String(platform || "").trim().toLowerCase();
 
@@ -21795,6 +21881,564 @@ try {
   }
 });
 
+
+// =========================================================
+// MANYCHAT PAYMENT SLIP BRIDGE — V2.2.34
+// Dedicated endpoint used by the GMR Payment Slip TH/EN
+// Data Collection automation. It receives the saved Image CUF URL,
+// downloads the actual image immediately, classifies/verifies the slip,
+// and reuses the same payment state + Telegram review flow as LINE.
+// =========================================================
+async function processManychatPaymentSlipImage({
+  platform,
+  platformUserId,
+  displayName,
+  imageUrl,
+}) {
+  const safeImageUrl = String(imageUrl || "").trim();
+  if (!safeImageUrl) {
+    throw new Error("Missing payment slip image_url");
+  }
+
+  const customer = await getCustomerByPlatformUserId(
+    platform,
+    platformUserId
+  );
+
+  if (!customer) {
+    throw new Error("Payment slip customer not found");
+  }
+
+  const imageResponse = await fetchWithNetworkRetry(
+    safeImageUrl,
+    {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 GMR-Payment-Slip/2.2.34",
+        Accept: "image/*,*/*;q=0.8",
+      },
+      redirect: "follow",
+    },
+    {
+      attempts: 2,
+      timeoutMs: 20000,
+      label: "MANYCHAT PAYMENT SLIP DOWNLOAD",
+    }
+  );
+
+  if (!imageResponse.ok) {
+    throw new Error(
+      `Payment slip image download failed ${imageResponse.status}`
+    );
+  }
+
+  const contentType = String(
+    imageResponse.headers.get("content-type") || "image/jpeg"
+  ).split(";")[0].trim() || "image/jpeg";
+
+  const buffer = Buffer.from(await imageResponse.arrayBuffer());
+
+  if (!buffer.length) {
+    throw new Error("Payment slip image is empty");
+  }
+
+  const imageClassification = await classifyCustomerImage({
+    buffer,
+    contentType,
+  });
+
+  console.log("MANYCHAT PAYMENT IMAGE CLASSIFICATION:", {
+    customerId: customer.id,
+    platform,
+    platformUserId,
+    type: imageClassification?.type || null,
+  });
+
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "inbound",
+    messageType: "image",
+    messageText: safeImageUrl,
+    metadata: {
+      transport: "manychat_payment_slip",
+      content_type: contentType,
+      classification: imageClassification?.type || null,
+    },
+  });
+
+  if (imageClassification?.type !== "PAYMENT_SLIP") {
+    const retryText = getCustomerText(
+      customer,
+      "รูปนี้ยังอ่านเป็นสลิปการชำระเงินไม่ได้ครับ รบกวนส่งรูปสลิปที่เห็นยอด วันที่ เวลา และผู้รับให้ชัดเจนอีกครั้งครับ",
+      "I couldn't read this as a payment slip. Please send a clear slip showing the amount, date, time, and recipient."
+    );
+
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: retryText,
+      });
+      await saveMessage({
+        customerId: customer.id,
+        platform: customer.platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: retryText,
+      });
+      await updateLastBotMessage(customer.id, retryText);
+    } catch (error) {
+      console.error("MANYCHAT INVALID SLIP REPLY FAILED:", error);
+    }
+
+    return {
+      ok: true,
+      handled: false,
+      reason: "NOT_PAYMENT_SLIP",
+      classification: imageClassification?.type || null,
+    };
+  }
+
+  const waitingPaymentJobs = await getWaitingPaymentJobsByCustomerId(
+    customer.id
+  );
+
+  if (!Array.isArray(waitingPaymentJobs) || waitingPaymentJobs.length === 0) {
+    const noJobText = getCustomerText(
+      customer,
+      "ยังไม่พบงานที่กำลังรอชำระเงินครับ หากเพิ่งได้รับแจ้งยอด รบกวนติดต่อทีมงานได้เลยครับ",
+      "I couldn't find a job currently waiting for payment. Please contact our team if you just received a payment request."
+    );
+
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: noJobText,
+      });
+      await saveMessage({
+        customerId: customer.id,
+        platform: customer.platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: noJobText,
+      });
+      await updateLastBotMessage(customer.id, noJobText);
+    } catch (error) {
+      console.error("MANYCHAT NO WAITING PAYMENT REPLY FAILED:", error);
+    }
+
+    return {
+      ok: true,
+      handled: false,
+      reason: "NO_WAITING_PAYMENT_JOB",
+    };
+  }
+
+  const hasMultipleWaitingPaymentJobs = waitingPaymentJobs.length > 1;
+  const paymentJob = waitingPaymentJobs[0];
+  const messageId = `manychat-${Date.now()}-${crypto.randomUUID()}`;
+
+  let paymentSlipUpload = null;
+  try {
+    paymentSlipUpload = await uploadPaymentSlip({
+      buffer,
+      contentType,
+      customerId: customer.id,
+      jobId: paymentJob.id,
+      messageId,
+    });
+  } catch (error) {
+    console.error("MANYCHAT PAYMENT SLIP UPLOAD FAILED:", error);
+  }
+
+  const paymentVerification = verifyPaymentSlip({
+    classification: imageClassification,
+    expectedAmount: paymentJob.price,
+    minimumTransactionDate: paymentJob.removed_at || null,
+  });
+
+  const transactionReference = imageClassification.reference
+    ? String(imageClassification.reference).trim()
+    : null;
+
+  const referenceAlreadyUsed = transactionReference
+    ? await isPaymentReferenceUsed(transactionReference)
+    : false;
+
+  if (referenceAlreadyUsed) {
+    const duplicateSlipReply = getCustomerText(
+      customer,
+      "ตรวจพบว่าสลิปนี้เคยถูกใช้ยืนยันการชำระแล้วครับ รบกวนส่งสลิปรายการใหม่อีกครั้งครับ",
+      "This payment slip has already been used. Please send a new payment slip."
+    );
+
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: duplicateSlipReply,
+      });
+      await saveMessage({
+        customerId: customer.id,
+        platform: customer.platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: duplicateSlipReply,
+      });
+      await updateLastBotMessage(customer.id, duplicateSlipReply);
+    } catch (error) {
+      console.error("MANYCHAT DUPLICATE SLIP REPLY FAILED:", error);
+    }
+
+    if (paymentSlipUpload?.filePath) {
+      try { await deletePaymentSlip(paymentSlipUpload.filePath); } catch {}
+    }
+
+    return {
+      ok: true,
+      handled: false,
+      reason: "DUPLICATE_PAYMENT_REFERENCE",
+    };
+  }
+
+  const verificationReasons = Array.isArray(paymentVerification.reasons)
+    ? paymentVerification.reasons
+    : [];
+
+  const recipientNameMismatch = verificationReasons.includes(
+    "RECIPIENT_NAME_MISMATCH"
+  );
+  const paymentDateTooOld = verificationReasons.includes(
+    "PAYMENT_DATE_TOO_OLD"
+  );
+
+  if (recipientNameMismatch || paymentDateTooOld) {
+    let invalidSlipReply = "";
+
+    if (recipientNameMismatch && paymentDateTooOld) {
+      invalidSlipReply = getCustomerText(
+        customer,
+        "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
+        "The recipient information and transaction date on this payment slip do not match this job. Please send the correct slip."
+      );
+    } else if (recipientNameMismatch) {
+      invalidSlipReply = getCustomerText(
+        customer,
+        "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
+        "The recipient information on this payment slip does not match the required account. Please send the correct slip."
+      );
+    } else {
+      invalidSlipReply = getCustomerText(
+        customer,
+        "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
+        "The transaction date on this payment slip does not match this job. Please send the correct slip."
+      );
+    }
+
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: invalidSlipReply,
+      });
+      await saveMessage({
+        customerId: customer.id,
+        platform: customer.platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: invalidSlipReply,
+      });
+      await updateLastBotMessage(customer.id, invalidSlipReply);
+    } catch (error) {
+      console.error("MANYCHAT INVALID PAYMENT SLIP REPLY FAILED:", error);
+    }
+
+    if (paymentSlipUpload?.filePath) {
+      try { await deletePaymentSlip(paymentSlipUpload.filePath); } catch {}
+    }
+
+    return {
+      ok: true,
+      handled: false,
+      reason: "PAYMENT_SLIP_REJECTED",
+      verificationReasons,
+    };
+  }
+
+  if (!transactionReference) {
+    paymentVerification.verified = false;
+    paymentVerification.status = "NEEDS_REVIEW";
+    if (!paymentVerification.reasons.includes("PAYMENT_REFERENCE_MISSING")) {
+      paymentVerification.reasons.push("PAYMENT_REFERENCE_MISSING");
+    }
+    paymentVerification.checks.referenceUnique = false;
+  } else {
+    paymentVerification.checks.referenceUnique = true;
+  }
+
+  const paymentAllowed = [
+    "waiting_payment",
+    "removed_waiting_payment",
+  ].includes(String(paymentJob.status || "").toLowerCase());
+
+  if (!paymentAllowed) {
+    paymentVerification.verified = false;
+    paymentVerification.status = "NEEDS_REVIEW";
+    if (!paymentVerification.reasons.includes("JOB_NOT_WAITING_PAYMENT")) {
+      paymentVerification.reasons.push("JOB_NOT_WAITING_PAYMENT");
+    }
+    paymentVerification.checks.jobWaitingPayment = false;
+  } else {
+    paymentVerification.checks.jobWaitingPayment = true;
+  }
+
+  if (hasMultipleWaitingPaymentJobs) {
+    paymentVerification.verified = false;
+    paymentVerification.status = "NEEDS_REVIEW";
+    if (!paymentVerification.reasons.includes("MULTIPLE_WAITING_PAYMENT_JOBS")) {
+      paymentVerification.reasons.push("MULTIPLE_WAITING_PAYMENT_JOBS");
+    }
+  }
+
+  if (paymentVerification.verified && !hasMultipleWaitingPaymentJobs) {
+    const verifiedAt = new Date().toISOString();
+
+    const payment = await createPayment({
+      jobId: paymentJob.id,
+      amount: paymentJob.price,
+      paymentMethod: process.env.PAYMENT_RECIPIENT_TYPE || "KTC_BILLER",
+      slipReceived: true,
+      slipUrl: paymentSlipUpload?.signedUrl || safeImageUrl,
+      paymentVerified: true,
+      verifiedAt,
+      transactionReference,
+      transactionDate: imageClassification.transactionDate || null,
+      transactionTime: imageClassification.transactionTime || null,
+      recipientName:
+        imageClassification.recipientName ||
+        imageClassification.recipientBankOrBiller ||
+        null,
+      recipientBillerId: imageClassification.recipientBillerId || null,
+      recipientCardLast4: imageClassification.recipientCardLast4 || null,
+    });
+
+    await updateJob(paymentJob.id, {
+      status: "paid",
+      paid_at: verifiedAt,
+    });
+
+    try {
+      await updateJobInGoogleSheet({
+        jobId: paymentJob.id,
+        status: "paid",
+        paidAt: verifiedAt,
+      });
+    } catch (error) {
+      console.error("MANYCHAT AUTO PAYMENT SHEET UPDATE FAILED:", error);
+    }
+
+    await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
+
+    const customerReply = getCustomerText(
+      customer,
+      "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ",
+      "Thank you. Your payment has been received successfully. If you have another review you'd like us to handle, please send it anytime."
+    );
+
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: customerReply,
+      });
+      await saveMessage({
+        customerId: customer.id,
+        platform: customer.platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: customerReply,
+      });
+      await updateLastBotMessage(customer.id, customerReply);
+    } catch (error) {
+      console.error("MANYCHAT AUTO PAYMENT CUSTOMER REPLY FAILED:", error);
+    }
+
+    await updateConversationState({
+      customerId: customer.id,
+      state: GMR_STATES.WAITING_MAP,
+      handoff: false,
+      handoffReason: null,
+    });
+
+    if (paymentSlipUpload?.filePath) {
+      try { await deletePaymentSlip(paymentSlipUpload.filePath); } catch (error) {
+        console.error("MANYCHAT AUTO PAYMENT SLIP DELETE FAILED:", error);
+      }
+    }
+
+    return {
+      ok: true,
+      handled: true,
+      autoVerified: true,
+      paymentId: payment.id,
+      jobId: paymentJob.id,
+      status: "paid",
+    };
+  }
+
+  const pendingPayment = await createPendingPayment({
+    jobId: paymentJob.id,
+    amount:
+      imageClassification.amount ||
+      (hasMultipleWaitingPaymentJobs
+        ? waitingPaymentJobs.reduce(
+            (total, job) => total + Number(job.price || 0),
+            0
+          )
+        : paymentJob.price || 0),
+    paymentMethod: process.env.PAYMENT_RECIPIENT_TYPE || "KTC_BILLER",
+    transactionReference,
+    transactionDate: imageClassification.transactionDate || null,
+    transactionTime: imageClassification.transactionTime || null,
+    recipientName:
+      imageClassification.recipientName ||
+      imageClassification.recipientBankOrBiller ||
+      null,
+    recipientBillerId: imageClassification.recipientBillerId || null,
+    recipientCardLast4: imageClassification.recipientCardLast4 || null,
+    verificationReasons: paymentVerification.reasons || [],
+    slipFilePath: paymentSlipUpload?.filePath || null,
+  });
+
+  const salesResult = await sendPaymentReviewToLineGroup({
+    paymentId: pendingPayment.id,
+    jobId: paymentJob.id,
+    slipImageUrl: paymentSlipUpload?.signedUrl || safeImageUrl,
+    customerName: displayName || customer.display_name || "",
+    businessName: hasMultipleWaitingPaymentJobs
+      ? `หลายงาน (${waitingPaymentJobs.length} งาน)`
+      : (paymentJob.business_name || ""),
+    amount:
+      imageClassification.amount ||
+      (hasMultipleWaitingPaymentJobs
+        ? waitingPaymentJobs.reduce(
+            (total, job) => total + Number(job.price || 0),
+            0
+          )
+        : paymentJob.price || 0),
+    transactionDate: imageClassification.transactionDate || null,
+    transactionTime: imageClassification.transactionTime || null,
+    recipientName:
+      imageClassification.recipientName ||
+      imageClassification.recipientBankOrBiller ||
+      null,
+    recipientCardLast4: imageClassification.recipientCardLast4 || null,
+    reasons: paymentVerification.reasons || [],
+  });
+
+  if (salesResult?.messageId) {
+    await updatePayment(pendingPayment.id, {
+      line_group_message_id: salesResult.messageId,
+    });
+  }
+
+  return {
+    ok: true,
+    handled: true,
+    autoVerified: false,
+    needsReview: true,
+    paymentId: pendingPayment.id,
+    jobId: paymentJob.id,
+  };
+}
+
+app.post("/manychat/payment-slip", async (req, res) => {
+  try {
+    const expectedSecret = String(
+      process.env.MANYCHAT_WEBHOOK_SECRET || ""
+    ).trim();
+    const suppliedSecret = String(
+      req.get("x-manychat-secret") || ""
+    ).trim();
+
+    if (!expectedSecret) {
+      return res.status(500).json({
+        ok: false,
+        error: "MANYCHAT_WEBHOOK_SECRET not configured",
+      });
+    }
+
+    if (!suppliedSecret || suppliedSecret !== expectedSecret) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const body = req.body || {};
+    const pageKey = String(
+      body.page_key || body.pageKey || "gmr_th"
+    ).trim().toLowerCase();
+
+    if (!["gmr_th", "gmr_en"].includes(pageKey)) {
+      return res.status(400).json({ ok: false, error: "Invalid page_key" });
+    }
+
+    const platform = pageKey === "gmr_en" ? "facebook_en" : "facebook_th";
+    const platformUserId = String(
+      body.subscriber_id || body.contact_id || body.platform_user_id || ""
+    ).trim();
+    const imageUrl = String(
+      body.image_url || body.imageUrl || ""
+    ).trim();
+    const displayName = String(
+      body.display_name ||
+      [body.first_name, body.last_name].filter(Boolean).join(" ") ||
+      "Facebook User"
+    ).trim();
+
+    if (!platformUserId) {
+      return res.status(400).json({ ok: false, error: "Missing subscriber_id" });
+    }
+    if (!imageUrl) {
+      return res.status(400).json({ ok: false, error: "Missing image_url" });
+    }
+
+    const eventId = crypto
+      .createHash("sha256")
+      .update(`${platform}|${platformUserId}|${imageUrl}`)
+      .digest("hex");
+
+    const claim = await claimWebhookEvent({
+      platform,
+      eventId: `manychat-payment-slip:${eventId}`,
+      payload: {
+        transport: "manychat_payment_slip",
+        pageKey,
+        platformUserId,
+      },
+    });
+
+    if (claim?.claimed === false) {
+      return res.status(200).json({ ok: true, duplicate: true });
+    }
+
+    const result = await processManychatPaymentSlipImage({
+      platform,
+      platformUserId,
+      displayName,
+      imageUrl,
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("MANYCHAT PAYMENT SLIP ERROR:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || String(error),
+    });
+  }
+});
+
 // =========================================================
 // MANYCHAT -> GMR CORE BRIDGE
 // รองรับทั้ง Facebook Page TH / EN
@@ -25633,6 +26277,8 @@ if (
 
   let customerNotified = false;
   let customerNotificationError = null;
+  let paymentSlipFlowStarted = false;
+  let paymentSlipFlowError = null;
 
   if (shouldNotifyCustomer) {
     try {
@@ -25652,6 +26298,34 @@ if (
           text: botReply,
           imageUrl: paymentCurrency === "THB" ? thbPaymentQrUrl : "",
         });
+
+        // Arm the dedicated ManyChat Image Data Collection flow immediately
+        // after the payment request is delivered. This makes the next image
+        // reply available to the backend as payment_slip_image instead of
+        // relying on Last Text Input (which cannot carry Messenger images).
+        try {
+          const slipFlowResult = await startManychatPaymentSlipFlow({
+            platform: customer.platform,
+            platformUserId: customer.platform_user_id,
+          });
+
+          paymentSlipFlowStarted = slipFlowResult?.ok === true;
+
+          if (slipFlowResult?.skipped === true) {
+            paymentSlipFlowError = slipFlowResult?.reason ||
+              "PAYMENT_SLIP_FLOW_NOT_STARTED";
+          }
+        } catch (slipFlowStartError) {
+          paymentSlipFlowError =
+            slipFlowStartError?.message || String(slipFlowStartError);
+
+          console.error("MANYCHAT PAYMENT SLIP FLOW START FAILED:", {
+            customerId: customer.id,
+            platform: customer.platform,
+            platformUserId: customer.platform_user_id,
+            error: paymentSlipFlowError,
+          });
+        }
       } else {
         await sendMessageToCustomer({
           platform: customer.platform,
@@ -25776,6 +26450,9 @@ if (
       customerNotified,
 
       customerNotificationError,
+
+      paymentSlipFlowStarted,
+      paymentSlipFlowError,
 
       // V33: expose the exact customer-facing payment message to the internal
       // Telegram batch handler. If automatic delivery fails, staff can copy
