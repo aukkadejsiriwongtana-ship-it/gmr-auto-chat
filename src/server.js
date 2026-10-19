@@ -897,6 +897,33 @@ async function createStripeCheckoutSession({
       .trim()
       .toLowerCase();
 
+  // V38: never create a GMR Checkout Session that cannot be
+  // reconciled back to an internal customer/job. This prevents
+  // future checkout.session.completed events with unusable metadata.
+  const safeCustomerId =
+    String(customerId || "").trim();
+
+  const safeJobIds =
+    Array.from(
+      new Set(
+        (Array.isArray(jobIds) ? jobIds : [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      )
+    );
+
+  if (!safeCustomerId) {
+    throw new Error(
+      "Cannot create Stripe checkout without customerId"
+    );
+  }
+
+  if (safeJobIds.length === 0) {
+    throw new Error(
+      "Cannot create Stripe checkout without jobIds"
+    );
+  }
+
   const unitAmount =
     Math.round(
       safeAmount * 100
@@ -942,23 +969,16 @@ async function createStripeCheckoutSession({
   );
 
 
-  if (customerId) {
-    body.set(
-      "metadata[customer_id]",
-      String(customerId)
-    );
-  }
+  body.set(
+    "metadata[customer_id]",
+    safeCustomerId
+  );
 
 
-  if (
-    Array.isArray(jobIds) &&
-    jobIds.length > 0
-  ) {
-    body.set(
-      "metadata[job_ids]",
-      jobIds.join(",")
-    );
-  }
+  body.set(
+    "metadata[job_ids]",
+    safeJobIds.join(",")
+  );
 
 
   if (customerName) {
@@ -6701,9 +6721,36 @@ app.post(
         !customerId ||
         jobIds.length === 0
       ) {
-        throw new Error(
-          "Stripe session metadata is incomplete"
+        // V38: Older/manual Stripe Checkout Sessions can legitimately
+        // arrive without GMR metadata. Retrying them can never repair
+        // that missing linkage, so acknowledge the event instead of
+        // returning HTTP 500 and causing Stripe retry storms.
+        // IMPORTANT: no Job/payment is modified in this branch.
+        console.warn(
+          "STRIPE WEBHOOK IGNORED: session metadata incomplete",
+          {
+            eventId:
+              event.id || null,
+            sessionId:
+              session.id || null,
+            customerId:
+              customerId || null,
+            jobIds,
+            metadata:
+              session.metadata || null,
+          }
         );
+
+        return res
+          .status(200)
+          .json({
+            received: true,
+            ignored: true,
+            reason:
+              "session_metadata_incomplete",
+            sessionId:
+              session.id || null,
+          });
       }
 
 
