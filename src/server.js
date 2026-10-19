@@ -287,11 +287,12 @@ async function startManychatPaymentSlipFlow({
 }
 
 // =========================================================
-// V2.2.39 — MANYCHAT UTILITY PAYMENT FALLBACK (FACEBOOK TH)
+// V2.2.40 — MANYCHAT UTILITY PAYMENT FALLBACK (FACEBOOK TH + EN)
 //
 // Keep the current rich Messenger send first. If Meta rejects that send
 // (commonly because the 24-hour window has expired), populate the approved
 // Utility Template fields and start the dedicated ManyChat flow.
+// TH uses gmr_qr_url; EN uses gmr_payment_token.
 // =========================================================
 
 function getManychatCompletedPaymentFlowNsForPlatform(platform) {
@@ -380,15 +381,17 @@ async function startManychatCompletedPaymentUtilityFlow({
   unitPrice,
   paymentAmount,
   qrUrl,
+  paymentToken,
 }) {
   const normalized = String(platform || "").trim().toLowerCase();
   const token = getManychatApiTokenForPlatform(normalized);
   const flowNs = getManychatCompletedPaymentFlowNsForPlatform(normalized);
   const subscriberId = String(platformUserId || "").trim();
   const safeQrUrl = String(qrUrl || "").trim();
+  const safePaymentToken = String(paymentToken || "").trim();
 
-  if (normalized !== "facebook_th") {
-    return { ok: false, skipped: true, reason: "UTILITY_PAYMENT_FLOW_TH_ONLY" };
+  if (!["facebook_th", "facebook_en"].includes(normalized)) {
+    return { ok: false, skipped: true, reason: "UTILITY_PAYMENT_FLOW_FACEBOOK_ONLY" };
   }
 
   if (!token) {
@@ -420,16 +423,24 @@ async function startManychatCompletedPaymentUtilityFlow({
   if (!Number.isFinite(numericPaymentAmount) || numericPaymentAmount <= 0) {
     throw new Error("Invalid gmr_payment_amount for Utility payment flow");
   }
-  if (!safeQrUrl) {
-    throw new Error("Missing gmr_qr_url for Utility payment flow");
-  }
 
   const utilityFields = [
     ["gmr_review_count", numericReviewCount],
     ["gmr_unit_price", numericUnitPrice],
     ["gmr_payment_amount", numericPaymentAmount],
-    ["gmr_qr_url", safeQrUrl],
   ];
+
+  if (normalized === "facebook_th") {
+    if (!safeQrUrl) {
+      throw new Error("Missing gmr_qr_url for Thai Utility payment flow");
+    }
+    utilityFields.push(["gmr_qr_url", safeQrUrl]);
+  } else {
+    if (!safePaymentToken) {
+      throw new Error("Missing gmr_payment_token for English Utility payment flow");
+    }
+    utilityFields.push(["gmr_payment_token", safePaymentToken]);
+  }
 
   for (const [fieldName, fieldValue] of utilityFields) {
     await setManychatCustomFieldByName({
@@ -477,7 +488,8 @@ async function startManychatCompletedPaymentUtilityFlow({
     reviewCount: numericReviewCount,
     unitPrice: numericUnitPrice,
     paymentAmount: numericPaymentAmount,
-    qrUrl: safeQrUrl,
+    qrUrl: normalized === "facebook_th" ? safeQrUrl : null,
+    paymentToken: normalized === "facebook_en" ? safePaymentToken : null,
   });
 
   return { ok: true, platform: normalized, subscriberId, flowNs };
@@ -1237,6 +1249,58 @@ async function createStripeCheckoutSession({
       data.payment_status ||
       null,
   };
+}
+
+
+// =========================================================
+// V2.2.40 — STRIPE CHECKOUT TOKEN REDIRECT
+//
+// ManyChat Utility URL buttons need a stable short suffix. We use the
+// Stripe Checkout Session ID itself as gmr_payment_token, then resolve it
+// server-side. If the original Checkout Session has expired, a fresh
+// session is created for the still-unpaid USD jobs from its metadata.
+// No new database table is required.
+// =========================================================
+
+async function getStripeCheckoutSessionById(sessionId) {
+  const stripeSecretKey = String(process.env.STRIPE_SECRET_KEY || "").trim();
+  const safeSessionId = String(sessionId || "").trim();
+
+  if (!stripeSecretKey) {
+    throw new Error("STRIPE_SECRET_KEY is not configured");
+  }
+
+  if (!/^cs_(?:test|live)_[A-Za-z0-9]+$/.test(safeSessionId)) {
+    throw new Error("Invalid Stripe checkout token");
+  }
+
+  const response = await fetchWithNetworkRetry(
+    `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(safeSessionId)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${stripeSecretKey}`,
+      },
+    },
+    {
+      attempts: 2,
+      timeoutMs: 15000,
+      label: "STRIPE CHECKOUT LOOKUP",
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error?.message ||
+      `Stripe checkout lookup failed ${response.status}`
+    );
+  }
+
+  return data;
 }
 
 
@@ -6611,6 +6675,127 @@ app.post("/telegram/webhook", async (req, res) => {
 // =========================================================
 // STRIPE CHECKOUT RESULT PAGES
 // =========================================================
+
+// =========================================================
+// V2.2.40 — PUBLIC PAYMENT REDIRECT FOR MANYCHAT EN UTILITY
+//
+// URL format used by the approved template:
+// https://gmr-auto-chat.onrender.com/pay/<gmr_payment_token>
+// where token = Stripe Checkout Session ID (cs_live_... / cs_test_...).
+// =========================================================
+
+app.get(
+  "/pay/:token",
+  async (req, res) => {
+    try {
+      const paymentToken = String(req.params?.token || "").trim();
+
+      // Safe URL preview used only as the sample value during Meta template
+      // review. It never creates a Stripe charge or touches a Job.
+      if (paymentToken === "sample123") {
+        return res
+          .status(200)
+          .send("Payment link preview. No payment is required for this sample.");
+      }
+
+      const session = await getStripeCheckoutSessionById(paymentToken);
+
+      if (session.payment_status === "paid") {
+        return res.redirect(302, "/stripe/success");
+      }
+
+      // Open Checkout Session: use the original Stripe URL directly.
+      if (session.status === "open" && session.url) {
+        return res.redirect(302, session.url);
+      }
+
+      // Expired/otherwise unusable session: rebuild from trusted metadata,
+      // charging only jobs that are still waiting for payment.
+      const customerId = String(session.metadata?.customer_id || "").trim();
+      const originalJobIds = String(session.metadata?.job_ids || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+      if (!customerId || originalJobIds.length === 0) {
+        return res
+          .status(400)
+          .send("This payment link can no longer be used. Please contact us in chat for a new payment link.");
+      }
+
+      const payableJobs = [];
+
+      for (const jobId of originalJobIds) {
+        const paymentJob = await getJobById(jobId);
+
+        if (!paymentJob) {
+          continue;
+        }
+
+        if (String(paymentJob.customer_id || "") !== customerId) {
+          continue;
+        }
+
+        if (!["waiting_payment", "removed_waiting_payment"].includes(paymentJob.status)) {
+          continue;
+        }
+
+        const jobPrice = Number(paymentJob.price || 0);
+        const jobCurrency = getCurrencyFromUnitPrice({
+          price: jobPrice,
+          currency: paymentJob.currency,
+        });
+
+        if (
+          jobCurrency !== "USD" ||
+          !Number.isFinite(jobPrice) ||
+          jobPrice <= 0
+        ) {
+          continue;
+        }
+
+        payableJobs.push(paymentJob);
+      }
+
+      if (payableJobs.length === 0) {
+        // If no jobs remain payable, the batch was likely already settled or
+        // closed manually. Do not create another charge.
+        return res.redirect(302, "/stripe/success");
+      }
+
+      const totalAmount = payableJobs.reduce(
+        (sum, paymentJob) => sum + Number(paymentJob.price || 0),
+        0
+      );
+
+      const customer = await getCustomerById(customerId);
+
+      const refreshedCheckout = await createStripeCheckoutSession({
+        amount: totalAmount,
+        currency: "USD",
+        customerId,
+        jobIds: payableJobs.map((paymentJob) => paymentJob.id),
+        customerName: customer?.display_name || null,
+      });
+
+      console.log("STRIPE PAYMENT TOKEN REFRESHED:", {
+        oldSessionId: session.id || paymentToken,
+        newSessionId: refreshedCheckout.id,
+        customerId,
+        jobIds: payableJobs.map((paymentJob) => paymentJob.id),
+        amount: totalAmount,
+      });
+
+      return res.redirect(302, refreshedCheckout.url);
+    } catch (error) {
+      console.error("STRIPE PAYMENT TOKEN REDIRECT ERROR:", error);
+
+      return res
+        .status(400)
+        .send("This payment link is invalid or no longer available. Please contact us in chat for a new payment link.");
+    }
+  }
+);
 
 app.get(
   "/stripe/success",
@@ -26613,6 +26798,9 @@ app.post("/sheet-control", async (req, res) => {
   let stripePaymentLink =
   null;
 
+  let stripeCheckoutSessionId =
+  null;
+
 
   // ========================================
   // 1. ยืนยัน CURRENT JOB ก่อน
@@ -26782,6 +26970,9 @@ if (
 
   stripePaymentLink =
     stripeCheckout.url;
+
+  stripeCheckoutSessionId =
+    stripeCheckout.id;
 
 
   console.log(
@@ -27001,21 +27192,26 @@ if (
           });
         }
 
-        // V39: Facebook TH + THB gets an approved Utility Message fallback
+        // V40: approved Utility Message fallback for both Facebook pages
         // when the normal Messenger send is rejected (e.g. outside 24h).
+        // TH uses QR; EN uses a Stripe Checkout token behind /pay/<token>.
         if (!customerNotificationTransport) {
           const canUseThaiUtility =
             normalizedCustomerPlatform === "facebook_th" &&
             paymentCurrency === "THB";
 
-          if (!canUseThaiUtility) {
+          const canUseEnglishUtility =
+            normalizedCustomerPlatform === "facebook_en" &&
+            paymentCurrency === "USD";
+
+          if (!canUseThaiUtility && !canUseEnglishUtility) {
             throw new Error(
               normalFacebookSendError ||
               "Normal Facebook payment notification failed and no Utility fallback is configured for this platform/currency"
             );
           }
 
-          // The approved Thai template contains a single unit-price formula.
+          // Both approved templates contain a single unit-price formula.
           // Mixed-price batches must not be rendered with false numbers.
           if (
             !Array.isArray(paymentSummary.groups) ||
@@ -27032,6 +27228,16 @@ if (
 
           const utilityGroup = paymentSummary.groups[0];
 
+          if (canUseEnglishUtility && !stripeCheckoutSessionId) {
+            utilityPaymentFlowError =
+              "STRIPE_CHECKOUT_SESSION_ID_MISSING";
+
+            throw new Error(
+              `${normalFacebookSendError || "Normal Facebook payment notification failed"}; ` +
+              utilityPaymentFlowError
+            );
+          }
+
           try {
             const utilityResult =
               await startManychatCompletedPaymentUtilityFlow({
@@ -27040,7 +27246,8 @@ if (
                 reviewCount: paymentSummary.totalReviews,
                 unitPrice: utilityGroup.price,
                 paymentAmount: paymentSummary.total,
-                qrUrl: thbPaymentQrUrl,
+                qrUrl: canUseThaiUtility ? thbPaymentQrUrl : "",
+                paymentToken: canUseEnglishUtility ? stripeCheckoutSessionId : "",
               });
 
             utilityPaymentFlowStarted = utilityResult?.ok === true;
