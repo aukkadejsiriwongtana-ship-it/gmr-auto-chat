@@ -286,6 +286,203 @@ async function startManychatPaymentSlipFlow({
   return { ok: true, platform: normalized, subscriberId, flowNs };
 }
 
+// =========================================================
+// V2.2.39 — MANYCHAT UTILITY PAYMENT FALLBACK (FACEBOOK TH)
+//
+// Keep the current rich Messenger send first. If Meta rejects that send
+// (commonly because the 24-hour window has expired), populate the approved
+// Utility Template fields and start the dedicated ManyChat flow.
+// =========================================================
+
+function getManychatCompletedPaymentFlowNsForPlatform(platform) {
+  const normalized = String(platform || "").trim().toLowerCase();
+
+  if (normalized === "facebook_th") {
+    return String(
+      process.env.MANYCHAT_COMPLETED_PAYMENT_FLOW_NS_TH ||
+      process.env.MANYCHAT_COMPLETED_PAYMENT_FLOW_NS ||
+      ""
+    ).trim();
+  }
+
+  if (normalized === "facebook_en") {
+    return String(
+      process.env.MANYCHAT_COMPLETED_PAYMENT_FLOW_NS_EN ||
+      process.env.MANYCHAT_COMPLETED_PAYMENT_FLOW_NS ||
+      ""
+    ).trim();
+  }
+
+  return "";
+}
+
+async function setManychatCustomFieldByName({
+  platform,
+  platformUserId,
+  fieldName,
+  fieldValue,
+}) {
+  const normalized = String(platform || "").trim().toLowerCase();
+  const token = getManychatApiTokenForPlatform(normalized);
+  const subscriberId = String(platformUserId || "").trim();
+  const safeFieldName = String(fieldName || "").trim();
+
+  if (!token) {
+    throw new Error(`Missing ManyChat API Token for ${normalized}`);
+  }
+
+  if (!subscriberId) {
+    throw new Error("Missing ManyChat subscriber_id for custom-field update");
+  }
+
+  if (!safeFieldName) {
+    throw new Error("Missing ManyChat custom field name");
+  }
+
+  const response = await fetchWithNetworkRetry(
+    "https://api.manychat.com/fb/subscriber/setCustomFieldByName",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscriber_id: subscriberId,
+        field_name: safeFieldName,
+        field_value: fieldValue,
+      }),
+    },
+    {
+      attempts: 2,
+      timeoutMs: 15000,
+      label: `MANYCHAT SET FIELD ${safeFieldName}`,
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok || data?.status === "error") {
+    throw new Error(
+      `ManyChat set field ${safeFieldName} failed ${response.status}: ${responseText}`
+    );
+  }
+
+  return { ok: true, fieldName: safeFieldName };
+}
+
+async function startManychatCompletedPaymentUtilityFlow({
+  platform,
+  platformUserId,
+  reviewCount,
+  unitPrice,
+  paymentAmount,
+  qrUrl,
+}) {
+  const normalized = String(platform || "").trim().toLowerCase();
+  const token = getManychatApiTokenForPlatform(normalized);
+  const flowNs = getManychatCompletedPaymentFlowNsForPlatform(normalized);
+  const subscriberId = String(platformUserId || "").trim();
+  const safeQrUrl = String(qrUrl || "").trim();
+
+  if (normalized !== "facebook_th") {
+    return { ok: false, skipped: true, reason: "UTILITY_PAYMENT_FLOW_TH_ONLY" };
+  }
+
+  if (!token) {
+    throw new Error(`Missing ManyChat API Token for ${normalized}`);
+  }
+
+  if (!subscriberId) {
+    throw new Error("Missing ManyChat subscriber_id for completed-payment utility flow");
+  }
+
+  if (!flowNs) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "COMPLETED_PAYMENT_FLOW_NS_NOT_CONFIGURED",
+    };
+  }
+
+  const numericReviewCount = Number(reviewCount || 0);
+  const numericUnitPrice = Number(unitPrice || 0);
+  const numericPaymentAmount = Number(paymentAmount || 0);
+
+  if (!Number.isFinite(numericReviewCount) || numericReviewCount <= 0) {
+    throw new Error("Invalid gmr_review_count for Utility payment flow");
+  }
+  if (!Number.isFinite(numericUnitPrice) || numericUnitPrice <= 0) {
+    throw new Error("Invalid gmr_unit_price for Utility payment flow");
+  }
+  if (!Number.isFinite(numericPaymentAmount) || numericPaymentAmount <= 0) {
+    throw new Error("Invalid gmr_payment_amount for Utility payment flow");
+  }
+  if (!safeQrUrl) {
+    throw new Error("Missing gmr_qr_url for Utility payment flow");
+  }
+
+  const utilityFields = [
+    ["gmr_review_count", numericReviewCount],
+    ["gmr_unit_price", numericUnitPrice],
+    ["gmr_payment_amount", numericPaymentAmount],
+    ["gmr_qr_url", safeQrUrl],
+  ];
+
+  for (const [fieldName, fieldValue] of utilityFields) {
+    await setManychatCustomFieldByName({
+      platform: normalized,
+      platformUserId: subscriberId,
+      fieldName,
+      fieldValue,
+    });
+  }
+
+  const response = await fetchWithNetworkRetry(
+    "https://api.manychat.com/fb/sending/sendFlow",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subscriber_id: subscriberId,
+        flow_ns: flowNs,
+      }),
+    },
+    {
+      attempts: 2,
+      timeoutMs: 15000,
+      label: "MANYCHAT COMPLETED PAYMENT UTILITY FLOW",
+    }
+  );
+
+  const responseText = await response.text();
+  let data = {};
+  try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+
+  if (!response.ok || data?.status === "error") {
+    throw new Error(
+      `ManyChat completed-payment Utility flow failed ${response.status}: ${responseText}`
+    );
+  }
+
+  console.log("MANYCHAT COMPLETED PAYMENT UTILITY FLOW STARTED:", {
+    platform: normalized,
+    subscriberId,
+    flowNs,
+    reviewCount: numericReviewCount,
+    unitPrice: numericUnitPrice,
+    paymentAmount: numericPaymentAmount,
+    qrUrl: safeQrUrl,
+  });
+
+  return { ok: true, platform: normalized, subscriberId, flowNs };
+}
+
 async function sendMessageToCustomer({ platform, platformUserId, text, ...rest }) {
   const normalized = String(platform || "").trim().toLowerCase();
 
@@ -26764,54 +26961,137 @@ if (
 
   let customerNotified = false;
   let customerNotificationError = null;
+  let customerNotificationTransport = null;
   let paymentSlipFlowStarted = false;
   let paymentSlipFlowError = null;
+  let utilityPaymentFlowStarted = false;
+  let utilityPaymentFlowError = null;
 
   if (shouldNotifyCustomer) {
     try {
       const normalizedCustomerPlatform =
         String(customer.platform || "").trim().toLowerCase();
 
-      // Facebook/ManyChat can send the text + QR image in one Content API call.
-      // This also fixes the old "Missing customer message text" error that
-      // happened when an image-only send was routed through the text sender.
       if (
         normalizedCustomerPlatform === "facebook_th" ||
         normalizedCustomerPlatform === "facebook_en"
       ) {
-        await sendMessageToCustomer({
-          platform: customer.platform,
-          platformUserId: customer.platform_user_id,
-          text: botReply,
-          imageUrl: paymentCurrency === "THB" ? thbPaymentQrUrl : "",
-        });
+        let normalFacebookSendError = null;
 
-        // Arm the dedicated ManyChat Image Data Collection flow immediately
-        // after the payment request is delivered. This makes the next image
-        // reply available to the backend as payment_slip_image instead of
-        // relying on Last Text Input (which cannot carry Messenger images).
+        // Keep the current UX whenever Meta still allows a normal message:
+        // payment text + actual QR image.
         try {
-          const slipFlowResult = await startManychatPaymentSlipFlow({
+          await sendMessageToCustomer({
             platform: customer.platform,
             platformUserId: customer.platform_user_id,
+            text: botReply,
+            imageUrl: paymentCurrency === "THB" ? thbPaymentQrUrl : "",
           });
 
-          paymentSlipFlowStarted = slipFlowResult?.ok === true;
+          customerNotificationTransport = "manychat_content";
+        } catch (facebookSendError) {
+          normalFacebookSendError =
+            facebookSendError?.message || String(facebookSendError);
 
-          if (slipFlowResult?.skipped === true) {
-            paymentSlipFlowError = slipFlowResult?.reason ||
-              "PAYMENT_SLIP_FLOW_NOT_STARTED";
-          }
-        } catch (slipFlowStartError) {
-          paymentSlipFlowError =
-            slipFlowStartError?.message || String(slipFlowStartError);
-
-          console.error("MANYCHAT PAYMENT SLIP FLOW START FAILED:", {
+          console.warn("MANYCHAT NORMAL PAYMENT SEND FAILED — TRYING UTILITY FALLBACK:", {
             customerId: customer.id,
             platform: customer.platform,
-            platformUserId: customer.platform_user_id,
-            error: paymentSlipFlowError,
+            paymentCurrency,
+            error: normalFacebookSendError,
           });
+        }
+
+        // V39: Facebook TH + THB gets an approved Utility Message fallback
+        // when the normal Messenger send is rejected (e.g. outside 24h).
+        if (!customerNotificationTransport) {
+          const canUseThaiUtility =
+            normalizedCustomerPlatform === "facebook_th" &&
+            paymentCurrency === "THB";
+
+          if (!canUseThaiUtility) {
+            throw new Error(
+              normalFacebookSendError ||
+              "Normal Facebook payment notification failed and no Utility fallback is configured for this platform/currency"
+            );
+          }
+
+          // The approved Thai template contains a single unit-price formula.
+          // Mixed-price batches must not be rendered with false numbers.
+          if (
+            !Array.isArray(paymentSummary.groups) ||
+            paymentSummary.groups.length !== 1
+          ) {
+            utilityPaymentFlowError =
+              "UTILITY_TEMPLATE_REQUIRES_SINGLE_UNIT_PRICE_GROUP";
+
+            throw new Error(
+              `${normalFacebookSendError || "Normal Facebook payment notification failed"}; ` +
+              utilityPaymentFlowError
+            );
+          }
+
+          const utilityGroup = paymentSummary.groups[0];
+
+          try {
+            const utilityResult =
+              await startManychatCompletedPaymentUtilityFlow({
+                platform: customer.platform,
+                platformUserId: customer.platform_user_id,
+                reviewCount: paymentSummary.totalReviews,
+                unitPrice: utilityGroup.price,
+                paymentAmount: paymentSummary.total,
+                qrUrl: thbPaymentQrUrl,
+              });
+
+            utilityPaymentFlowStarted = utilityResult?.ok === true;
+
+            if (!utilityPaymentFlowStarted) {
+              utilityPaymentFlowError =
+                utilityResult?.reason ||
+                "COMPLETED_PAYMENT_UTILITY_FLOW_NOT_STARTED";
+              throw new Error(utilityPaymentFlowError);
+            }
+
+            customerNotificationTransport = "manychat_utility";
+          } catch (utilityError) {
+            utilityPaymentFlowError =
+              utilityError?.message || String(utilityError);
+
+            throw new Error(
+              `${normalFacebookSendError || "Normal Facebook payment notification failed"}; ` +
+              `Utility fallback failed: ${utilityPaymentFlowError}`
+            );
+          }
+        }
+
+        // Only start the ordinary image Data Collection flow when the normal
+        // Messenger send worked. Utility delivery does not reopen the normal
+        // 24h automation window. If the customer replies with a slip image,
+        // V36's waiting-payment image fallback handles it.
+        if (customerNotificationTransport === "manychat_content") {
+          try {
+            const slipFlowResult = await startManychatPaymentSlipFlow({
+              platform: customer.platform,
+              platformUserId: customer.platform_user_id,
+            });
+
+            paymentSlipFlowStarted = slipFlowResult?.ok === true;
+
+            if (slipFlowResult?.skipped === true) {
+              paymentSlipFlowError = slipFlowResult?.reason ||
+                "PAYMENT_SLIP_FLOW_NOT_STARTED";
+            }
+          } catch (slipFlowStartError) {
+            paymentSlipFlowError =
+              slipFlowStartError?.message || String(slipFlowStartError);
+
+            console.error("MANYCHAT PAYMENT SLIP FLOW START FAILED:", {
+              customerId: customer.id,
+              platform: customer.platform,
+              platformUserId: customer.platform_user_id,
+              error: paymentSlipFlowError,
+            });
+          }
         }
       } else {
         await sendMessageToCustomer({
@@ -26827,6 +27107,8 @@ if (
             imageUrl: thbPaymentQrUrl,
           });
         }
+
+        customerNotificationTransport = "direct";
       }
 
       await saveMessage({
@@ -26843,16 +27125,16 @@ if (
       customerNotificationError =
         notifyError?.message || String(notifyError);
 
-      // IMPORTANT: customer-channel failure must never roll the job back.
-      // The removal is already confirmed and the job stays waiting_payment.
       console.error("CONFIRM REMOVED CUSTOMER NOTIFY FAILED:", {
         jobId: job.id,
         customerId: customer.id,
         platform: customer.platform,
         error: customerNotificationError,
+        utilityPaymentFlowError,
       });
     }
-  } else if (suppressCustomerNotify !== true) {
+  }
+ else if (suppressCustomerNotify !== true) {
     try {
       await triggerHumanAttention({
         customer,
@@ -26938,8 +27220,13 @@ if (
 
       customerNotificationError,
 
+      customerNotificationTransport,
+
       paymentSlipFlowStarted,
       paymentSlipFlowError,
+
+      utilityPaymentFlowStarted,
+      utilityPaymentFlowError,
 
       // V33: expose the exact customer-facing payment message to the internal
       // Telegram batch handler. If automatic delivery fails, staff can copy
