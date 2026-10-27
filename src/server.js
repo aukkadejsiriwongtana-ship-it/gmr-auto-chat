@@ -287,6 +287,9 @@ async function startManychatPaymentSlipFlow({
 }
 
 // =========================================================
+// V2.2.41 — BATCH COUNT + LINE START RELIABILITY + DISPATCH CUSTOMER NAME
+// Built on current uploaded production code.
+//
 // V2.2.40 — MANYCHAT UTILITY PAYMENT FALLBACK (FACEBOOK TH + EN)
 //
 // Keep the current rich Messenger send first. If Meta rejects that send
@@ -523,6 +526,94 @@ async function sendMessageToCustomer({ platform, platformUserId, text, ...rest }
     text,
     ...rest,
   });
+}
+
+// =========================================================
+// V2.2.41 — RELIABLE START NOTIFICATION
+//
+// Telegram must not say "sent" for LINE merely because the call path did
+// not throw. For LINE we first verify that the stored user id is a live LINE
+// user profile, normalize LINE aliases to the LINE transport, and retry only
+// real API/network failures. LINE Messaging API does not provide a per-user
+// delivery receipt, so the success label is intentionally "API accepted".
+// =========================================================
+
+function assertOutboundSendAccepted(result, label = "OUTBOUND") {
+  if (result === false || result?.ok === false || result?.success === false) {
+    throw new Error(`${label}_NOT_ACCEPTED`);
+  }
+}
+
+async function sendStartMessageToCustomerReliable({ customer, text }) {
+  if (!customer?.platform_user_id) {
+    throw new Error("Missing customer platform_user_id");
+  }
+
+  const normalizedPlatform = String(customer.platform || "").trim().toLowerCase();
+  const platformUserId = String(customer.platform_user_id || "").trim();
+  const isLine = normalizedPlatform === "line" || normalizedPlatform.startsWith("line_");
+
+  if (!isLine) {
+    const result = await sendMessageToCustomer({
+      platform: customer.platform,
+      platformUserId,
+      text,
+    });
+    assertOutboundSendAccepted(result, "START_CUSTOMER_SEND");
+    return {
+      ok: true,
+      transport: normalizedPlatform || "unknown",
+      apiAccepted: true,
+    };
+  }
+
+  if (!/^U[0-9a-f]{32}$/i.test(platformUserId)) {
+    throw new Error(`Invalid LINE user id: ${platformUserId || "missing"}`);
+  }
+
+  // A profile lookup catches stale/invalid LINE identities before Telegram
+  // reports the start message as successfully accepted.
+  const lineProfile = await getLineUserProfile(platformUserId);
+  if (!lineProfile?.displayName) {
+    throw new Error("LINE profile unavailable for start notification");
+  }
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const result = await sendMessageToCustomer({
+        platform: "line",
+        platformUserId,
+        text,
+      });
+      assertOutboundSendAccepted(result, "LINE_START_PUSH");
+
+      console.log("V41 LINE START MESSAGE API ACCEPTED:", {
+        customerId: customer.id || null,
+        platformUserId,
+        displayName: lineProfile.displayName,
+        attempt,
+      });
+
+      return {
+        ok: true,
+        transport: "line_push_api",
+        apiAccepted: true,
+        lineDisplayName: lineProfile.displayName,
+      };
+    } catch (error) {
+      lastError = error;
+      console.error("V41 LINE START MESSAGE ATTEMPT FAILED:", {
+        customerId: customer.id || null,
+        platformUserId,
+        attempt,
+        error: error?.message || String(error),
+      });
+      if (attempt < 3) await sleepMs(500 * attempt);
+    }
+  }
+
+  throw lastError || new Error("LINE start notification failed");
 }
 
 // Internal team notifications are routed through Telegram in V2.2.
@@ -2771,7 +2862,40 @@ async function sendDepartmentDispatchToLineGroup({
   }
 
   const sentAt = dispatchedAt || new Date().toISOString();
-  const reviewLines = jobs.map((job, index) => `${index + 1}. ${job.review_url}`);
+
+  // V41: show the customer name in every T0/T2 dispatch item.
+  // Cache by customer_id so a customer with multiple reviews is queried once.
+  const customerNameById = new Map();
+  const uniqueCustomerIds = Array.from(
+    new Set(
+      jobs
+        .map((job) => String(job?.customer_id || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  await Promise.all(
+    uniqueCustomerIds.map(async (customerId) => {
+      try {
+        const customer = await getCustomerById(customerId);
+        customerNameById.set(customerId, customer?.display_name || "-");
+      } catch (error) {
+        console.error("V41 DISPATCH CUSTOMER LOOKUP FAILED:", {
+          customerId,
+          error: error?.message || String(error),
+        });
+        customerNameById.set(customerId, "-");
+      }
+    })
+  );
+
+  const reviewLines = jobs.map((job, index) => {
+    const customerId = String(job?.customer_id || "").trim();
+    const customerName = customerNameById.get(customerId) || "-";
+    return `${index + 1}. ลูกค้า: ${customerName}
+   ${job.review_url || "-"}`;
+  });
+
   const thaiTime = (() => {
     const date = new Date(sentAt);
     if (Number.isNaN(date.getTime())) return sentAt;
@@ -6220,8 +6344,11 @@ app.post("/telegram/webhook", async (req, res) => {
               `รับเข้าคิว: ${confirmed.startedJobs.length} รีวิว`,
               "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
               confirmed.customerNotifyOk
-                ? "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว"
-                : "⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+                ? (confirmed.customerNotifyTransport === "line_push_api"
+                    ? "LINE API รับคำสั่งส่ง Script เริ่มงานแล้ว"
+                    : "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว")
+                : `⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท${confirmed.customerNotifyError ? `
+เหตุผล: ${confirmed.customerNotifyError}` : ""}`,
               failedSheets.length === 0
                 ? "ลง Sheet ครบแล้ว"
                 : [
@@ -6372,8 +6499,11 @@ app.post("/telegram/webhook", async (req, res) => {
                   ...workLines,
                   "",
                   confirmed.customerNotifyOk
-                    ? "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว"
-                    : "⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+                    ? (confirmed.customerNotifyTransport === "line_push_api"
+                        ? "✅ LINE API รับคำสั่งส่งข้อความเริ่มงาน + เงื่อนไขแล้ว"
+                        : "✅ ส่งข้อความเริ่มงาน + เงื่อนไขให้ลูกค้าแล้ว")
+                    : `⚠️ งานเริ่มแล้ว แต่ส่งข้อความเริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท${confirmed.customerNotifyError ? `
+เหตุผล: ${confirmed.customerNotifyError}` : ""}`,
                   failedSheets.length === 0
                     ? "✅ ลง Sheet ครบแล้ว"
                     : [
@@ -9876,16 +10006,27 @@ async function confirmV2SalesOrderDraft(draft) {
   });
   await updateSalesLead(customer.id, { status: "converted" });
 
-  let customerNotifyOk = true;
+  let customerNotifyOk = false;
+  let customerNotifyTransport = null;
+  let customerNotifyError = null;
+
   try {
-    await sendMessageToCustomer({
-      platform: customer.platform,
-      platformUserId: customer.platform_user_id,
+    const notifyResult = await sendStartMessageToCustomerReliable({
+      customer,
       text: startResult.botReply,
     });
+
+    customerNotifyOk = notifyResult?.ok === true;
+    customerNotifyTransport = notifyResult?.transport || null;
   } catch (error) {
     customerNotifyOk = false;
-    console.error("V2 START CUSTOMER NOTIFICATION FAILED:", error);
+    customerNotifyError = error?.message || String(error);
+    console.error("V2 START CUSTOMER NOTIFICATION FAILED:", {
+      customerId: customer.id,
+      platform: customer.platform,
+      platformUserId: customer.platform_user_id,
+      error: customerNotifyError,
+    });
   }
 
   return {
@@ -9894,6 +10035,8 @@ async function confirmV2SalesOrderDraft(draft) {
     botReply: startResult.botReply,
     sheetResults,
     customerNotifyOk,
+    customerNotifyTransport,
+    customerNotifyError,
   };
 }
 
@@ -17893,8 +18036,11 @@ if (quotedMessageId) {
             `รับเข้าคิว: ${confirmed.startedJobs.length} รีวิว`,
             "ระบบจะส่ง T0/T2 เข้ากลุ่มตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
             confirmed.customerNotifyOk
-              ? "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว"
-              : "⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท",
+                ? (confirmed.customerNotifyTransport === "line_push_api"
+                    ? "LINE API รับคำสั่งส่ง Script เริ่มงานแล้ว"
+                    : "แจ้ง Script เริ่มงานให้ลูกค้าแล้ว")
+                : `⚠️ รับงานแล้ว แต่ส่ง Script เริ่มงานให้ลูกค้าไม่สำเร็จ กรุณาเช็กแชท${confirmed.customerNotifyError ? `
+เหตุผล: ${confirmed.customerNotifyError}` : ""}`,
             failedSheets.length === 0
               ? "ลง Sheet ครบแล้ว"
               : `⚠️ Sheet มีปัญหา ${failedSheets.length} งาน กรุณาตรวจสอบ log`,
@@ -26860,14 +27006,42 @@ app.post("/sheet-control", async (req, res) => {
   }
 
   // ========================================
-  // 2. ดึงทุกงานของลูกค้าคนนี้
-  // ที่สำเร็จแล้วและยังไม่จ่าย
+  // 2. ดึงงาน waiting_payment ของลูกค้าคนนี้
+  // แต่ข้อความเก็บเงินรอบนี้ต้องนับเฉพาะงานที่ถูกยืนยันออก
+  // ใน removal batch เดียวกันเท่านั้น
+  //
+  // ก่อน V41 โค้ดรวม waiting_payment เก่าทั้งหมดของลูกค้า ทำให้เช่น
+  // รอบนี้ออกจริง 3 รีวิว แต่มีค้างเก่า 2 รีวิว -> ข้อความผิดเป็น 5 รีวิว
   // ========================================
 
-  const waitingPaymentJobs =
+  const allWaitingPaymentJobs =
     await getWaitingPaymentJobsByCustomerId(
       customer.id
     );
+
+  const waitingPaymentJobs =
+    allWaitingPaymentJobs.filter((waitingJob) => {
+      const waitingBatchId =
+        String(waitingJob?.removal_detection_batch_id || "").trim();
+
+      if (waitingBatchId) {
+        return waitingBatchId === removalBatchId;
+      }
+
+      // Backward-compatible safety for a historical one-off job that did not
+      // have a batch id persisted. Never pull unrelated old waiting jobs in.
+      return String(waitingJob?.id || "") === String(job.id || "");
+    });
+
+  console.log("V41 PAYMENT SUMMARY SCOPED TO REMOVAL BATCH:", {
+    customerId: customer.id,
+    removalBatchId,
+    allWaitingPaymentCount: allWaitingPaymentJobs.length,
+    currentBatchWaitingCount: waitingPaymentJobs.length,
+    excludedOldWaitingCount:
+      Math.max(0, allWaitingPaymentJobs.length - waitingPaymentJobs.length),
+    jobIds: waitingPaymentJobs.map((item) => item.id),
+  });
 
 
   // ========================================
