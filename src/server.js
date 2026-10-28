@@ -6333,26 +6333,44 @@ app.post("/telegram/webhook", async (req, res) => {
           // avoid Telegram's 4096-character truncation and to keep each copy
           // block clearly separated.
           for (const item of notificationWarnings) {
+            let customerCopyText =
+              item.manualPaymentText ||
+              "⚠️ ระบบสร้างข้อความเก็บเงินไม่สำเร็จ กรุณาตรวจสอบ Job/ราคาในระบบ";
+
+            // V44: guarantee that the customer-copy block itself contains the
+            // payment destination. This prevents staff from copying the text
+            // but accidentally omitting the Stripe Checkout URL / THB QR URL.
+            if (item.paymentLink && !customerCopyText.includes(item.paymentLink)) {
+              customerCopyText +=
+                `\n\n🔥 Complete your payment using the Stripe link below:\n${item.paymentLink}`;
+            } else if (item.paymentQrUrl && !customerCopyText.includes(item.paymentQrUrl)) {
+              customerCopyText +=
+                `\n\nQR ชำระเงิน:\n${item.paymentQrUrl}`;
+            }
+
             const manualLines = [
               `📋 ${departmentCode} — ข้อความเก็บเงินสำหรับส่งเอง`,
               `ลูกค้า: ${item.customerName || "-"}`,
               `ธุรกิจ: ${item.businessName || "-"}`,
               "",
-              "COPY ข้อความด้านล่างส่งลูกค้าได้เลย:",
+              "COPY ข้อความด้านล่างส่งลูกค้าได้เลย (รวมช่องทางชำระแล้ว):",
               "",
-              item.manualPaymentText || "⚠️ ระบบสร้างข้อความเก็บเงินไม่สำเร็จ กรุณาตรวจสอบ Job/ราคาในระบบ",
+              customerCopyText,
             ];
 
+            // Keep a clearly-labeled reference outside the copy block too, so
+            // staff can verify/open the payment destination without editing the
+            // customer-facing message.
             if (item.paymentQrUrl) {
               manualLines.push(
                 "",
-                "QR ชำระเงิน:",
+                "REFERENCE — QR ชำระเงิน:",
                 item.paymentQrUrl
               );
             } else if (item.paymentLink) {
               manualLines.push(
                 "",
-                "Payment link:",
+                "REFERENCE — Stripe Checkout link:",
                 item.paymentLink
               );
             }
