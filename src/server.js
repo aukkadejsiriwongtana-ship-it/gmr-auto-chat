@@ -5643,21 +5643,30 @@ function getApifyResultForReviewUrl(batch, reviewUrl) {
 
 
 // =========================================================
-// TELEGRAM REVIEW LINK CHECKER — V46
+// TELEGRAM REVIEW LINK CHECKER — V47
 // Dedicated group only. No DB/sheet/job mutation.
 // Any message containing one or more URLs is checked automatically.
+// Telegram can split a long paste into several messages; collect URLs
+// during a short quiet window, then check the whole set as one batch.
 // Non-URL text (names, notes, dispatch headers, numbering) is ignored.
 // =========================================================
 let telegramReviewLinkBatchCheckRunning = false;
+let telegramReviewLinkPendingUrls = [];
+let telegramReviewLinkPendingTimer = null;
+let telegramReviewLinkPendingChatId = null;
+let telegramReviewLinkPendingTriggerMessageId = null;
+
+const TELEGRAM_REVIEW_LINK_DEBOUNCE_MS = Math.max(
+  1000,
+  Number(process.env.TELEGRAM_REVIEW_LINK_DEBOUNCE_MS || 6000)
+);
 
 function extractReviewUrlsFromTelegramCheckText(rawText) {
   const raw = String(rawText || "");
   const matches = raw.match(/https?:\/\/[^\s]+/gi) || [];
-  return [...new Set(
-    matches
-      .map((url) => String(url || "").replace(/[),.;]+$/g, "").trim())
-      .filter(Boolean)
-  )];
+  return matches
+    .map((url) => String(url || "").replace(/[),.;]+$/g, "").trim())
+    .filter(Boolean);
 }
 
 function shouldResolveShortReviewUrl(rawUrl) {
@@ -5673,8 +5682,10 @@ function shouldResolveShortReviewUrl(rawUrl) {
   }
 }
 
-async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawText }) {
-  const originalUrls = extractReviewUrlsFromTelegramCheckText(rawText);
+async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawText = "", reviewUrls = null }) {
+  const originalUrls = Array.isArray(reviewUrls)
+    ? reviewUrls.map((url) => String(url || "").trim()).filter(Boolean)
+    : extractReviewUrlsFromTelegramCheckText(rawText);
 
   if (originalUrls.length === 0) {
     await replyTelegramInternal(
@@ -5790,6 +5801,89 @@ async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawTe
     activeCount,
     unknownCount,
   });
+}
+
+
+function scheduleTelegramReviewLinkBatch({ chatId, triggerMessageId, reviewUrls }) {
+  const incoming = Array.isArray(reviewUrls) ? reviewUrls : [];
+
+  telegramReviewLinkPendingChatId = chatId;
+  if (!telegramReviewLinkPendingTriggerMessageId) {
+    telegramReviewLinkPendingTriggerMessageId = triggerMessageId;
+  }
+
+  telegramReviewLinkPendingUrls.push(
+    ...incoming.map((url) => String(url || "").trim()).filter(Boolean)
+  );
+
+  if (telegramReviewLinkPendingTimer) {
+    clearTimeout(telegramReviewLinkPendingTimer);
+  }
+
+  telegramReviewLinkPendingTimer = setTimeout(() => {
+    telegramReviewLinkPendingTimer = null;
+    void flushTelegramReviewLinkBatch();
+  }, TELEGRAM_REVIEW_LINK_DEBOUNCE_MS);
+
+  console.log("TELEGRAM REVIEW LINK BUFFER UPDATED:", {
+    chatId,
+    receivedThisMessage: incoming.length,
+    pendingUrls: telegramReviewLinkPendingUrls.length,
+    debounceMs: TELEGRAM_REVIEW_LINK_DEBOUNCE_MS,
+  });
+}
+
+async function flushTelegramReviewLinkBatch() {
+  if (telegramReviewLinkBatchCheckRunning) {
+    if (!telegramReviewLinkPendingTimer) {
+      telegramReviewLinkPendingTimer = setTimeout(() => {
+        telegramReviewLinkPendingTimer = null;
+        void flushTelegramReviewLinkBatch();
+      }, 1000);
+    }
+    return;
+  }
+
+  const chatId = telegramReviewLinkPendingChatId;
+  const triggerMessageId = telegramReviewLinkPendingTriggerMessageId;
+  const reviewUrls = [...telegramReviewLinkPendingUrls];
+
+  if (!chatId || reviewUrls.length === 0) return;
+
+  telegramReviewLinkPendingUrls = [];
+  telegramReviewLinkPendingChatId = null;
+  telegramReviewLinkPendingTriggerMessageId = null;
+  telegramReviewLinkBatchCheckRunning = true;
+
+  try {
+    await runTelegramReviewLinkBatchCheck({
+      chatId,
+      triggerMessageId,
+      reviewUrls,
+    });
+  } catch (error) {
+    console.error("TELEGRAM REVIEW LINK CHECK FAILED:", error);
+    try {
+      await replyTelegramInternal(
+        chatId,
+        triggerMessageId,
+        `❌ ตรวจลิงก์ไม่สำเร็จ: ${error?.message || String(error)}`
+      );
+    } catch (replyError) {
+      console.error("TELEGRAM REVIEW LINK CHECK ERROR REPLY FAILED:", replyError);
+    }
+  } finally {
+    telegramReviewLinkBatchCheckRunning = false;
+
+    // If another paste arrived while Apify was running, keep it and process
+    // it automatically after a fresh quiet window.
+    if (telegramReviewLinkPendingUrls.length > 0 && !telegramReviewLinkPendingTimer) {
+      telegramReviewLinkPendingTimer = setTimeout(() => {
+        telegramReviewLinkPendingTimer = null;
+        void flushTelegramReviewLinkBatch();
+      }, TELEGRAM_REVIEW_LINK_DEBOUNCE_MS);
+    }
+  }
 }
 
 async function getMonitoringJobsForDepartmentCode(departmentCode) {
@@ -6249,8 +6343,10 @@ app.post("/telegram/webhook", async (req, res) => {
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
     // -----------------------------------------------------
-    // DEDICATED REVIEW-LINK CHECK GROUP — V46
-    // Any message that contains URL(s) is checked automatically.
+    // DEDICATED REVIEW-LINK CHECK GROUP — V47
+    // Any message that contains URL(s) is buffered automatically.
+    // Telegram may split one long paste into multiple messages; every part
+    // arriving within the quiet window is merged into ONE Apify batch.
     // All surrounding notes / names / numbering are ignored.
     // -----------------------------------------------------
     if (reviewCheckChatId && chatId === reviewCheckChatId) {
@@ -6261,40 +6357,13 @@ app.post("/telegram/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (telegramReviewLinkBatchCheckRunning) {
-        await replyTelegramInternal(
-          chatId,
-          msg.message_id,
-          "⏳ กำลังตรวจลิงก์ชุดก่อนหน้าอยู่ กรุณาส่งชุดถัดไปหลังผลชุดนี้ออก"
-        );
-        return res.sendStatus(200);
-      }
-
-      telegramReviewLinkBatchCheckRunning = true;
-      res.sendStatus(200);
-
-      void runTelegramReviewLinkBatchCheck({
+      scheduleTelegramReviewLinkBatch({
         chatId,
         triggerMessageId: msg.message_id,
-        rawText: groupText,
-      })
-        .catch(async (error) => {
-          console.error("TELEGRAM REVIEW LINK CHECK FAILED:", error);
-          try {
-            await replyTelegramInternal(
-              chatId,
-              msg.message_id,
-              `❌ ตรวจลิงก์ไม่สำเร็จ: ${error?.message || String(error)}`
-            );
-          } catch (replyError) {
-            console.error("TELEGRAM REVIEW LINK CHECK ERROR REPLY FAILED:", replyError);
-          }
-        })
-        .finally(() => {
-          telegramReviewLinkBatchCheckRunning = false;
-        });
+        reviewUrls,
+      });
 
-      return;
+      return res.sendStatus(200);
     }
 
     // -----------------------------------------------------
