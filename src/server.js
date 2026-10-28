@@ -5727,6 +5727,29 @@ async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawTe
     prepared.push({ originalUrl, checkUrl, resolveError });
   }
 
+  // Detect duplicates after short-link resolution as well, so two different
+  // short URLs that point to the same review are reported as duplicates.
+  const duplicateGroupsByKey = new Map();
+  prepared.forEach((item, index) => {
+    const key = normalizeReviewUrlKey(item.checkUrl || item.originalUrl);
+    if (!key) return;
+
+    const list = duplicateGroupsByKey.get(key) || [];
+    list.push({
+      number: index + 1,
+      originalUrl: item.originalUrl,
+      checkUrl: item.checkUrl,
+    });
+    duplicateGroupsByKey.set(key, list);
+  });
+
+  const duplicateGroups = [...duplicateGroupsByKey.values()]
+    .filter((items) => items.length > 1);
+  const duplicateOccurrenceCount = duplicateGroups.reduce(
+    (sum, items) => sum + Math.max(0, items.length - 1),
+    0
+  );
+
   const apifyBatch = await verifyReviewUrlsWithApify(
     prepared.map((item) => item.checkUrl)
   );
@@ -5767,16 +5790,29 @@ async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawTe
     `✅ ไปแล้ว (REMOVED): ${removedCount}`,
     `❌ ยังอยู่ (ACTIVE): ${activeCount}`,
     `⚠️ ไม่ชัดเจน: ${unknownCount}`,
+    `🔁 URL ซ้ำ: ${duplicateOccurrenceCount} รายการ${duplicateGroups.length ? ` (${duplicateGroups.length} ชุด)` : ""}`,
     "",
     "เลขลำดับตรงกับลิงก์ที่ส่งมา",
     "REMOVED/ACTIVE อ้างอิงผลจาก Apify และไม่แก้ Job/Sheet ใด ๆ",
     "",
   ];
 
+  const duplicateLines = [];
+  if (duplicateGroups.length > 0) {
+    duplicateLines.push("⚠️ พบ URL ซ้ำ");
+    for (const group of duplicateGroups) {
+      const first = group[0];
+      const repeated = group.slice(1).map((item) => `#${item.number}`).join(", ");
+      duplicateLines.push(`• ${repeated} ซ้ำกับ #${first.number}`);
+      duplicateLines.push(`  ${first.originalUrl}`);
+    }
+    duplicateLines.push("");
+  }
+
   // Keep each Telegram message comfortably below 4096 chars.
   const chunks = [];
   let current = header.join("\n");
-  for (const line of resultLines) {
+  for (const line of [...duplicateLines, ...resultLines]) {
     if ((current + "\n" + line).length > 3500) {
       chunks.push(current);
       current = line;
@@ -5800,6 +5836,8 @@ async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawTe
     removedCount,
     activeCount,
     unknownCount,
+    duplicateOccurrenceCount,
+    duplicateGroupCount: duplicateGroups.length,
   });
 }
 
