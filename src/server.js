@@ -5643,12 +5643,10 @@ function getApifyResultForReviewUrl(batch, reviewUrl) {
 
 
 // =========================================================
-// TELEGRAM REVIEW LINK CHECKER — V45
+// TELEGRAM REVIEW LINK CHECKER — V46
 // Dedicated group only. No DB/sheet/job mutation.
-// Usage:
-//   checklinks
-//   https://...
-//   https://...
+// Any message containing one or more URLs is checked automatically.
+// Non-URL text (names, notes, dispatch headers, numbering) is ignored.
 // =========================================================
 let telegramReviewLinkBatchCheckRunning = false;
 
@@ -5685,10 +5683,8 @@ async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawTe
       [
         "⚠️ ไม่พบลิงก์ในข้อความ",
         "",
-        "ส่งแบบนี้:",
-        "checklinks",
-        "https://...",
-        "https://...",
+        "ส่ง Google review links เข้ามาในกลุ่มนี้ได้เลย",
+        "ระบบจะตรวจ URL ที่พบในข้อความให้อัตโนมัติ",
       ].join("\n")
     );
     return;
@@ -6253,54 +6249,52 @@ app.post("/telegram/webhook", async (req, res) => {
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
     // -----------------------------------------------------
-    // DEDICATED REVIEW-LINK CHECK GROUP — V45
+    // DEDICATED REVIEW-LINK CHECK GROUP — V46
+    // Any message that contains URL(s) is checked automatically.
+    // All surrounding notes / names / numbering are ignored.
     // -----------------------------------------------------
     if (reviewCheckChatId && chatId === reviewCheckChatId) {
-      const isCheckLinks =
-        normalizedGroupText === "checklinks" ||
-        normalizedGroupText === "/checklinks" ||
-        normalizedGroupText.startsWith("checklinks\n") ||
-        normalizedGroupText.startsWith("/checklinks\n");
+      const reviewUrls = extractReviewUrlsFromTelegramCheckText(groupText);
 
-      if (isCheckLinks) {
-        if (telegramReviewLinkBatchCheckRunning) {
-          await replyTelegramInternal(
-            chatId,
-            msg.message_id,
-            "⏳ กำลังตรวจลิงก์ชุดก่อนหน้าอยู่ กรุณารอผลชุดนั้นก่อน"
-          );
-          return res.sendStatus(200);
-        }
-
-        telegramReviewLinkBatchCheckRunning = true;
-        res.sendStatus(200);
-
-        void runTelegramReviewLinkBatchCheck({
-          chatId,
-          triggerMessageId: msg.message_id,
-          rawText: groupText,
-        })
-          .catch(async (error) => {
-            console.error("TELEGRAM REVIEW LINK CHECK FAILED:", error);
-            try {
-              await replyTelegramInternal(
-                chatId,
-                msg.message_id,
-                `❌ CHECKLINKS ไม่สำเร็จ: ${error?.message || String(error)}`
-              );
-            } catch (replyError) {
-              console.error("TELEGRAM REVIEW LINK CHECK ERROR REPLY FAILED:", replyError);
-            }
-          })
-          .finally(() => {
-            telegramReviewLinkBatchCheckRunning = false;
-          });
-
-        return;
+      // No URL = normal chat/note. Ignore it and do not consume Apify.
+      if (reviewUrls.length === 0) {
+        return res.sendStatus(200);
       }
 
-      // Dedicated checker group ignores unrelated chat to avoid accidental Apify usage.
-      return res.sendStatus(200);
+      if (telegramReviewLinkBatchCheckRunning) {
+        await replyTelegramInternal(
+          chatId,
+          msg.message_id,
+          "⏳ กำลังตรวจลิงก์ชุดก่อนหน้าอยู่ กรุณาส่งชุดถัดไปหลังผลชุดนี้ออก"
+        );
+        return res.sendStatus(200);
+      }
+
+      telegramReviewLinkBatchCheckRunning = true;
+      res.sendStatus(200);
+
+      void runTelegramReviewLinkBatchCheck({
+        chatId,
+        triggerMessageId: msg.message_id,
+        rawText: groupText,
+      })
+        .catch(async (error) => {
+          console.error("TELEGRAM REVIEW LINK CHECK FAILED:", error);
+          try {
+            await replyTelegramInternal(
+              chatId,
+              msg.message_id,
+              `❌ ตรวจลิงก์ไม่สำเร็จ: ${error?.message || String(error)}`
+            );
+          } catch (replyError) {
+            console.error("TELEGRAM REVIEW LINK CHECK ERROR REPLY FAILED:", replyError);
+          }
+        })
+        .finally(() => {
+          telegramReviewLinkBatchCheckRunning = false;
+        });
+
+      return;
     }
 
     // -----------------------------------------------------
