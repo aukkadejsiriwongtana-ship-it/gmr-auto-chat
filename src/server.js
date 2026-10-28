@@ -2592,6 +2592,7 @@ function getTelegramInternalConfig() {
     salesChatId: String(process.env.TELEGRAM_SALES_CHAT_ID || "").trim(),
     t0ChatId: String(process.env.TELEGRAM_T0_CHAT_ID || "").trim(),
     t2ChatId: String(process.env.TELEGRAM_T2_CHAT_ID || "").trim(),
+    reviewCheckChatId: String(process.env.TELEGRAM_REVIEW_CHECK_CHAT_ID || "").trim(),
   };
 }
 
@@ -5640,6 +5641,161 @@ function getApifyResultForReviewUrl(batch, reviewUrl) {
   return null;
 }
 
+
+// =========================================================
+// TELEGRAM REVIEW LINK CHECKER — V45
+// Dedicated group only. No DB/sheet/job mutation.
+// Usage:
+//   checklinks
+//   https://...
+//   https://...
+// =========================================================
+let telegramReviewLinkBatchCheckRunning = false;
+
+function extractReviewUrlsFromTelegramCheckText(rawText) {
+  const raw = String(rawText || "");
+  const matches = raw.match(/https?:\/\/[^\s]+/gi) || [];
+  return [...new Set(
+    matches
+      .map((url) => String(url || "").replace(/[),.;]+$/g, "").trim())
+      .filter(Boolean)
+  )];
+}
+
+function shouldResolveShortReviewUrl(rawUrl) {
+  try {
+    const host = new URL(String(rawUrl || "").trim()).hostname.toLowerCase();
+    return [
+      "maps.app.goo.gl",
+      "goo.gl",
+      "share.google",
+    ].includes(host);
+  } catch {
+    return false;
+  }
+}
+
+async function runTelegramReviewLinkBatchCheck({ chatId, triggerMessageId, rawText }) {
+  const originalUrls = extractReviewUrlsFromTelegramCheckText(rawText);
+
+  if (originalUrls.length === 0) {
+    await replyTelegramInternal(
+      chatId,
+      triggerMessageId,
+      [
+        "⚠️ ไม่พบลิงก์ในข้อความ",
+        "",
+        "ส่งแบบนี้:",
+        "checklinks",
+        "https://...",
+        "https://...",
+      ].join("\n")
+    );
+    return;
+  }
+
+  if (originalUrls.length > 100) {
+    await replyTelegramInternal(
+      chatId,
+      triggerMessageId,
+      `⚠️ ตรวจได้สูงสุด 100 ลิงก์ต่อครั้ง ตอนนี้ส่งมา ${originalUrls.length} ลิงก์`
+    );
+    return;
+  }
+
+  const prepared = [];
+  for (const originalUrl of originalUrls) {
+    let checkUrl = originalUrl;
+    let resolveError = null;
+
+    if (shouldResolveShortReviewUrl(originalUrl)) {
+      try {
+        checkUrl = (await resolveGoogleShortUrl(originalUrl)) || originalUrl;
+      } catch (error) {
+        resolveError = error?.message || String(error);
+        checkUrl = originalUrl;
+      }
+    }
+
+    prepared.push({ originalUrl, checkUrl, resolveError });
+  }
+
+  const apifyBatch = await verifyReviewUrlsWithApify(
+    prepared.map((item) => item.checkUrl)
+  );
+
+  let removedCount = 0;
+  let activeCount = 0;
+  let unknownCount = 0;
+
+  const resultLines = prepared.map((item, index) => {
+    const result =
+      getApifyResultForReviewUrl(apifyBatch, item.checkUrl) ||
+      getApifyResultForReviewUrl(apifyBatch, item.originalUrl);
+
+    const status = String(result?.status || "UNKNOWN").trim().toUpperCase();
+
+    if (status === "REMOVED") {
+      removedCount += 1;
+      return `${index + 1}. ✅ REMOVED`;
+    }
+
+    if (status === "ACTIVE") {
+      activeCount += 1;
+      return `${index + 1}. ❌ ACTIVE`;
+    }
+
+    unknownCount += 1;
+    const detail = String(
+      result?.error || result?.message || result?.text_snippet || item.resolveError || ""
+    ).trim().replace(/\s+/g, " ").slice(0, 120);
+
+    return `${index + 1}. ⚠️ ${status || "UNKNOWN"}${detail ? ` — ${detail}` : ""}`;
+  });
+
+  const header = [
+    "🔎 REVIEW LINK CHECK RESULT",
+    "",
+    `ทั้งหมด: ${prepared.length}`,
+    `✅ ไปแล้ว (REMOVED): ${removedCount}`,
+    `❌ ยังอยู่ (ACTIVE): ${activeCount}`,
+    `⚠️ ไม่ชัดเจน: ${unknownCount}`,
+    "",
+    "เลขลำดับตรงกับลิงก์ที่ส่งมา",
+    "REMOVED/ACTIVE อ้างอิงผลจาก Apify และไม่แก้ Job/Sheet ใด ๆ",
+    "",
+  ];
+
+  // Keep each Telegram message comfortably below 4096 chars.
+  const chunks = [];
+  let current = header.join("\n");
+  for (const line of resultLines) {
+    if ((current + "\n" + line).length > 3500) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current += "\n" + line;
+    }
+  }
+  if (current.trim()) chunks.push(current);
+
+  for (let i = 0; i < chunks.length; i += 1) {
+    await sendTelegramText({
+      chatId,
+      text: chunks[i],
+      replyToMessageId: i === 0 ? triggerMessageId : null,
+    });
+  }
+
+  console.log("TELEGRAM REVIEW LINK CHECK COMPLETE:", {
+    chatId,
+    inputCount: prepared.length,
+    removedCount,
+    activeCount,
+    unknownCount,
+  });
+}
+
 async function getMonitoringJobsForDepartmentCode(departmentCode) {
   const targetCode = String(departmentCode || "").trim().toUpperCase();
   const [jobs, departments] = await Promise.all([
@@ -6057,9 +6213,9 @@ app.post("/telegram/webhook", async (req, res) => {
       if (claim?.claimed === false) return res.sendStatus(200);
     }
 
-    const { salesChatId, t0ChatId, t2ChatId } = getTelegramInternalConfig();
+    const { salesChatId, t0ChatId, t2ChatId, reviewCheckChatId } = getTelegramInternalConfig();
     const chatId = String(msg.chat.id);
-    const allowed = new Set([salesChatId, t0ChatId, t2ChatId].filter(Boolean));
+    const allowed = new Set([salesChatId, t0ChatId, t2ChatId, reviewCheckChatId].filter(Boolean));
     if (!allowed.has(chatId)) {
       console.warn("TELEGRAM MESSAGE IGNORED — UNKNOWN CHAT", { chatId });
       return res.sendStatus(200);
@@ -6095,6 +6251,57 @@ app.post("/telegram/webhook", async (req, res) => {
       ? String(msg.reply_to_message.message_id)
       : null;
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
+
+    // -----------------------------------------------------
+    // DEDICATED REVIEW-LINK CHECK GROUP — V45
+    // -----------------------------------------------------
+    if (reviewCheckChatId && chatId === reviewCheckChatId) {
+      const isCheckLinks =
+        normalizedGroupText === "checklinks" ||
+        normalizedGroupText === "/checklinks" ||
+        normalizedGroupText.startsWith("checklinks\n") ||
+        normalizedGroupText.startsWith("/checklinks\n");
+
+      if (isCheckLinks) {
+        if (telegramReviewLinkBatchCheckRunning) {
+          await replyTelegramInternal(
+            chatId,
+            msg.message_id,
+            "⏳ กำลังตรวจลิงก์ชุดก่อนหน้าอยู่ กรุณารอผลชุดนั้นก่อน"
+          );
+          return res.sendStatus(200);
+        }
+
+        telegramReviewLinkBatchCheckRunning = true;
+        res.sendStatus(200);
+
+        void runTelegramReviewLinkBatchCheck({
+          chatId,
+          triggerMessageId: msg.message_id,
+          rawText: groupText,
+        })
+          .catch(async (error) => {
+            console.error("TELEGRAM REVIEW LINK CHECK FAILED:", error);
+            try {
+              await replyTelegramInternal(
+                chatId,
+                msg.message_id,
+                `❌ CHECKLINKS ไม่สำเร็จ: ${error?.message || String(error)}`
+              );
+            } catch (replyError) {
+              console.error("TELEGRAM REVIEW LINK CHECK ERROR REPLY FAILED:", replyError);
+            }
+          })
+          .finally(() => {
+            telegramReviewLinkBatchCheckRunning = false;
+          });
+
+        return;
+      }
+
+      // Dedicated checker group ignores unrelated chat to avoid accidental Apify usage.
+      return res.sendStatus(200);
+    }
 
     // -----------------------------------------------------
     // T0 / T2 ON-DEMAND REVIEW MONITOR
