@@ -3567,6 +3567,139 @@ setTimeout(() => {
   });
 }, 5 * 1000);
 
+
+// =========================================================
+// V2.2.43 — INTERNAL REACTIVATION SCHEDULER
+//
+// Existing-customer Maps are checked for newly posted 1-star reviews
+// without requiring a separate Render Cron Job.
+//
+// Thailand schedule: 09:15 / 15:15
+// - The endpoint still enforces REACTIVATION_CHECK_INTERVAL_DAYS (default 6)
+// - Each run still enforces SERPAPI_REACTIVATION_MAX_MAPS_PER_RUN (default 5)
+// - Production scheduler ALWAYS sends dryRun:false
+// =========================================================
+
+const REACTIVATION_INTERNAL_SLOTS_TH = [
+  { hour: 9, minute: 15 },
+  { hour: 15, minute: 15 },
+];
+
+let reactivationInternalSchedulerRunning = false;
+let lastReactivationInternalSlot = null;
+
+function getCurrentReactivationInternalSlot(clock) {
+  for (const slot of REACTIVATION_INTERNAL_SLOTS_TH) {
+    if (clock.hour !== slot.hour) continue;
+
+    // 3-minute window protects against timer drift while avoiding an
+    // accidental late-day catch-up that could increase SerpApi usage.
+    if (clock.minute < slot.minute || clock.minute > slot.minute + 2) {
+      continue;
+    }
+
+    return `${clock.dateKey}-${String(slot.hour).padStart(2, "0")}:${String(slot.minute).padStart(2, "0")}`;
+  }
+
+  return null;
+}
+
+async function runReactivationInternalSchedulerTick() {
+  const enabled = String(
+    process.env.REACTIVATION_INTERNAL_SCHEDULER_ENABLED ?? "true"
+  ).toLowerCase() !== "false";
+
+  if (!enabled || reactivationInternalSchedulerRunning) return;
+
+  const clock = getBangkokClockParts();
+  const slotKey = getCurrentReactivationInternalSlot(clock);
+  if (!slotKey || lastReactivationInternalSlot === slotKey) return;
+
+  const secret = String(process.env.SHEET_CONTROL_SECRET || "").trim();
+  if (!secret) {
+    console.error("REACTIVATION INTERNAL SCHEDULER SKIPPED: missing SHEET_CONTROL_SECRET", {
+      slotKey,
+    });
+    return;
+  }
+
+  reactivationInternalSchedulerRunning = true;
+
+  try {
+    console.log("REACTIVATION INTERNAL SCHEDULER START:", {
+      slotKey,
+      dryRun: false,
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${PORT}/check-reactivation-maps`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          secret,
+          dryRun: false,
+          source: "internal_scheduler",
+        }),
+      }
+    );
+
+    const responseText = await response.text();
+    let result = null;
+
+    try {
+      result = responseText ? JSON.parse(responseText) : null;
+    } catch (_) {
+      result = { raw: responseText };
+    }
+
+    if (!response.ok || result?.ok !== true) {
+      throw new Error(
+        `Reactivation endpoint failed (${response.status}): ${responseText || "unknown"}`
+      );
+    }
+
+    // Mark only after a successful endpoint response. If a transient error
+    // occurs, the next 30-second tick inside the same window can retry.
+    lastReactivationInternalSlot = slotKey;
+
+    const alertCount = Array.isArray(result?.results)
+      ? result.results.reduce(
+          (sum, item) => sum + Number(item?.newOneStarCount || 0),
+          0
+        )
+      : 0;
+
+    console.log("REACTIVATION INTERNAL SCHEDULER COMPLETE:", {
+      slotKey,
+      mapsChecked: result?.mapsChecked ?? null,
+      resultCount: Array.isArray(result?.results) ? result.results.length : null,
+      newOneStarCount: alertCount,
+    });
+  } catch (error) {
+    console.error("REACTIVATION INTERNAL SCHEDULER FAILED:", {
+      slotKey,
+      error: error?.message || String(error),
+    });
+  } finally {
+    reactivationInternalSchedulerRunning = false;
+  }
+}
+
+setInterval(() => {
+  runReactivationInternalSchedulerTick().catch((error) => {
+    console.error("REACTIVATION INTERNAL TIMER ERROR:", error);
+  });
+}, 30 * 1000);
+
+setTimeout(() => {
+  runReactivationInternalSchedulerTick().catch((error) => {
+    console.error("REACTIVATION INTERNAL INITIAL CHECK ERROR:", error);
+  });
+}, 10 * 1000);
+
 // =========================================================
 // MONTHLY EXISTING CUSTOMER OUTREACH
 //
@@ -25035,7 +25168,7 @@ app.post(
     try {
       const {
         secret,
-        dryRun = true,
+        dryRun = false,
       } = req.body || {};
 
       const SHEET_CONTROL_SECRET =
@@ -25334,7 +25467,7 @@ app.post(
 
           // =====================================
           // ตอนนี้ยังไม่ส่ง LINE กลุ่ม
-          // dryRun=true ใช้ตรวจ logic ก่อน
+          // dryRun=true ใช้ตรวจ logic ก่อน (ต้องระบุเองเท่านั้น)
           // =====================================
 
           if (dryRun !== true) {
