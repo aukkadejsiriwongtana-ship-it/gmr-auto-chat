@@ -2889,10 +2889,37 @@ async function sendDepartmentDispatchToLineGroup({
     })
   );
 
+  // V42 privacy: dispatch staff only see a short masked customer label.
+  // Keep the full display_name in DB/CRM; never expose it in T0/T2 dispatch cards.
+  function maskDispatchCustomerName(value, maxVisible = 7) {
+    const raw = String(value || "").trim();
+    if (!raw || raw === "-") return "-";
+
+    let graphemes = [];
+    try {
+      if (typeof Intl?.Segmenter === "function") {
+        const segmenter = new Intl.Segmenter("th", { granularity: "grapheme" });
+        graphemes = Array.from(segmenter.segment(raw), (part) => part.segment);
+      }
+    } catch (_) {
+      graphemes = [];
+    }
+    if (!graphemes.length) graphemes = Array.from(raw);
+
+    // Never reveal the entire name when it is short enough to be searchable.
+    const revealCount = graphemes.length <= maxVisible
+      ? Math.max(1, graphemes.length - 1)
+      : maxVisible;
+
+    const visible = graphemes.slice(0, revealCount).join("").trimEnd();
+    return `${visible || graphemes[0] || "-"}***`;
+  }
+
   const reviewLines = jobs.map((job, index) => {
     const customerId = String(job?.customer_id || "").trim();
     const customerName = customerNameById.get(customerId) || "-";
-    return `${index + 1}. ลูกค้า: ${customerName}
+    const maskedCustomerName = maskDispatchCustomerName(customerName, 7);
+    return `${index + 1}. ลูกค้า: ${maskedCustomerName}
    ${job.review_url || "-"}`;
   });
 
