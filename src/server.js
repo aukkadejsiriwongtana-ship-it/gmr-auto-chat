@@ -15824,7 +15824,11 @@ try {
     });
 
     const botReply =
-      "รับทราบครับ เดี๋ยวให้เจ้าหน้าที่ช่วยตรวจสอบ Google Map ที่ถูกต้องให้อีกครั้งครับ";
+      getCustomerText(
+        customer,
+        "รับทราบครับ เดี๋ยวให้เจ้าหน้าที่ช่วยตรวจสอบ Google Map ที่ถูกต้องให้อีกครั้งครับ",
+        "Understood. I'll have our team check the correct Google Maps listing again for you."
+      );
 
     await saveMessage({
       customerId: customer.id,
