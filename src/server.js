@@ -7997,16 +7997,63 @@ app.post(
           "STRIPE_PAYMENT"
         );
 
-       const paymentReceivedReply =
-  getCustomerText(
-    customer,
+        // V53: after this payment is verified, check whether this customer still
+        // has any other jobs in the department Active lifecycle.
+        // processing stays in T0_ACTIVE/T2_ACTIVE; waiting_payment also stays
+        // Active until that specific job is paid. Only when both are empty do we
+        // tell the customer that all work is completed.
+        let hasRemainingActiveJobs = false;
 
-    "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ ✅\n\n" +
-    "หากมีรีวิวอื่นที่ต้องการให้เราช่วยตรวจสอบเพิ่มเติม สามารถส่งมาให้เราได้เลยครับ",
+        try {
+          const [monitoringJobs, remainingWaitingPaymentJobs] = await Promise.all([
+            getJobsForReviewMonitoring(),
+            getWaitingPaymentJobsByCustomerId(customer.id),
+          ]);
 
-    "Received with thanks. Our work is now completed. ✅\n\n" +
-    "Please let us know if there are any other bad reviews you would like us to check."
-  );
+          const remainingProcessingJobs = (monitoringJobs || []).filter(
+            (job) =>
+              String(job?.customer_id || job?.customerId || "") === String(customer.id) &&
+              !paidJobs.includes(String(job?.id || ""))
+          );
+
+          const remainingWaitingJobs = (remainingWaitingPaymentJobs || []).filter(
+            (job) => !paidJobs.includes(String(job?.id || ""))
+          );
+
+          hasRemainingActiveJobs =
+            remainingProcessingJobs.length > 0 ||
+            remainingWaitingJobs.length > 0;
+
+          console.log("STRIPE POST-PAYMENT ACTIVE JOB CHECK:", {
+            customerId: customer.id,
+            remainingProcessingCount: remainingProcessingJobs.length,
+            remainingWaitingPaymentCount: remainingWaitingJobs.length,
+            hasRemainingActiveJobs,
+          });
+        } catch (activeCheckError) {
+          // Never fail a verified payment because the follow-up wording check failed.
+          // Fall back to the conservative remaining-work wording instead of falsely
+          // telling the customer that all work is completed.
+          hasRemainingActiveJobs = true;
+          console.error("STRIPE POST-PAYMENT ACTIVE JOB CHECK FAILED:", {
+            customerId: customer.id,
+            error: activeCheckError?.message || String(activeCheckError),
+          });
+        }
+
+        const paymentReceivedReply = hasRemainingActiveJobs
+          ? getCustomerText(
+              customer,
+              "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ สำหรับงานที่เหลือ ทางเราจะอัปเดตให้ทราบอีกครั้งครับ",
+              "Received with thanks. For the remaining work, we will update you again."
+            )
+          : getCustomerText(
+              customer,
+              "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ ✅\n\n" +
+                "หากมีรีวิวอื่นที่ต้องการให้เราช่วยตรวจสอบเพิ่มเติม สามารถส่งมาให้เราได้เลยครับ",
+              "Received with thanks. Our work is now completed. ✅\n\n" +
+                "Please let us know if there are any other bad reviews you would like us to check."
+            );
 
 
         try {
