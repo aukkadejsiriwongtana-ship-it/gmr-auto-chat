@@ -5205,15 +5205,30 @@ async function getGlobalFaqReply({
       ) > 1;
 
     let reply;
+    let missingTranslation = false;
 
     if (language === "en") {
-      reply =
-        isRepeat
-          ? faq.repeat_reply_en
-          : (
-              faq.reply_en ||
-              faq.reply_th
-            );
+      // V2.2.50: English customers must NEVER receive a Thai FAQ fallback.
+      // Previously `faq.reply_en || faq.reply_th` could leak Thai replies on
+      // facebook_en whenever the English FAQ answer was missing in the DB.
+      if (isRepeat) {
+        reply = faq.repeat_reply_en;
+      } else {
+        reply = faq.reply_en;
+
+        if (!String(reply || "").trim()) {
+          // V2.2.52: FAQ content is the only source of FAQ answers.
+          // Never invent/hardcode a second English answer in server.js.
+          // Missing translation is handed to Sales instead.
+          missingTranslation = true;
+
+          console.warn("FAQ ENGLISH REPLY MISSING — SALES HANDOFF:", {
+            faqKey: faq.faq_key,
+            faqTitle: faq.title,
+            customerId: customer?.id || null,
+          });
+        }
+      }
     } else {
       reply =
         isRepeat
@@ -5234,6 +5249,7 @@ async function getGlobalFaqReply({
         reply: null,
         repeat: isRepeat,
         suppressed: isRepeat,
+        missingTranslation,
         hitCount: Number(hit?.hit_count || 1),
       };
     }
@@ -5284,6 +5300,31 @@ async function sendGlobalFaqIfMatched({
     faqMatch?.reply || null;
 
   if (!faqReply) {
+    if (faqMatch?.missingTranslation === true) {
+      await triggerHumanAttention({
+        customer,
+        conversation,
+        message,
+        reason: "FAQ_ENGLISH_TRANSLATION_MISSING",
+      });
+
+      console.warn("FAQ ENGLISH TRANSLATION MISSING — CUSTOMER SILENT, SALES NOTIFIED:", {
+        customerId: customer.id,
+        faqKey: faqMatch?.faqKey || null,
+        hitCount: faqMatch?.hitCount || null,
+      });
+
+      return {
+        matched: true,
+        botReply: null,
+        faqKey: faqMatch?.faqKey || null,
+        repeat: Boolean(faqMatch?.repeat),
+        suppressed: true,
+        missingTranslation: true,
+        hitCount: faqMatch?.hitCount || null,
+      };
+    }
+
     console.log("FAQ REPEAT SUPPRESSED:", {
       customerId: customer.id,
       faqKey: faqMatch?.faqKey || null,
@@ -14333,11 +14374,7 @@ if (faqResult.matched) {
 if (!autoConfirmDirectMap) {
 
   const botReply =
-    getCustomerText(
-      customer,
-      "ส่งลิงก์ Google Map หรือชื่อธุรกิจมาได้เลยครับ เดี๋ยวผมตรวจสอบให้ครับ",
-      "Please send the Google Maps link or business name and I'll check it for you."
-    );
+    getLeadRequestText(customer);
 
 
   await saveMessage({
@@ -16412,12 +16449,20 @@ if (!isValidPhone) {
     };
   }
 
+  const phoneTemplate =
+    await getTemplate(
+      "script_4_request_phone",
+      customer.language || "th"
+    );
+
+  if (!phoneTemplate) {
+    throw new Error(
+      "script_4_request_phone template not found"
+    );
+  }
+
   const botReply =
-  getCustomerText(
-    customer,
-    "รบกวนส่งเบอร์โทรศัพท์ให้ครบ 10 หลักครับ เช่น 0812345678",
-    "Please send a 10-digit phone number, for example 0812345678."
-  );
+    phoneTemplate.content;
   await saveMessage({
     customerId: customer.id,
     platform,
