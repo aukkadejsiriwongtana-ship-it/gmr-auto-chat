@@ -6907,7 +6907,7 @@ app.post("/telegram/webhook", async (req, res) => {
 
             if (isCancelWork) {
               for (const job of batchJobs) {
-                await updateJob(job.id, { status: "sales_rejected" });
+                await updateJob(job.id, { status: "credit_rejected" });
               }
               await updateConversationState({
                 customerId: existingCustomer.id,
@@ -18857,7 +18857,7 @@ if (quotedMessageId) {
 
         if (isCancelWork) {
           for (const job of batchJobs) {
-            await updateJob(job.id, { status: "sales_rejected" });
+            await updateJob(job.id, { status: "credit_rejected" });
           }
 
           await updateConversationState({
@@ -27618,17 +27618,17 @@ app.post("/sheet-control", async (req, res) => {
             .trim()
             .toLowerCase();
 
-        // Idempotent retry: sales_rejected is an existing gmr_jobs status
+        // Idempotent retry: credit_rejected is an existing gmr_jobs status
         // accepted by the current DB constraint and is used as the terminal
         // cancelled/rejected state for jobs that must no longer run.
-        if (currentStatus === "sales_rejected") {
+        if (currentStatus === "credit_rejected") {
           return res.status(200).json({
             ok: true,
             action: "manual_action",
             value: "CANCEL_JOB",
             jobId: job.id,
             customerId: customer.id,
-            status: "sales_rejected",
+            status: "credit_rejected",
             cancelled: true,
             alreadyCancelled: true,
             deleteSheetRow: true,
@@ -27670,9 +27670,9 @@ app.post("/sheet-control", async (req, res) => {
 
         await updateJob(job.id, {
           // The current gmr_jobs_status_check does not allow "cancelled".
-          // sales_rejected is already supported and excluded from processing
+          // credit_rejected is already supported and excluded from processing
           // workflows, so use it as the persisted terminal cancel state.
-          status: "sales_rejected",
+          status: "credit_rejected",
         });
 
         console.log("SHEET ACTIVE JOB CANCELLED:", {
@@ -27689,7 +27689,7 @@ app.post("/sheet-control", async (req, res) => {
           jobId: job.id,
           customerId: customer.id,
           previousStatus: currentStatus,
-          status: "sales_rejected",
+          status: "credit_rejected",
           cancelled: true,
           deleteSheetRow: true,
           customerNotified: false,
