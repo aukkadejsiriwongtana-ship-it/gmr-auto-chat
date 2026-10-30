@@ -11980,6 +11980,205 @@ if (
 ) {
 
   // =========================================================
+  // V2.2.54 — OLD REVIEW URL ALREADY RECEIVED GUARD
+  //
+  // Some old-review paths intentionally pause before requesting a quote,
+  // but the legacy state was WAITING_MAP even when the Job already had a
+  // concrete review_url. That allowed generic price FAQs to ask the customer
+  // for Google Maps again.
+  //
+  // If the latest Job is an old review with a saved review URL and the
+  // customer confirms/proceeds/asks the price, promote that SAME Job to
+  // WAITING_PRICE and send it to Sales. Never request the Map/URL again.
+  // =========================================================
+  const waitingMapLatestJob =
+    await getLatestJobByCustomerId(
+      customer.id
+    );
+
+  const waitingMapHasOldReviewUrl =
+    waitingMapLatestJob &&
+    String(
+      waitingMapLatestJob.review_case ||
+      ""
+    ).trim() === "old_review" &&
+    Boolean(
+      String(
+        waitingMapLatestJob.review_url ||
+        ""
+      ).trim()
+    ) &&
+    [
+      "draft",
+      "waiting_price",
+    ].includes(
+      String(
+        waitingMapLatestJob.status ||
+        ""
+      ).trim()
+    );
+
+  if (waitingMapHasOldReviewUrl) {
+    const waitingMapNormalized =
+      String(message || "")
+        .trim()
+        .toLowerCase();
+
+    const oldReviewProceedWords = [
+      "ยืนยัน",
+      "ยืนยันครับ",
+      "ยืนยันค่ะ",
+      "ใช่",
+      "ใช่ครับ",
+      "ใช่ค่ะ",
+      "ตกลง",
+      "ตกลงครับ",
+      "ตกลงค่ะ",
+      "เอาครับ",
+      "เอาค่ะ",
+      "เช็คราคา",
+      "เช็คราคาครับ",
+      "เช็คราคาค่ะ",
+      "confirm",
+      "yes",
+      "yes please",
+      "proceed",
+      "check price",
+    ];
+
+    const oldReviewPriceQuestion =
+      /(?:ราคา|ค่าใช้จ่าย|เท่าไหร่|กี่บาท|คิดเท่าไร|คิดเท่าไหร่|price|how\s*much|cost|fee)/i
+        .test(
+          String(message || "")
+        );
+
+    const wantsOldReviewQuote =
+      oldReviewProceedWords.includes(
+        waitingMapNormalized
+      ) ||
+      oldReviewPriceQuestion;
+
+    if (wantsOldReviewQuote) {
+      const oldReviewPriceJob =
+        await updateJob(
+          waitingMapLatestJob.id,
+          {
+            status:
+              "waiting_price",
+          }
+        );
+
+      const oldReviewPriceState =
+        transitionState(
+          conversation.state,
+          GMR_STATES.WAITING_PRICE
+        );
+
+      await updateConversationState({
+        customerId:
+          customer.id,
+        state:
+          oldReviewPriceState,
+        handoff:
+          false,
+        handoffReason:
+          null,
+      });
+
+      try {
+        if (
+          !oldReviewPriceJob
+            .line_group_message_id
+        ) {
+          const oldReviewSalesResult =
+            await sendJobToLineGroup({
+              jobId:
+                oldReviewPriceJob.id,
+              jobType:
+                "old_review",
+              customerName:
+                customer.display_name ||
+                "",
+              businessName:
+                oldReviewPriceJob
+                  .business_name ||
+                "",
+              reviewUrl:
+                oldReviewPriceJob
+                  .review_url ||
+                "",
+              mapUrl:
+                oldReviewPriceJob
+                  .map_url ||
+                "",
+            });
+
+          if (
+            oldReviewSalesResult
+              ?.messageId
+          ) {
+            await updateJob(
+              oldReviewPriceJob.id,
+              {
+                line_group_message_id:
+                  oldReviewSalesResult
+                    .messageId,
+              }
+            );
+          }
+        }
+      } catch (error) {
+        console.error(
+          "OLD REVIEW PRICE REQUEST FAILED:",
+          error
+        );
+      }
+
+      const oldReviewPriceReply =
+        getCustomerText(
+          customer,
+          "ได้รับลิงก์รีวิวนี้แล้วครับ เดี๋ยวเจ้าหน้าที่ตรวจสอบและแจ้งราคาให้ครับ",
+          "We already have this review link. Our team will check it and send you the price shortly."
+        );
+
+      await saveMessage({
+        customerId:
+          customer.id,
+        platform,
+        direction:
+          "outbound",
+        messageType:
+          "text",
+        messageText:
+          oldReviewPriceReply,
+      });
+
+      await updateLastBotMessage(
+        customer.id,
+        oldReviewPriceReply
+      );
+
+      return {
+        ok: true,
+        customerId:
+          customer.id,
+        jobId:
+          oldReviewPriceJob.id,
+        stateBefore:
+          conversation.state,
+        stateAfter:
+          oldReviewPriceState,
+        oldReviewPriceRequested:
+          true,
+        reviewUrlAlreadyKnown:
+          true,
+        botReply:
+          oldReviewPriceReply,
+      };
+    }
+  }
+
+  // =========================================================
   // SERVICE INQUIRY WHILE WAITING_MAP
   // เช่น สนใจ / สอบถาม / อยากลบรีวิว
   // ให้ตอบ Welcome เดิม ไม่ส่ง Human Attention
