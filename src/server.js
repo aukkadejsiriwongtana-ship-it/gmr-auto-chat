@@ -27618,16 +27618,18 @@ app.post("/sheet-control", async (req, res) => {
             .trim()
             .toLowerCase();
 
-        // Idempotent retry: row may already have been cancelled in DB while
-        // a previous Apps Script request failed before deleting the Sheet row.
-        if (currentStatus === "cancelled") {
+        // Idempotent retry: sales_rejected is an existing gmr_jobs status
+        // accepted by the current DB constraint and is used as the terminal
+        // cancelled/rejected state for jobs that must no longer run.
+        if (currentStatus === "sales_rejected") {
           return res.status(200).json({
             ok: true,
             action: "manual_action",
             value: "CANCEL_JOB",
             jobId: job.id,
             customerId: customer.id,
-            status: "cancelled",
+            status: "sales_rejected",
+            cancelled: true,
             alreadyCancelled: true,
             deleteSheetRow: true,
             customerNotified: false,
@@ -27667,7 +27669,10 @@ app.post("/sheet-control", async (req, res) => {
         }
 
         await updateJob(job.id, {
-          status: "cancelled",
+          // The current gmr_jobs_status_check does not allow "cancelled".
+          // sales_rejected is already supported and excluded from processing
+          // workflows, so use it as the persisted terminal cancel state.
+          status: "sales_rejected",
         });
 
         console.log("SHEET ACTIVE JOB CANCELLED:", {
@@ -27684,7 +27689,8 @@ app.post("/sheet-control", async (req, res) => {
           jobId: job.id,
           customerId: customer.id,
           previousStatus: currentStatus,
-          status: "cancelled",
+          status: "sales_rejected",
+          cancelled: true,
           deleteSheetRow: true,
           customerNotified: false,
         });
