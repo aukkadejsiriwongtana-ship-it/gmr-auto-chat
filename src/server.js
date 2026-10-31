@@ -6885,6 +6885,21 @@ app.post("/telegram/webhook", async (req, res) => {
                     ),
                   ].join("\n"),
             ].join("\n"));
+
+            // V2.2.58 — If the customer platform rejects the automatic start
+            // message (e.g. LINE monthly push quota 429), send the exact
+            // customer-facing script as a separate Telegram message so Sales
+            // can copy/paste it manually. Do not alter Job/Sheet state.
+            if (!confirmed.customerNotifyOk && String(confirmed.botReply || "").trim()) {
+              try {
+                await reply(String(confirmed.botReply).trim());
+              } catch (manualCopyError) {
+                console.error("TELEGRAM MANUAL START COPY MESSAGE FAILED:", {
+                  customerId: confirmed.customer?.id || null,
+                  error: manualCopyError?.message || String(manualCopyError),
+                });
+              }
+            }
           } catch (error) {
             console.error("TELEGRAM V2 SALES ORDER CONFIRM FAILED:", error);
             await reply(`❌ ยืนยันงานไม่สำเร็จ: ${error.message}\nกรุณาอย่ากดยืนยันซ้ำจนกว่าจะตรวจสอบสถานะ`);
@@ -7041,6 +7056,20 @@ app.post("/telegram/webhook", async (req, res) => {
                       ].join("\n"),
                   "ระบบจะส่ง T0/T2 เข้ากลุ่ม Telegram ตามรอบ 00:00 / 08:00 / 12:00 / 16:00 / 20:00",
                 ].join("\n"));
+
+
+                // V2.2.58 — Automatic customer notification failed. Send the
+                // exact intended customer script separately for manual copy/paste.
+                if (!confirmed.customerNotifyOk && String(confirmed.botReply || "").trim()) {
+                  try {
+                    await reply(String(confirmed.botReply).trim());
+                  } catch (manualCopyError) {
+                    console.error("TELEGRAM MANUAL START COPY MESSAGE FAILED:", {
+                      customerId: confirmed.customer?.id || null,
+                      error: manualCopyError?.message || String(manualCopyError),
+                    });
+                  }
+                }
               } catch (ackError) {
                 console.error("TELEGRAM V2 LEAD START ACK FAILED — JOB ALREADY COMMITTED:", ackError);
               }
