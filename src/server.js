@@ -6707,28 +6707,6 @@ app.post("/telegram/webhook", async (req, res) => {
               customerCopyText,
             ];
 
-            // Keep a clearly-labeled reference outside the copy block too, so
-            // staff can verify/open the payment destination without editing the
-            // customer-facing message.
-            if (item.paymentQrUrl) {
-              manualLines.push(
-                "",
-                "REFERENCE — QR ชำระเงิน:",
-                item.paymentQrUrl
-              );
-            } else if (item.paymentLink) {
-              manualLines.push(
-                "",
-                "REFERENCE — Stripe Checkout link:",
-                item.paymentLink
-              );
-            }
-
-            manualLines.push(
-              "",
-              `เหตุผลที่ส่งอัตโนมัติไม่ได้: ${item.error || "-"}`
-            );
-
             await replyTelegramInternal(
               chatId,
               msg.message_id,
