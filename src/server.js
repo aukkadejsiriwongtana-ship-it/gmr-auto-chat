@@ -2593,6 +2593,10 @@ function getTelegramInternalConfig() {
     t0ChatId: String(process.env.TELEGRAM_T0_CHAT_ID || "").trim(),
     t2ChatId: String(process.env.TELEGRAM_T2_CHAT_ID || "").trim(),
     reviewCheckChatId: String(process.env.TELEGRAM_REVIEW_CHECK_CHAT_ID || "").trim(),
+
+    addOutworkChatId: String(
+      process.env.TELEGRAM_ADD_OUTWORK_CHAT_ID || ""
+    ).trim(),
   };
 }
 
@@ -6382,9 +6386,26 @@ app.post("/telegram/webhook", async (req, res) => {
       if (claim?.claimed === false) return res.sendStatus(200);
     }
 
-    const { salesChatId, t0ChatId, t2ChatId, reviewCheckChatId } = getTelegramInternalConfig();
-    const chatId = String(msg.chat.id);
-    const allowed = new Set([salesChatId, t0ChatId, t2ChatId, reviewCheckChatId].filter(Boolean));
+   const {
+  salesChatId,
+  t0ChatId,
+  t2ChatId,
+  reviewCheckChatId,
+  addOutworkChatId,
+} = getTelegramInternalConfig();
+
+const chatId = String(msg.chat.id);
+
+const allowed = new Set(
+  [
+    salesChatId,
+    t0ChatId,
+    t2ChatId,
+    reviewCheckChatId,
+    addOutworkChatId,
+  ].filter(Boolean)
+);
+    
     if (!allowed.has(chatId)) {
       console.warn("TELEGRAM MESSAGE IGNORED — UNKNOWN CHAT", { chatId });
       return res.sendStatus(200);
