@@ -17001,20 +17001,12 @@ if (
       "Human attention requested while waiting for confirmation",
   };
 }
-  const template =
-    await getTemplate(
-      "script_4_request_phone",
-      customer.language || "th"
-    );
-
-  if (!template) {
-    throw new Error(
-      "script_4_request_phone template not found"
-    );
-  }
-
   const botReply =
-    template.content;
+  getCustomerText(
+    customer,
+    "รบกวนทิ้งเบอร์กรณีติดต่อไม่ได้ให้ด้วยครับ",
+    "Please leave a phone number we can use in case we are unable to reach you in chat."
+  );
 
   const nextState =
     transitionState(
