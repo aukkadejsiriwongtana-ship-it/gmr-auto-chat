@@ -5825,3 +5825,39 @@ export async function releaseRemovalKpiBatch(batchId) {
   if (error) throw error;
   return data || null;
 }
+
+// =========================================================
+// CUSTOMER MASTER EXPORT
+// =========================================================
+
+export async function getCustomersForCustomerMaster() {
+  const { data, error } =
+    await supabase
+      .from("gmr_customers")
+      .select(
+        "id,display_name,phone,email,platform"
+      );
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+
+export async function getCustomerMapsForCustomerMaster() {
+  const { data, error } =
+    await supabase
+      .from("gmr_customer_maps")
+      .select(
+        "customer_id,business_name,map_url,place_id,is_active"
+      )
+      .eq("is_active", true);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
