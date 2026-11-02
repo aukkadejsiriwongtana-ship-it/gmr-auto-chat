@@ -1407,36 +1407,201 @@ export async function updateResolvedCustomerMap({
     );
   }
 
+  const now =
+    new Date().toISOString();
+
+
+  // =====================================================
+  // 1. GET CURRENT MAP ROW
+  // =====================================================
+
+  const {
+    data: currentMap,
+    error: currentError,
+  } =
+    await supabase
+      .from("gmr_customer_maps")
+      .select("*")
+      .eq(
+        "id",
+        customerMapId
+      )
+      .maybeSingle();
+
+  if (currentError) {
+    throw currentError;
+  }
+
+  if (!currentMap) {
+    throw new Error(
+      "Customer map not found"
+    );
+  }
+
+
+  // =====================================================
+  // 2. CHECK IF THIS CUSTOMER ALREADY HAS THIS PLACE
+  //
+  // ป้องกัน:
+  // duplicate key
+  // gmr_customer_maps_customer_id_place_id_key
+  // =====================================================
+
+  const {
+    data: existingPlace,
+    error: existingError,
+  } =
+    await supabase
+      .from("gmr_customer_maps")
+      .select("*")
+      .eq(
+        "customer_id",
+        currentMap.customer_id
+      )
+      .eq(
+        "place_id",
+        placeId
+      )
+      .neq(
+        "id",
+        customerMapId
+      )
+      .maybeSingle();
+
+  if (existingError) {
+    throw existingError;
+  }
+
+
+  // =====================================================
+  // 3. PLACE มีอยู่แล้ว
+  //
+  // ใช้ canonical row เดิม
+  // และปิด review-based duplicate row
+  // =====================================================
+
+  if (existingPlace) {
+
+    const existingUpdates = {
+      is_active: true,
+      updated_at: now,
+    };
+
+    if (businessName) {
+      existingUpdates.business_name =
+        businessName;
+    }
+
+    if (
+      mapUrl &&
+      !existingPlace.map_url
+    ) {
+      existingUpdates.map_url =
+        mapUrl;
+    }
+
+
+    const {
+      data: canonicalMap,
+      error: canonicalError,
+    } =
+      await supabase
+        .from("gmr_customer_maps")
+        .update(
+          existingUpdates
+        )
+        .eq(
+          "id",
+          existingPlace.id
+        )
+        .select()
+        .single();
+
+    if (canonicalError) {
+      throw canonicalError;
+    }
+
+
+    // ปิด Duplicate Row
+    // แต่เก็บไว้เป็นประวัติ
+    const {
+      error: deactivateError,
+    } =
+      await supabase
+        .from("gmr_customer_maps")
+        .update({
+          is_active: false,
+          updated_at: now,
+        })
+        .eq(
+          "id",
+          customerMapId
+        );
+
+    if (deactivateError) {
+      throw deactivateError;
+    }
+
+
+    console.log(
+      "CUSTOMER MAP DUPLICATE MERGED:",
+      {
+        customerId:
+          currentMap.customer_id,
+
+        duplicateMapId:
+          customerMapId,
+
+        canonicalMapId:
+          canonicalMap.id,
+
+        placeId,
+      }
+    );
+
+
+    return canonicalMap;
+  }
+
+
+  // =====================================================
+  // 4. PLACE ยังไม่มี
+  // → Resolve แถวนี้ตามปกติ
+  // =====================================================
+
   const {
     data,
     error,
-  } = await supabase
-    .from("gmr_customer_maps")
-    .update({
-      business_name:
-        businessName ||
-        undefined,
+  } =
+    await supabase
+      .from("gmr_customer_maps")
+      .update({
+        business_name:
+          businessName ||
+          undefined,
 
-      place_id:
-        placeId,
+        place_id:
+          placeId,
 
-      map_url:
-        mapUrl ||
-        null,
+        map_url:
+          mapUrl ||
+          null,
 
-      map_key:
-        `place:${placeId}`,
+        map_key:
+          `place:${placeId}`,
 
-      updated_at:
-        new Date()
-          .toISOString(),
-    })
-    .eq(
-      "id",
-      customerMapId
-    )
-    .select()
-    .single();
+        is_active:
+          true,
+
+        updated_at:
+          now,
+      })
+      .eq(
+        "id",
+        customerMapId
+      )
+      .select()
+      .single();
 
   if (error) {
     throw error;
