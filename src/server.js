@@ -1121,6 +1121,192 @@ function getCustomerText(
 }
 
 // =========================================================
+// KTC BILLER RECIPIENT OVERRIDE
+//
+// ใช้สำหรับสลิปจ่ายเข้าบัตร KTC
+// เพราะชื่อผู้รับบนสลิปอาจแสดงเป็น
+// "บริษัท บัตรกรุงไทย จำกัด (มหาชน) (KTC)"
+// ไม่ใช่ชื่อบุคคล
+//
+// SAFETY:
+// - ต้องอ่านได้ว่าเป็น KTC
+// - ต้องอ่าน Card Last 4 ตรงกับ Environment
+// - แก้เฉพาะ RECIPIENT_NAME_MISMATCH
+// - ไม่แตะยอด / วันที่ / reference / job status
+// =========================================================
+
+function applyKtcBillerRecipientOverride({
+  paymentVerification,
+  classification,
+}) {
+  if (
+    !paymentVerification ||
+    !classification
+  ) {
+    return {
+      applied: false,
+      reason: "MISSING_INPUT",
+    };
+  }
+
+  const reasons =
+    Array.isArray(
+      paymentVerification.reasons
+    )
+      ? paymentVerification.reasons
+      : [];
+
+  if (
+    !reasons.includes(
+      "RECIPIENT_NAME_MISMATCH"
+    )
+  ) {
+    return {
+      applied: false,
+      reason: "NO_RECIPIENT_MISMATCH",
+    };
+  }
+
+  const expectedLast4 =
+    String(
+      process.env
+        .PAYMENT_KTC_CARD_LAST4 ||
+      ""
+    )
+      .replace(/\D/g, "")
+      .slice(-4);
+
+  // ไม่มีเลขบัตรที่กำหนดไว้
+  // ห้าม Auto Override
+  if (
+    expectedLast4.length !== 4
+  ) {
+    console.warn(
+      "KTC RECIPIENT OVERRIDE SKIPPED: PAYMENT_KTC_CARD_LAST4 not configured"
+    );
+
+    return {
+      applied: false,
+      reason:
+        "EXPECTED_LAST4_NOT_CONFIGURED",
+    };
+  }
+
+  const actualLast4 =
+    String(
+      classification
+        .recipientCardLast4 ||
+      ""
+    )
+      .replace(/\D/g, "")
+      .slice(-4);
+
+  const recipientText =
+    [
+      classification.recipientName,
+      classification
+        .recipientBankOrBiller,
+      classification
+        .recipientBillerId,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const isKtc =
+    recipientText.includes("ktc") ||
+    recipientText.includes(
+      "บัตรกรุงไทย"
+    ) ||
+    recipientText.includes(
+      "krungthai card"
+    );
+
+  const cardMatched =
+    actualLast4.length === 4 &&
+    actualLast4 === expectedLast4;
+
+  if (
+    !isKtc ||
+    !cardMatched
+  ) {
+    console.log(
+      "KTC RECIPIENT OVERRIDE NOT APPLIED:",
+      {
+        isKtc,
+        actualLast4:
+          actualLast4 || null,
+        expectedLast4,
+      }
+    );
+
+    return {
+      applied: false,
+      reason:
+        !isKtc
+          ? "NOT_KTC"
+          : "CARD_LAST4_MISMATCH",
+    };
+  }
+
+  // ยืนยันได้ว่าเป็น KTC ของเรา
+  // ลบเฉพาะ false mismatch เรื่องชื่อผู้รับ
+  paymentVerification.reasons =
+    reasons.filter(
+      (reason) =>
+        reason !==
+        "RECIPIENT_NAME_MISMATCH"
+    );
+
+  if (
+    !paymentVerification.checks ||
+    typeof paymentVerification.checks !==
+      "object"
+  ) {
+    paymentVerification.checks = {};
+  }
+
+  paymentVerification
+    .checks
+    .ktcBillerMatched = true;
+
+  paymentVerification
+    .checks
+    .ktcCardLast4Matched = true;
+
+  // ถ้า mismatch ชื่อคือปัญหาเดียว
+  // กลับมาเป็น verified ได้
+  if (
+    paymentVerification.reasons
+      .length === 0
+  ) {
+    paymentVerification.verified =
+      true;
+
+    paymentVerification.status =
+      "VERIFIED";
+  }
+
+  console.log(
+    "KTC RECIPIENT OVERRIDE APPLIED:",
+    {
+      actualLast4,
+      remainingReasons:
+        paymentVerification.reasons,
+      verified:
+        paymentVerification.verified,
+    }
+  );
+
+  return {
+    applied: true,
+    actualLast4,
+  };
+}
+
+// =========================================================
 // PAYMENT / PRICE HELPERS
 // =========================================================
 
