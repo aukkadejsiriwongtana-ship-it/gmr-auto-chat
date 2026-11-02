@@ -11714,6 +11714,76 @@ let autoConfirmDirectMap =
   }
 
   // =======================================================
+// NEW CUSTOMER — ASK PHONE WHEN CUSTOMER TYPES "ยืนยัน"
+// ไม่เปลี่ยน State / ไม่หยุด Flow เดิม
+// =======================================================
+
+const normalizedPhoneConfirm =
+  String(message || "")
+    .trim()
+    .toLowerCase();
+
+const phoneConfirmWords = [
+  "ยืนยัน",
+  "ยืนยันครับ",
+  "ยืนยันค่ะ"
+];
+
+if (
+  isNewCustomer &&
+  !String(customer.phone || "").trim() &&
+  phoneConfirmWords.includes(normalizedPhoneConfirm) &&
+
+  // 2 State นี้มีระบบถามเบอร์ของตัวเองอยู่แล้ว
+  // ป้องกันข้อความซ้ำ
+  conversation.state !== GMR_STATES.WAITING_CONFIRM &&
+  conversation.state !== GMR_STATES.WAITING_PHONE
+) {
+  const phonePrompt =
+    "รบกวนทิ้งเบอร์กรณีติดต่อไม่ได้ให้ด้วยครับ";
+
+  try {
+    await sendMessageToCustomer({
+      platform: customer.platform || platform,
+      platformUserId: customer.platform_user_id,
+      text: phonePrompt,
+    });
+
+    await saveMessage({
+      customerId: customer.id,
+      platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: phonePrompt,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      phonePrompt
+    );
+
+    console.log(
+      "NEW CUSTOMER PHONE PROMPT SENT:",
+      {
+        customerId: customer.id,
+        state: conversation.state,
+      }
+    );
+
+  } catch (phonePromptError) {
+    console.error(
+      "NEW CUSTOMER PHONE PROMPT FAILED:",
+      {
+        customerId: customer.id,
+        error:
+          phonePromptError?.message ||
+          String(phonePromptError),
+      }
+    );
+  }
+}
+
+  // =======================================================
   // REACTIVATION CUSTOMER RESPONSE
   // ทีมอนุมัติให้ทักลูกค้าแล้วเท่านั้น
   // สนใจ -> ป้อน review URL กลับเข้า Existing Customer flow เดิม
@@ -17112,20 +17182,12 @@ if (!isValidPhone) {
     };
   }
 
-  const phoneTemplate =
-    await getTemplate(
-      "script_4_request_phone",
-      customer.language || "th"
-    );
-
-  if (!phoneTemplate) {
-    throw new Error(
-      "script_4_request_phone template not found"
-    );
-  }
-
   const botReply =
-    phoneTemplate.content;
+    getCustomerText(
+      customer,
+      "รบกวนทิ้งเบอร์กรณีติดต่อไม่ได้ให้ด้วยครับ",
+      "Please leave a phone number we can use in case we are unable to reach you in chat."
+    );
   await saveMessage({
     customerId: customer.id,
     platform,
