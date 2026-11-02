@@ -711,6 +711,9 @@ logSheetSyncChange,
 upsertCustomerMapRecord,
 updateCustomerTransportMetadata,
 
+getCustomersForCustomerMaster,
+getCustomerMapsForCustomerMaster,
+
 getMonthlyOutreachCandidates,
 claimMonthlyOutreach,
 completeMonthlyOutreach,
@@ -25227,6 +25230,67 @@ app.post("/botpress/inbound", async (req, res) => {
     });
   }
 });
+
+// =========================================================
+// CUSTOMER MASTER DATA
+// Google Sheet <- Supabase
+// =========================================================
+
+app.post(
+  "/customer-master-data",
+  async (req, res) => {
+    try {
+      const {
+        secret
+      } = req.body || {};
+
+      const expectedSecret =
+        process.env.SHEET_CONTROL_SECRET;
+
+      if (
+        !expectedSecret ||
+        secret !== expectedSecret
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error: "Unauthorized",
+          });
+      }
+
+      const [
+        customers,
+        maps
+      ] =
+        await Promise.all([
+          getCustomersForCustomerMaster(),
+          getCustomerMapsForCustomerMaster(),
+        ]);
+
+      return res.json({
+        ok: true,
+        customers,
+        maps,
+      });
+
+    } catch (error) {
+      console.error(
+        "CUSTOMER MASTER DATA ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            error?.message ||
+            String(error),
+        });
+    }
+  }
+);
 
 // =========================================================
 // GOOGLE SHEET -> SUPABASE EDITABLE SYNC
