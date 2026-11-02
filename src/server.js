@@ -1884,6 +1884,88 @@ function parseManualAssignedWorkText(text) {
   return parsed;
 }
 
+function convertTelegramOutworkToManualText(rawText) {
+  const raw = String(rawText || "").trim();
+
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+
+  if (lines.length < 3) {
+    throw new Error("OUTWORK_FORMAT_INVALID");
+  }
+
+  const firstLine = lines[0];
+
+  // T0 / T2
+  const typeMatch = firstLine.match(/\b(T0|T2)\b/i);
+  if (!typeMatch) {
+    throw new Error("OUTWORK_TYPE_INVALID");
+  }
+
+  const workType = typeMatch[1].toUpperCase();
+
+  // Currency
+  const currency =
+    /\$|\bUSD\b/i.test(firstLine)
+      ? "USD"
+      : "THB";
+
+  // Price
+  const priceText = firstLine
+    .replace(/\bT0\b|\bT2\b/gi, "")
+    .replace(/\bTHB\b|\bUSD\b/gi, "")
+    .replace(/บาท/gi, "")
+    .replace(/\$/g, "")
+    .replace(/,/g, "")
+    .trim();
+
+  const priceMatch = priceText.match(/\d+(?:\.\d+)?/);
+  const price = priceMatch
+    ? Number(priceMatch[0])
+    : NaN;
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("OUTWORK_PRICE_INVALID");
+  }
+
+  // Second non-empty line = customer name
+  const customerName = String(lines[1] || "").trim();
+
+  if (!customerName) {
+    throw new Error("OUTWORK_CUSTOMER_REQUIRED");
+  }
+
+  // Line 3 onward = review URLs
+  const urlText = lines.slice(2).join("\n");
+
+  const reviewUrls = [
+    ...new Set(
+      (urlText.match(/https?:\/\/[^\s]+/gi) || [])
+        .map((url) =>
+          String(url || "")
+            .replace(/[),.;]+$/g, "")
+            .trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+
+  if (reviewUrls.length === 0) {
+    throw new Error("OUTWORK_NO_REVIEW_URL");
+  }
+
+  return [
+    "/manual",
+    `Customer: ${customerName}`,
+    `Price: ${price}`,
+    `Currency: ${currency}`,
+    `Type: ${workType}`,
+    ...reviewUrls,
+  ].join("\n");
+}
+
 async function createManualAssignedWorkFromGroupText(groupText) {
   const parsed = parseManualAssignedWorkText(groupText);
 
@@ -1970,8 +2052,16 @@ async function createManualAssignedWorkFromGroupText(groupText) {
           departmentId = department?.id || null;
         }
       }
-    } catch (error) {
-      console.error("MANUAL REVIEW LOOKUP FAILED:", {
+  } catch (error) {
+  if (
+    String(error?.message || "").startsWith(
+      "MANUAL_WORK_TYPE_MISMATCH:"
+    )
+  ) {
+    throw error;
+  }
+
+  console.error("MANUAL REVIEW LOOKUP FAILED:", {
         reviewUrl: canonicalReviewUrl,
         error: error.message,
       });
@@ -6442,6 +6532,149 @@ const allowed = new Set(
       : null;
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
+// -----------------------------------------------------
+// GMR ADD OUTWORK
+// Short format:
+//   5500 T2
+//   Customer Name
+//   https://review-url-1
+//   https://review-url-2
+// -----------------------------------------------------
+if (
+  addOutworkChatId &&
+  chatId === addOutworkChatId
+) {
+  try {
+    const manualText =
+      convertTelegramOutworkToManualText(groupText);
+
+    const result =
+      await createManualAssignedWorkFromGroupText(
+        manualText
+      );
+
+    const createdJobs =
+      Array.isArray(result?.createdJobs)
+        ? result.createdJobs
+        : [];
+
+    const newJobs =
+      createdJobs.filter(
+        (item) => item?.duplicate !== true
+      );
+
+    const duplicateJobs =
+      createdJobs.filter(
+        (item) => item?.duplicate === true
+      );
+
+    const lines = [
+      "✅ เพิ่ม Outwork เข้าระบบแล้ว",
+      "",
+      `ลูกค้า: ${result?.customer?.display_name || "-"}`,
+      `ประเภท: ${result?.parsed?.workType || "-"}`,
+      `ราคา: ${Number(result?.parsed?.price || 0).toLocaleString()} ${result?.parsed?.currency || "THB"}/รีวิว`,
+      `จำนวนทั้งหมด: ${createdJobs.length} รีวิว`,
+      `เพิ่มใหม่: ${newJobs.length}`,
+    ];
+
+    if (duplicateJobs.length > 0) {
+      lines.push(
+        `รายการซ้ำ: ${duplicateJobs.length}`
+      );
+    }
+
+    lines.push("");
+
+    createdJobs.forEach((item, index) => {
+      lines.push(
+        `${index + 1}. ${
+          item?.duplicate
+            ? "⚠️ มีในระบบแล้ว"
+            : "✅ เพิ่มสำเร็จ"
+        }`,
+        `Job: ${item?.jobId || "-"}`,
+        `${item?.reviewUrl || "-"}`
+      );
+    });
+
+    await replyTelegramInternal(
+      chatId,
+      msg.message_id,
+      lines.join("\n")
+    );
+  } catch (error) {
+    console.error(
+      "TELEGRAM ADD OUTWORK FAILED:",
+      error
+    );
+
+    let message =
+      `❌ เพิ่ม Outwork ไม่สำเร็จ: ${error?.message || String(error)}`;
+
+    if (
+      error?.message ===
+      "OUTWORK_FORMAT_INVALID"
+    ) {
+      message =
+        "❌ รูปแบบไม่ถูกต้อง\n\nกรุณาส่งตามรูปแบบ:\n\n5500 T2\nชื่อลูกค้า\nReview Link 1\nReview Link 2";
+    } else if (
+      error?.message ===
+      "OUTWORK_TYPE_INVALID"
+    ) {
+      message =
+        "❌ ไม่พบประเภทงาน\n\nบรรทัดแรกต้องมี T0 หรือ T2\nตัวอย่าง: 5500 T2";
+    } else if (
+      error?.message ===
+      "OUTWORK_PRICE_INVALID"
+    ) {
+      message =
+        "❌ ราคาไม่ถูกต้อง\n\nตัวอย่าง:\n5500 T2\nหรือ\n$159 T0";
+    } else if (
+      error?.message ===
+      "OUTWORK_CUSTOMER_REQUIRED"
+    ) {
+      message =
+        "❌ กรุณาระบุชื่อลูกค้าในบรรทัดที่ 2";
+    } else if (
+      error?.message ===
+      "OUTWORK_NO_REVIEW_URL" ||
+      error?.message ===
+      "MANUAL_WORK_NO_REVIEW_URL"
+    ) {
+      message =
+        "❌ ไม่พบ Review Link กรุณาใส่ลิงก์ตั้งแต่บรรทัดที่ 3 เป็นต้นไป";
+    } else if (
+      error?.message ===
+      "MANUAL_WORK_TYPE_REQUIRED"
+    ) {
+      message =
+        "❌ ระบบไม่สามารถระบุแผนก T0/T2 ได้";
+    } else if (
+      String(error?.message || "").startsWith(
+        "MANUAL_WORK_TYPE_MISMATCH:"
+      )
+    ) {
+      const parts =
+        String(error.message).split(":");
+
+      message =
+        `❌ ประเภทงานไม่ตรงกับอายุรีวิว\n\n` +
+        `เซลล์ระบุ: ${parts[1] || "-"}\n` +
+        `ระบบตรวจพบ: ${parts[2] || "-"}\n\n` +
+        `กรุณาตรวจสอบก่อนเพิ่มใหม่`;
+    }
+
+    await replyTelegramInternal(
+      chatId,
+      msg.message_id,
+      message
+    );
+  }
+
+  return res.sendStatus(200);
+}
+    
     // -----------------------------------------------------
     // DEDICATED REVIEW-LINK CHECK GROUP — V47
     // Any message that contains URL(s) is buffered automatically.
