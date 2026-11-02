@@ -23386,7 +23386,6 @@ if (
   }
 }
 
-
 const paymentVerification =
   verifyPaymentSlip({
     classification:
@@ -23399,6 +23398,13 @@ const paymentVerification =
       paymentJob.removed_at ||
       null,
   });
+
+
+applyKtcBillerRecipientOverride({
+  paymentVerification,
+  classification:
+    imageClassification,
+});
 
 
 const transactionReference =
@@ -23489,9 +23495,15 @@ if (referenceAlreadyUsed) {
   continue;
 }
 
-
 // -----------------------------------------
 // CUSTOMER-CORRECTABLE PAYMENT ERRORS
+//
+// IMPORTANT:
+// RECIPIENT_NAME_MISMATCH ไม่ reject ลูกค้าแล้ว
+// ถ้า KTC override ไม่ผ่าน
+// ให้ลง HUMAN REVIEW ด้านล่างแทน
+//
+// Reject ทันทีเฉพาะวันที่เก่าแน่นอน
 // -----------------------------------------
 
 const verificationReasons =
@@ -23502,52 +23514,19 @@ const verificationReasons =
     : [];
 
 
-const recipientNameMismatch =
-  verificationReasons.includes(
-    "RECIPIENT_NAME_MISMATCH"
-  );
-
 const paymentDateTooOld =
   verificationReasons.includes(
     "PAYMENT_DATE_TOO_OLD"
   );
 
 
-if (
-  recipientNameMismatch ||
-  paymentDateTooOld
-) {
-  let invalidSlipReply = "";
-
-  if (
-    recipientNameMismatch &&
-    paymentDateTooOld
-  ) {
-    invalidSlipReply =
-      getCustomerText(
-        customer,
-        "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
-        "The recipient information and transaction date on this payment slip do not match this job. Please check and send the correct payment slip."
-      );
-
-  } else if (
-    recipientNameMismatch
-  ) {
-    invalidSlipReply =
-      getCustomerText(
-        customer,
-        "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
-        "The recipient information on this payment slip does not match the required account. Please check and send the correct payment slip."
-      );
-
-  } else {
-    invalidSlipReply =
-      getCustomerText(
-        customer,
-        "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
-        "The transaction date on this payment slip does not match this job. Please send the payment slip for this job."
-      );
-  }
+if (paymentDateTooOld) {
+  const invalidSlipReply =
+    getCustomerText(
+      customer,
+      "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
+      "The transaction date on this payment slip does not match this job. Please send the payment slip for this job."
+    );
 
   try {
     await sendMessageToCustomer({
@@ -23591,7 +23570,7 @@ if (
   }
 
   console.log(
-    "PAYMENT SLIP REJECTED BEFORE REVIEW:",
+    "PAYMENT SLIP REJECTED: DATE TOO OLD",
     {
       customerId:
         customer.id,
@@ -24376,10 +24355,17 @@ async function processManychatPaymentSlipImage({
   }
 
   const paymentVerification = verifyPaymentSlip({
-    classification: imageClassification,
-    expectedAmount: paymentJob.price,
-    minimumTransactionDate: paymentJob.removed_at || null,
-  });
+  classification: imageClassification,
+  expectedAmount: paymentJob.price,
+  minimumTransactionDate: paymentJob.removed_at || null,
+});
+
+
+applyKtcBillerRecipientOverride({
+  paymentVerification,
+  classification:
+    imageClassification,
+});
 
   const transactionReference = imageClassification.reference
     ? String(imageClassification.reference).trim()
@@ -24425,69 +24411,87 @@ async function processManychatPaymentSlipImage({
     };
   }
 
-  const verificationReasons = Array.isArray(paymentVerification.reasons)
+  const verificationReasons =
+  Array.isArray(
+    paymentVerification.reasons
+  )
     ? paymentVerification.reasons
     : [];
 
-  const recipientNameMismatch = verificationReasons.includes(
-    "RECIPIENT_NAME_MISMATCH"
-  );
-  const paymentDateTooOld = verificationReasons.includes(
+
+const paymentDateTooOld =
+  verificationReasons.includes(
     "PAYMENT_DATE_TOO_OLD"
   );
 
-  if (recipientNameMismatch || paymentDateTooOld) {
-    let invalidSlipReply = "";
 
-    if (recipientNameMismatch && paymentDateTooOld) {
-      invalidSlipReply = getCustomerText(
-        customer,
-        "ตรวจสอบแล้วข้อมูลผู้รับเงินและวันที่ทำรายการในสลิปไม่ตรงกับงานนี้ครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
-        "The recipient information and transaction date on this payment slip do not match this job. Please send the correct slip."
-      );
-    } else if (recipientNameMismatch) {
-      invalidSlipReply = getCustomerText(
-        customer,
-        "ข้อมูลผู้รับเงินในสลิปไม่ตรงกับบัญชีที่กำหนดครับ รบกวนตรวจสอบและส่งสลิปที่ถูกต้องอีกครั้งครับ",
-        "The recipient information on this payment slip does not match the required account. Please send the correct slip."
-      );
-    } else {
-      invalidSlipReply = getCustomerText(
-        customer,
-        "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
-        "The transaction date on this payment slip does not match this job. Please send the correct slip."
-      );
-    }
+if (paymentDateTooOld) {
+  const invalidSlipReply =
+    getCustomerText(
+      customer,
+      "วันที่ทำรายการในสลิปไม่ตรงกับรอบงานนี้ครับ รบกวนส่งสลิปที่ชำระสำหรับงานนี้อีกครั้งครับ",
+      "The transaction date on this payment slip does not match this job. Please send the correct slip."
+    );
 
-    try {
-      await sendMessageToCustomer({
-        platform: customer.platform,
-        platformUserId: customer.platform_user_id,
-        text: invalidSlipReply,
-      });
-      await saveMessage({
-        customerId: customer.id,
-        platform: customer.platform,
-        direction: "outbound",
-        messageType: "text",
-        messageText: invalidSlipReply,
-      });
-      await updateLastBotMessage(customer.id, invalidSlipReply);
-    } catch (error) {
-      console.error("MANYCHAT INVALID PAYMENT SLIP REPLY FAILED:", error);
-    }
+  try {
+    await sendMessageToCustomer({
+      platform:
+        customer.platform,
 
-    if (paymentSlipUpload?.filePath) {
-      try { await deletePaymentSlip(paymentSlipUpload.filePath); } catch {}
-    }
+      platformUserId:
+        customer.platform_user_id,
 
-    return {
-      ok: true,
-      handled: false,
-      reason: "PAYMENT_SLIP_REJECTED",
-      verificationReasons,
-    };
+      text:
+        invalidSlipReply,
+    });
+
+    await saveMessage({
+      customerId:
+        customer.id,
+
+      platform:
+        customer.platform,
+
+      direction:
+        "outbound",
+
+      messageType:
+        "text",
+
+      messageText:
+        invalidSlipReply,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      invalidSlipReply
+    );
+
+  } catch (error) {
+    console.error(
+      "MANYCHAT INVALID PAYMENT SLIP REPLY FAILED:",
+      error
+    );
   }
+
+  if (
+    paymentSlipUpload?.filePath
+  ) {
+    try {
+      await deletePaymentSlip(
+        paymentSlipUpload.filePath
+      );
+    } catch {}
+  }
+
+  return {
+    ok: true,
+    handled: false,
+    reason:
+      "PAYMENT_DATE_TOO_OLD",
+    verificationReasons,
+  };
+}
 
   if (!transactionReference) {
     paymentVerification.verified = false;
