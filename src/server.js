@@ -2687,6 +2687,10 @@ function getTelegramInternalConfig() {
     addOutworkChatId: String(
       process.env.TELEGRAM_ADD_OUTWORK_CHAT_ID || ""
     ).trim(),
+
+    upsalesChatId: String(
+    process.env.TELEGRAM_UPSALES_CHAT_ID || ""
+    ).trim(),
   };
 }
 
@@ -2761,6 +2765,22 @@ async function pushTelegramSales(text) {
   const { salesChatId } = getTelegramInternalConfig();
   if (!salesChatId) throw new Error("Missing TELEGRAM_SALES_CHAT_ID");
   return sendTelegramText({ chatId: salesChatId, text });
+}
+
+async function pushTelegramUpsales(text) {
+  const { upsalesChatId } =
+    getTelegramInternalConfig();
+
+  if (!upsalesChatId) {
+    throw new Error(
+      "Missing TELEGRAM_UPSALES_CHAT_ID"
+    );
+  }
+
+  return sendTelegramText({
+    chatId: upsalesChatId,
+    text,
+  });
 }
 
 async function replyTelegramInternal(chatId, incomingMessageId, text) {
@@ -4385,7 +4405,7 @@ async function sendReactivationAlertToLineGroup({
     "ข้าม",
   ].join("\n");
 
-  const pushed = await pushTelegramSales(text);
+const pushed = await pushTelegramUpsales(text);
   await setReactivationAlertLineGroupMessage({
     alertId: alert.id,
     lineGroupMessageId: pushed.messageId,
@@ -6476,12 +6496,13 @@ app.post("/telegram/webhook", async (req, res) => {
       if (claim?.claimed === false) return res.sendStatus(200);
     }
 
-   const {
+  const {
   salesChatId,
   t0ChatId,
   t2ChatId,
   reviewCheckChatId,
   addOutworkChatId,
+  upsalesChatId,
 } = getTelegramInternalConfig();
 
 const chatId = String(msg.chat.id);
@@ -6493,6 +6514,7 @@ const allowed = new Set(
     t2ChatId,
     reviewCheckChatId,
     addOutworkChatId,
+    upsalesChatId,
   ].filter(Boolean)
 );
     
@@ -6983,6 +7005,148 @@ if (
       return res.sendStatus(200);
     }
 
+    // -----------------------------------------------------
+// GMR UPSALES — REACTIVATION DECISION ONLY
+// -----------------------------------------------------
+if (
+  upsalesChatId &&
+  chatId === upsalesChatId
+) {
+  const replyUpsales = async (text) =>
+    replyTelegramInternal(
+      chatId,
+      msg.message_id,
+      text
+    );
+
+  if (
+    quotedMessageId &&
+    ["ส่งลูกค้า", "ข้าม"].includes(
+      normalizedGroupText
+    )
+  ) {
+    const alert =
+      await getReactivationAlertByLineGroupMessageId(
+        quotedMessageId
+      );
+
+    if (!alert) {
+      await replyUpsales(
+        "⚠️ ไม่พบ Reactivation Alert ที่ผูกกับข้อความนี้"
+      );
+      return res.sendStatus(200);
+    }
+
+    if (
+      normalizedGroupText === "ข้าม"
+    ) {
+      await setReactivationAlertTeamDecision({
+        alertId: alert.id,
+        decision: "skip",
+      });
+
+      await replyUpsales(
+        "✅ ข้าม Reactivation รายการนี้แล้ว ระบบจะไม่ทักลูกค้าครับ"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    const customer =
+      await getCustomerById(
+        alert.customer_id
+      );
+
+    const customerMap =
+      await getCustomerMapById(
+        alert.customer_map_id
+      );
+
+    if (!customer) {
+      await replyUpsales(
+        "❌ ไม่พบข้อมูลลูกค้าของ Reactivation นี้ครับ"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    const platformUserId =
+      String(
+        customer.platform_user_id || ""
+      ).trim();
+
+    const liveChatReady =
+      Boolean(platformUserId) &&
+      !platformUserId.startsWith("legacy:") &&
+      customer.customer_notify !== false;
+
+    if (!liveChatReady) {
+      await replyUpsales([
+        "⚠️ ตรวจ Map ได้แล้ว แต่ยังไม่มี Chat ID จริงสำหรับส่งอัตโนมัติ",
+        `ลูกค้า: ${customer.display_name || "-"}`,
+        `Platform: ${customer.platform || "-"}`,
+        "",
+        "ระบบเก็บ Alert ไว้ก่อน ไม่ได้ส่งผิดห้อง",
+        "เมื่อผูกห้องแชทจริงแล้ว Reply ข้อความเดิมว่า “ส่งลูกค้า” อีกครั้งได้",
+      ].join("\n"));
+
+      return res.sendStatus(200);
+    }
+
+    const customerText =
+      getCustomerText(
+        customer,
+
+        `ตรวจพบรีวิว 1 ดาวใหม่บน Google Maps ของ ${
+          customerMap?.business_name ||
+          "ธุรกิจของคุณ"
+        }\n\nReviewer: ${
+          alert.reviewer_name || "-"
+        }\n\nต้องการให้ทางเราตรวจสอบเพื่อดำเนินการรีวิวนี้ไหมครับ?\nหากสนใจ พิมพ์ “สนใจ” ได้เลยครับ`,
+
+        `We found a new 1-star review on the Google Maps listing for ${
+          customerMap?.business_name ||
+          "your business"
+        }.\n\nReviewer: ${
+          alert.reviewer_name || "-"
+        }\n\nWould you like us to check this review for you?\nIf you're interested, reply “Interested”.`
+      );
+
+    await sendMessageToCustomer({
+      platform: customer.platform,
+      platformUserId:
+        customer.platform_user_id,
+      text: customerText,
+    });
+
+    await saveMessage({
+      customerId: customer.id,
+      platform: customer.platform,
+      direction: "outbound",
+      messageType: "text",
+      messageText: customerText,
+    });
+
+    await updateLastBotMessage(
+      customer.id,
+      customerText
+    );
+
+    await setReactivationAlertTeamDecision({
+      alertId: alert.id,
+      decision: "send_to_customer",
+    });
+
+    await replyUpsales(
+      "✅ ส่งข้อความ Reactivation ให้ลูกค้าแล้วครับ ระบบจะรอคำตอบโดยไม่ Handoff"
+    );
+
+    return res.sendStatus(200);
+  }
+
+  // ห้อง Upsales ไม่ให้รันคำสั่ง Sales อื่น
+  return res.sendStatus(200);
+}
     // Interactive business commands belong to Sales.
     if (chatId !== salesChatId) return res.sendStatus(200);
 
