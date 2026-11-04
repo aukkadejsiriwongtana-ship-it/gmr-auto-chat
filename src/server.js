@@ -635,6 +635,7 @@ import {
     getLatestJobByCustomerId,
   hasPaymentByCustomerId,
   getPaidPricingHistoryByCustomerId,
+  getJobsForCustomerPaymentFollowUp,
   isPaymentReferenceUsed,
 createPayment,
 getLatestJobWithMapByCustomerId,
@@ -1117,6 +1118,130 @@ function getCustomerText(
       ? englishText
       : thaiText
   );
+}
+
+
+// =========================================================
+// POST-PAYMENT CUSTOMER FOLLOW-UP — per-customer, per-job.
+// All payment paths call this after updating the paid job.
+// A completed/paid review does NOT imply other jobs are complete.
+// =========================================================
+const PAYMENT_TERMINAL_JOB_STATUSES = new Set([
+  "paid", "cancelled", "canceled", "credit_rejected",
+  "rejected", "failed", "expired", "void", "voided", "duplicate",
+]);
+
+const PAYMENT_PROCESSING_JOB_STATUSES = new Set([
+  "queued", "dispatching", "processing", "removed",
+]);
+const PAYMENT_UNPAID_JOB_STATUSES = new Set([
+  "waiting_payment", "removed_waiting_payment",
+]);
+
+async function buildPostPaymentCustomerFollowUp(customer, paidJobIds = []) {
+  // Conservative copy when DB cannot be checked; never claim all jobs finished.
+  const fallbackText = getCustomerText(
+    customer,
+    "ขอบคุณครับ ได้รับชำระเงินสำหรับรีวิวรายการนี้แล้วครับ ส่วนงานรีวิวรายการอื่น ทางเราจะตรวจสอบสถานะและอัปเดตให้ทราบอีกครั้งครับ",
+    "Thank you. We've received payment for this review. We'll update you separately on the status of any other reviews."
+  );
+
+  if (!customer?.id) {
+    return { text: fallbackText, nextState: null, statusCheckOk: false };
+  }
+
+  try {
+    const completedIds = new Set(
+      (Array.isArray(paidJobIds) ? paidJobIds : [paidJobIds])
+        .filter(Boolean).map((id) => String(id))
+    );
+    const jobs = await getJobsForCustomerPaymentFollowUp(customer.id);
+    const remaining = (jobs || []).filter((job) => {
+      if (completedIds.has(String(job?.id || ""))) return false;
+      const status = String(job?.status || "").trim().toLowerCase();
+      // Unknown status stays open as a precaution; never say "all done".
+      return !PAYMENT_TERMINAL_JOB_STATUSES.has(status);
+    });
+
+    const processingJobs = remaining.filter((job) =>
+      PAYMENT_PROCESSING_JOB_STATUSES.has(String(job.status || "").toLowerCase())
+    );
+    const unpaidJobs = remaining.filter((job) =>
+      PAYMENT_UNPAID_JOB_STATUSES.has(String(job.status || "").toLowerCase())
+    );
+    const otherJobs = remaining.filter((job) =>
+      !PAYMENT_PROCESSING_JOB_STATUSES.has(String(job.status || "").toLowerCase()) &&
+      !PAYMENT_UNPAID_JOB_STATUSES.has(String(job.status || "").toLowerCase())
+    );
+
+    const thai = ["ขอบคุณครับ ได้รับชำระเงินสำหรับรีวิวรายการนี้เรียบร้อยแล้วครับ"];
+    const en = ["Thank you. We've received payment for this review."];
+
+    if (processingJobs.length > 0) {
+      thai.push(`ส่วนงานรีวิวที่เหลืออีก ${processingJobs.length} รายการ ยังอยู่ระหว่างดำเนินการครับ ทางเราจะอัปเดตความคืบหน้าให้ทราบ`);
+      en.push(`${processingJobs.length === 1 ? "The other review is" : `The other ${processingJobs.length} reviews are`} still being processed. We'll update you on the progress.`);
+    }
+    if (unpaidJobs.length > 0) {
+      thai.push(`มีอีก ${unpaidJobs.length} รายการที่ดำเนินการสำเร็จแล้วและอยู่ระหว่างรอชำระเงิน ทางเราจะแจ้งรายละเอียดแยกให้ครับ`);
+      en.push(`${unpaidJobs.length === 1 ? "Another completed review is" : `${unpaidJobs.length} other completed reviews are`} still awaiting payment. We'll send the payment details separately.`);
+    }
+    if (otherJobs.length > 0) {
+      thai.push(`ยังมีรายการรีวิวอื่นอีก ${otherJobs.length} รายการในระบบ ทางเราจะตรวจสอบสถานะและอัปเดตแยกให้ครับ`);
+      en.push(`There ${otherJobs.length === 1 ? "is another review request" : `are ${otherJobs.length} other review requests`} on file. We'll provide a separate status update.`);
+    }
+    if (remaining.length === 0) {
+      thai.push("หากมีรีวิวใหม่ที่ต้องการให้ช่วยตรวจสอบ ส่งมาได้เลยครับ");
+      en.push("If you have a new review you'd like us to check, feel free to send it.");
+    }
+
+    const nextState = unpaidJobs.length > 0
+      ? GMR_STATES.REMOVED_WAITING_PAYMENT
+      : processingJobs.length > 0
+        ? GMR_STATES.IN_PROGRESS
+        : otherJobs.length > 0
+          ? null // Keep earlier conversation state for a pending, unstarted case.
+          : GMR_STATES.WAITING_MAP;
+
+    console.log("POST-PAYMENT REMAINING JOBS:", {
+      customerId: customer.id,
+      paidJobIds: [...completedIds],
+      processing: processingJobs.length,
+      awaitingPayment: unpaidJobs.length,
+      otherOpen: otherJobs.length,
+      nextState,
+    });
+
+    return {
+      text: getCustomerText(customer, thai.join("\n\n"), en.join("\n\n")),
+      nextState,
+      statusCheckOk: true,
+      remainingCount: remaining.length,
+    };
+  } catch (error) {
+    console.error("POST-PAYMENT REMAINING JOB CHECK FAILED:", {
+      customerId: customer.id,
+      error: error?.message || String(error),
+    });
+    return { text: fallbackText, nextState: null, statusCheckOk: false };
+  }
+}
+
+async function updateConversationForPostPayment(customer, followUp) {
+  if (!customer?.id || !followUp?.nextState) return;
+  try {
+    await updateConversationState({
+      customerId: customer.id,
+      state: followUp.nextState,
+      handoff: false,
+      handoffReason: null,
+    });
+  } catch (error) {
+    // Payment is already confirmed; a state-sync error cannot undo it.
+    console.error("POST-PAYMENT CONVERSATION STATE FAILED:", {
+      customerId: customer.id,
+      error: error?.message || String(error),
+    });
+  }
 }
 
 // =========================================================
@@ -7368,6 +7493,121 @@ if (
       text
     );
 
+
+  // Payment decisions are allowed only as a reply to the specific bot
+  // Payment card whose paymentId/jobId/messageId match the database.
+  if (isUpsalesPaymentDecision) {
+    const payment = candidateUpsalesPayment;
+    const approve = ["ok", "okay", "ยืนยัน"].includes(normalizedGroupText);
+    const paymentJob = await getJobById(payment.job_id);
+    if (!paymentJob) {
+      await replyUpsales("❌ ไม่พบ Job ของ Payment นี้");
+      return res.sendStatus(200);
+    }
+    const customer = await getCustomerById(paymentJob.customer_id);
+    if (!customer) {
+      await replyUpsales("❌ ไม่พบข้อมูลลูกค้า Payment นี้");
+      return res.sendStatus(200);
+    }
+    if (payment.payment_verified === true || payment.review_status === "approved") {
+      await replyUpsales("✅ สลิปนี้ได้รับการยืนยันแล้วครับ");
+      return res.sendStatus(200);
+    }
+    if (payment.review_status === "rejected") {
+      await replyUpsales("⚠️ รายการนี้ถูกปฏิเสธไปแล้ว ไม่สามารถแก้คำตัดสินจากข้อความเดิมได้ครับ");
+      return res.sendStatus(200);
+    }
+    const paymentReasons = Array.isArray(payment.verification_reasons)
+      ? payment.verification_reasons : [];
+
+    if (approve) {
+      if (paymentReasons.includes("MULTIPLE_WAITING_PAYMENT_JOBS")) {
+        await replyUpsales("⚠️ สลิปนี้เป็นยอดรวมหลายงาน ต้องตรวจและจัดสรรยอดให้ครบก่อน ไม่อนุมัติแบบงานเดียวครับ");
+        return res.sendStatus(200);
+      }
+      if (!["waiting_payment", "removed_waiting_payment"].includes(
+        String(paymentJob.status || "").toLowerCase()
+      )) {
+        await replyUpsales("⚠️ Job นี้ไม่ได้อยู่ในสถานะรอชำระเงิน กรุณาตรวจสอบก่อน ไม่เปลี่ยนเป็น paid ซ้ำครับ");
+        return res.sendStatus(200);
+      }
+      // Human approval means an operator has independently checked actual receipt.
+      // Do NOT infer bank settlement from the slip image alone.
+      const verifiedAt = new Date().toISOString();
+      await updatePayment(payment.id, {
+        payment_verified: true, verified_at: verifiedAt, review_status: "approved",
+      });
+      await updateJob(paymentJob.id, { status: "paid", paid_at: verifiedAt });
+      try {
+        await updateJobInGoogleSheet({
+          jobId: paymentJob.id, status: "paid", paidAt: verifiedAt,
+        });
+      } catch (error) {
+        console.error("UPSALES PAYMENT SHEET UPDATE FAILED:", error);
+      }
+      await movePaidJobToDepartmentDoneSheet(paymentJob, verifiedAt);
+      await syncExistingCustomerAfterVerifiedPayment(
+        customer.id, "TELEGRAM_UPSALES_PAYMENT_APPROVAL"
+      );
+      const followUp = await buildPostPaymentCustomerFollowUp(
+        customer, [paymentJob.id]
+      );
+      await updateConversationForPostPayment(customer, followUp);
+      let customerNotified = false;
+      try {
+        await sendMessageToCustomer({
+          platform: customer.platform,
+          platformUserId: customer.platform_user_id,
+          text: followUp.text,
+        });
+        await saveMessage({
+          customerId: customer.id, platform: customer.platform,
+          direction: "outbound", messageType: "text", messageText: followUp.text,
+        });
+        await updateLastBotMessage(customer.id, followUp.text);
+        customerNotified = true;
+      } catch (error) {
+        console.error("UPSALES PAYMENT CUSTOMER NOTIFY FAILED:", error);
+      }
+      if (payment.slip_file_path) {
+        try { await deletePaymentSlip(payment.slip_file_path); }
+        catch (error) { console.error("UPSALES PAYMENT SLIP DELETE FAILED:", error); }
+      }
+      await replyUpsales(customerNotified
+        ? "✅ ยืนยันสลิปและอัปเดตงานเป็น paid แล้ว แจ้งลูกค้าตามสถานะงานที่เหลือเรียบร้อยครับ"
+        : "⚠️ ยืนยันสลิปและอัปเดต paid แล้ว แต่แจ้งลูกค้าไม่สำเร็จ กรุณาแจ้งลูกค้าด้วยตนเองครับ");
+      return res.sendStatus(200);
+    }
+
+    await updatePayment(payment.id, {
+      payment_verified: false, verified_at: null, review_status: "rejected",
+    });
+    const rejectedText = getCustomerText(customer,
+      "ทีมงานตรวจสอบแล้ว ยังไม่สามารถยืนยันการชำระรายการนี้ได้ครับ กรุณาติดต่อทีมงานเพื่อตรวจสอบอีกครั้งครับ",
+      "Our team couldn't verify this payment yet. Please contact us so we can review the transaction together."
+    );
+    try {
+      await sendMessageToCustomer({
+        platform: customer.platform,
+        platformUserId: customer.platform_user_id,
+        text: rejectedText,
+      });
+      await saveMessage({
+        customerId: customer.id, platform: customer.platform,
+        direction: "outbound", messageType: "text", messageText: rejectedText,
+      });
+      await updateLastBotMessage(customer.id, rejectedText);
+    } catch (error) {
+      console.error("UPSALES PAYMENT REJECTION NOTIFY FAILED:", error);
+    }
+    if (payment.slip_file_path) {
+      try { await deletePaymentSlip(payment.slip_file_path); }
+      catch (error) { console.error("UPSALES REJECTED SLIP DELETE FAILED:", error); }
+    }
+    await replyUpsales("❌ ปฏิเสธสลิปแล้วและพยายามแจ้งลูกค้าครับ");
+    return res.sendStatus(200);
+  }
+
   if (
     quotedMessageId &&
     ["ส่งลูกค้า", "ข้าม"].includes(
@@ -7964,12 +8204,7 @@ if (
           }
         }
         await updateJob(paymentJob.id, { status: "paid", paid_at: verifiedAt });
-        await updateConversationState({
-          customerId: customer.id,
-          state: GMR_STATES.WAITING_MAP,
-          handoff: false,
-          handoffReason: null,
-        });
+        // State reconciled after the paid job is saved.
         try {
           await updateJobInGoogleSheet({
             jobId: paymentJob.id,
@@ -7987,7 +8222,11 @@ if (
           "TELEGRAM_MANUAL_PAYMENT_APPROVAL"
         );
 
-        const customerReply = "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
+        const followUp = await buildPostPaymentCustomerFollowUp(
+          customer, [paymentJob.id]
+        );
+        await updateConversationForPostPayment(customer, followUp);
+        const customerReply = followUp.text;
         try {
           await sendMessageToCustomer({
             platform: customer.platform,
@@ -8771,63 +9010,11 @@ app.post(
           "STRIPE_PAYMENT"
         );
 
-        // V53: after this payment is verified, check whether this customer still
-        // has any other jobs in the department Active lifecycle.
-        // processing stays in T0_ACTIVE/T2_ACTIVE; waiting_payment also stays
-        // Active until that specific job is paid. Only when both are empty do we
-        // tell the customer that all work is completed.
-        let hasRemainingActiveJobs = false;
-
-        try {
-          const [monitoringJobs, remainingWaitingPaymentJobs] = await Promise.all([
-            getJobsForReviewMonitoring(),
-            getWaitingPaymentJobsByCustomerId(customer.id),
-          ]);
-
-          const remainingProcessingJobs = (monitoringJobs || []).filter(
-            (job) =>
-              String(job?.customer_id || job?.customerId || "") === String(customer.id) &&
-              !paidJobs.includes(String(job?.id || ""))
-          );
-
-          const remainingWaitingJobs = (remainingWaitingPaymentJobs || []).filter(
-            (job) => !paidJobs.includes(String(job?.id || ""))
-          );
-
-          hasRemainingActiveJobs =
-            remainingProcessingJobs.length > 0 ||
-            remainingWaitingJobs.length > 0;
-
-          console.log("STRIPE POST-PAYMENT ACTIVE JOB CHECK:", {
-            customerId: customer.id,
-            remainingProcessingCount: remainingProcessingJobs.length,
-            remainingWaitingPaymentCount: remainingWaitingJobs.length,
-            hasRemainingActiveJobs,
-          });
-        } catch (activeCheckError) {
-          // Never fail a verified payment because the follow-up wording check failed.
-          // Fall back to the conservative remaining-work wording instead of falsely
-          // telling the customer that all work is completed.
-          hasRemainingActiveJobs = true;
-          console.error("STRIPE POST-PAYMENT ACTIVE JOB CHECK FAILED:", {
-            customerId: customer.id,
-            error: activeCheckError?.message || String(activeCheckError),
-          });
-        }
-
-        const paymentReceivedReply = hasRemainingActiveJobs
-          ? getCustomerText(
-              customer,
-              "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ สำหรับงานที่เหลือ ทางเราจะอัปเดตให้ทราบอีกครั้งครับ",
-              "Received with thanks. For the remaining work, we will update you again."
-            )
-          : getCustomerText(
-              customer,
-              "รับยอดชำระเรียบร้อยแล้ว ขอบคุณครับ ✅\n\n" +
-                "หากมีรีวิวอื่นที่ต้องการให้เราช่วยตรวจสอบเพิ่มเติม สามารถส่งมาให้เราได้เลยครับ",
-              "Received with thanks. Our work is now completed. ✅\n\n" +
-                "Please let us know if there are any other bad reviews you would like us to check."
-            );
+        const postPaymentFollowUp = await buildPostPaymentCustomerFollowUp(
+          customer, paidJobs
+        );
+        await updateConversationForPostPayment(customer, postPaymentFollowUp);
+        const paymentReceivedReply = postPaymentFollowUp.text;
 
 
         try {
@@ -21442,19 +21629,8 @@ if (pendingPayment.slip_file_path) {
       }
     );
 
-    await updateConversationState({
-  customerId:
-    paymentCustomer.id,
+    // State reconciled after LINE manual payment approval.
 
-  state:
-    GMR_STATES.WAITING_MAP,
-
-  handoff:
-    false,
-
-  handoffReason:
-    null,
-});
 
     try {
       await updateJobInGoogleSheet({
@@ -21482,8 +21658,11 @@ if (pendingPayment.slip_file_path) {
     );
 
 
-    const customerReply =
-      "ขอบคุณครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ";
+    const followUp = await buildPostPaymentCustomerFollowUp(
+      paymentCustomer, [paymentJob.id]
+    );
+    await updateConversationForPostPayment(paymentCustomer, followUp);
+    const customerReply = followUp.text;
 
 
     try {
@@ -23921,12 +24100,11 @@ if (
   );
 
 
-  const customerReply =
-    getCustomerText(
-      customer,
-      "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ",
-      "Thank you. Your payment has been received successfully. If you have another review you'd like us to handle, please send it anytime."
-    );
+  const postPaymentFollowUp = await buildPostPaymentCustomerFollowUp(
+    customer, [paymentJob.id]
+  );
+  await updateConversationForPostPayment(customer, postPaymentFollowUp);
+  const customerReply = postPaymentFollowUp.text;
 
 
   try {
@@ -23971,19 +24149,7 @@ if (
   }
 
 
-  await updateConversationState({
-    customerId:
-      customer.id,
-
-    state:
-      GMR_STATES.WAITING_MAP,
-
-    handoff:
-      false,
-
-    handoffReason:
-      null,
-  });
+  // Conversation state reconciled above against the remaining jobs.
 
 
   if (paymentSlipUpload?.filePath) {
@@ -24758,11 +24924,11 @@ if (paymentDateTooOld) {
       "MANYCHAT_AUTO_PAYMENT"
     );
 
-    const customerReply = getCustomerText(
-      customer,
-      "ขอบคุณครับ ได้รับชำระเรียบร้อยแล้วครับ หากมีรีวิวอื่นต้องการลบ แจ้งได้เลยนะครับ",
-      "Thank you. Your payment has been received successfully. If you have another review you'd like us to handle, please send it anytime."
+    const postPaymentFollowUp = await buildPostPaymentCustomerFollowUp(
+      customer, [paymentJob.id]
     );
+    await updateConversationForPostPayment(customer, postPaymentFollowUp);
+    const customerReply = postPaymentFollowUp.text;
 
     try {
       await sendMessageToCustomer({
@@ -24782,12 +24948,7 @@ if (paymentDateTooOld) {
       console.error("MANYCHAT AUTO PAYMENT CUSTOMER REPLY FAILED:", error);
     }
 
-    await updateConversationState({
-      customerId: customer.id,
-      state: GMR_STATES.WAITING_MAP,
-      handoff: false,
-      handoffReason: null,
-    });
+    // Conversation state reconciled above against the remaining jobs.
 
     if (paymentSlipUpload?.filePath) {
       try { await deletePaymentSlip(paymentSlipUpload.filePath); } catch (error) {
