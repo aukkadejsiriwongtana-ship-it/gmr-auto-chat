@@ -656,6 +656,8 @@ registerFaqHit,
 getBotControl,
 setBotControl,
   createPendingPayment,
+
+getPaymentById,
 getPaymentByLineGroupMessageId,
   getJobById,
 updatePayment,
@@ -3056,10 +3058,14 @@ async function sendPaymentReviewToLineGroup({
       lines.push("", "ℹ️ KTC และเลขท้ายบัตรตรง แต่ Biller ID ยังตรวจไม่ผ่าน: ต้องตรวจรับเงินจริงก่อนกด ยืนยัน");
     }
   }
+ 
   if (slipImageUrl) lines.push("", "Slip:", slipImageUrl);
   lines.push("", "Reply: ยืนยัน / no");
-  return pushTelegramSales(lines.join("\n"));
+
+  // Payment Human Review → GMR Upsales
+  return pushTelegramUpsales(lines.join("\n"));
 }
+
 
 async function registerTelegramWebhook() {
   const { token } = getTelegramInternalConfig();
@@ -6830,6 +6836,72 @@ const allowed = new Set(
       ? String(msg.reply_to_message.message_id)
       : null;
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
+
+    
+const paymentDecisionCommands = new Set([
+  "ok",
+  "okay",
+  "ยืนยัน",
+  "no",
+  "ไม่ผ่าน",
+  "reject",
+  "rejected",
+]);
+
+const quotedPaymentText = String(
+  msg?.reply_to_message?.text || ""
+);
+
+const quotedPaymentId =
+  quotedPaymentText.match(
+    /^Payment:\s*([0-9a-f-]{36})\s*$/im
+  )?.[1] || null;
+
+const quotedJobId =
+  quotedPaymentText.match(
+    /^Job:\s*([0-9a-f-]{36})\s*$/im
+  )?.[1] || null;
+
+const isUpsalesPaymentDecisionRequest = Boolean(
+  upsalesChatId &&
+  chatId === upsalesChatId &&
+  quotedMessageId &&
+  paymentDecisionCommands.has(normalizedGroupText) &&
+  quotedPaymentText.includes("💳 PAYMENT") &&
+  quotedPaymentId &&
+  quotedJobId &&
+  msg?.reply_to_message?.from?.is_bot === true
+);
+
+const candidateUpsalesPayment =
+  isUpsalesPaymentDecisionRequest
+    ? await getPaymentById(quotedPaymentId)
+    : null;
+
+const isUpsalesPaymentDecision = Boolean(
+  isUpsalesPaymentDecisionRequest &&
+  candidateUpsalesPayment &&
+  String(candidateUpsalesPayment.id).toLowerCase() ===
+    String(quotedPaymentId).toLowerCase() &&
+  String(candidateUpsalesPayment.job_id).toLowerCase() ===
+    String(quotedJobId).toLowerCase() &&
+  String(candidateUpsalesPayment.line_group_message_id) ===
+    String(quotedMessageId)
+);
+
+if (
+  isUpsalesPaymentDecisionRequest &&
+  !isUpsalesPaymentDecision
+) {
+  await replyTelegramInternal(
+    chatId,
+    msg.message_id,
+    "⚠️ ไม่สามารถจับคู่รายการ Payment นี้ได้ ระบบยังไม่ได้เปลี่ยนสถานะการชำระเงินครับ"
+  );
+
+  return res.sendStatus(200);
+}
+
 
 // -----------------------------------------------------
 // GMR ADD OUTWORK
