@@ -756,51 +756,48 @@ function detectCustomerLanguage(
   message,
   currentLanguage = "th"
 ) {
-  const text =
-    String(message || "")
-      .replace(
-        /https?:\/\/\S+/gi,
-        " "
-      )
-      .trim();
+  const original = String(message || "");
+  const preferred =
+    String(currentLanguage || "th").toLowerCase() === "en"
+      ? "en"
+      : "th";
 
-  if (!text) {
-    return (
-      currentLanguage ||
-      "th"
-    );
-  }
+  // Only a human-authored message should change language.
+  // A Google Maps card/title/URL is not language preference evidence.
+  const withoutUrls = original
+    .replace(/https?:\/\/\S+/gi, " ")
+    .trim();
+  const plainText = withoutUrls.replace(/\s+/g, " ").trim();
+  if (!plainText) return preferred;
 
-  const thaiMatches =
-    text.match(
-      /[\u0E00-\u0E7F]/g
-    ) || [];
+  if (/[\u0E00-\u0E7F]/.test(plainText)) return "th";
 
-  if (
-    thaiMatches.length > 0
-  ) {
+  // Romanized Thai politeness; "Ok ka" must restore Thai even if a
+  // previous Google Maps title switched the customer to English.
+  if (/\b(?:ka|kha|krab|krub|krap|khrap|kub|kap)\s*[.!?]*$/i.test(plainText)) {
     return "th";
   }
 
-  const englishWords =
-    text.match(
-      /[A-Za-z]+/g
-    ) || [];
+  const isGoogleLink =
+    /https?:\/\/(?:[^\s/]*google\.[^\s/]+\/maps|maps\.app\.goo\.gl|share\.google|goo\.gl\/maps)/i.test(original);
 
+  // A pasted map card such as "Google review of ... on Google Maps"
+  // must not switch a previously Thai-speaking customer to English.
+  // Explicit English questions still opt into English.
+  const explicitEnglishRequest =
+    /\b(?:how much|can you|could you|would you|do you|please|i want|i need|what is|how do|help me)\b/i.test(plainText);
+  if (isGoogleLink && !explicitEnglishRequest) {
+    return preferred;
+  }
+
+  const englishWords = plainText.match(/[A-Za-z]+/g) || [];
   const commonEnglish =
     /\b(hi|hello|hey|price|review|remove|removal|google|map|maps|how|much|can|you|please|interested|want|need|delete|help|thanks|thank)\b/i;
 
-  if (
-    commonEnglish.test(text) ||
-    englishWords.length >= 4
-  ) {
+  if (commonEnglish.test(plainText) || englishWords.length >= 4) {
     return "en";
   }
-
-  return (
-    currentLanguage ||
-    "th"
-  );
+  return preferred;
 }
 
 function isThailandPlace(place) {
@@ -3043,6 +3040,21 @@ async function sendPaymentReviewToLineGroup({
   ];
   if (Array.isArray(reasons) && reasons.length) {
     lines.push("", "เหตุผลที่ต้องตรวจ:", ...reasons.map((r, i) => `${i + 1}. ${r}`));
+  }
+
+  // BILLER_ID_MISMATCH is not the same check as recipient name or card last4.
+  // Do NOT auto-mark paid based on a matching last4; annotate for the team.
+  if (Array.isArray(reasons) && reasons.includes("BILLER_ID_MISMATCH")) {
+    const expectedLast4 = String(process.env.PAYMENT_KTC_CARD_LAST4 || "")
+      .replace(/\D/g, "").slice(-4);
+    const receivedLast4 = String(recipientCardLast4 || "")
+      .replace(/\D/g, "").slice(-4);
+    const matchesExpectedCard = expectedLast4.length === 4 &&
+      receivedLast4 === expectedLast4;
+    const looksLikeKtc = /\bktc\b|krungthai card|บัตรกรุงไทย/i.test(String(recipientName || ""));
+    if (looksLikeKtc && matchesExpectedCard) {
+      lines.push("", "ℹ️ KTC และเลขท้ายบัตรตรง แต่ Biller ID ยังตรวจไม่ผ่าน: ต้องตรวจรับเงินจริงก่อนกด ยืนยัน");
+    }
   }
   if (slipImageUrl) lines.push("", "Slip:", slipImageUrl);
   lines.push("", "Reply: ยืนยัน / no");
@@ -6392,6 +6404,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   let operationalErrorCount = 0;
   const suspected = [];
   const errors = [];
+  const active = [];
 
   console.log(`TELEGRAM ${targetCode} MANUAL CHECK START:`, {
     monitorVersion,
@@ -6426,6 +6439,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
         errorCount += 1;
         errors.push({
           jobId: job.id,
+          customerId: job?.customer_id || null,
           businessName: job?.business_name || "",
           reviewUrl,
           error: error?.message || "APIFY_BATCH_FAILED",
@@ -6461,6 +6475,12 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
 
       if (status === "ACTIVE") {
         visibleCount += 1;
+        active.push({
+          jobId: job.id,
+          customerId: job?.customer_id || null,
+          businessName: job?.business_name || result?.business_name || "",
+          reviewUrl,
+        });
 
         try {
           await resetMonitoringJobAsVisible(job, checkedAt);
@@ -6479,6 +6499,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
         errorCount += 1;
         errors.push({
           jobId: job.id,
+          customerId: job?.customer_id || null,
           businessName: job?.business_name || result?.business_name || "",
           reviewUrl,
           error: actorError
@@ -6539,6 +6560,41 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     }
   }
 
+  // Customer names for Telegram reporting only. No payment/job state changes.
+  // Resolve each distinct customer once (batches of 10 to avoid DB overload).
+  const reportItems = [...active, ...suspected, ...errors];
+  const reportCustomerIds = [...new Set(
+    reportItems
+      .map((item) => String(item.customerId || "").trim())
+      .filter(Boolean)
+  )];
+  const customerNamesById = new Map();
+  for (let i = 0; i < reportCustomerIds.length; i += 10) {
+    await Promise.all(reportCustomerIds.slice(i, i + 10).map(async (customerId) => {
+      try {
+        const customer = await getCustomerById(customerId);
+        customerNamesById.set(
+          customerId,
+          String(customer?.display_name || "").replace(/\s+/g, " ").trim() || "-"
+        );
+      } catch (error) {
+        customerNamesById.set(customerId, "-");
+        console.error(`TELEGRAM ${targetCode} CHECK CUSTOMER LOOKUP FAILED:`, {
+          customerId,
+          error: error?.message || String(error),
+        });
+      }
+    }));
+  }
+
+  const formatCheckItem = (item, index, compact = false) => {
+    const customerName = customerNamesById.get(String(item.customerId || "").trim()) || "-";
+    const businessName = String(item.businessName || "-").replace(/\s+/g, " ").trim() || "-";
+    return compact
+      ? `${index + 1}. ${customerName.slice(0, 35)} | ${businessName.slice(0, 65)} | Job ${item.jobId}`
+      : `${index + 1}. ลูกค้า: ${customerName} | แมพ: ${businessName}`;
+  };
+
   // V32: one result/approval card per CHECK run. All REMOVED jobs from this
   // run are bound to the same Telegram message_id. Replying "อนุมัติ" once
   // confirms the entire REMOVED batch.
@@ -6552,11 +6608,18 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     operationalErrorCount > 0 ? `System sync warning: ${operationalErrorCount}` : null,
   ].filter(Boolean);
 
+  if (active.length > 0) {
+    resultLines.push("", `❌ ยังอยู่ (${active.length})`);
+    active.forEach((item, index) => {
+      resultLines.push(formatCheckItem(item, index));
+    });
+  }
+
   if (suspected.length > 0) {
     resultLines.push("", `🚨 REMOVED (${suspected.length})`);
     suspected.forEach((item, index) => {
       resultLines.push(
-        `${index + 1}. ${item.businessName || "-"}`,
+        formatCheckItem(item, index),
         item.reviewUrl || "-"
       );
     });
@@ -6566,7 +6629,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     resultLines.push("", `⚠️ ไม่ชัดเจน (${errors.length})`);
     errors.forEach((item, index) => {
       resultLines.push(
-        `${index + 1}. ${item.businessName || "-"}`,
+        formatCheckItem(item, index),
         item.reviewUrl || "-",
         `เหตุผล: ${item.error || "UNKNOWN"}`
       );
@@ -6584,6 +6647,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   }
 
   let resultText = resultLines.join("\n");
+  let overflowActiveDetails = [];
   if (resultText.length > 4050) {
     // Telegram has a 4096-character message limit. Keep the approval card
     // single-message and retain every Job ID even if very long URLs must be
@@ -6593,10 +6657,15 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
       `ตรวจทั้งหมด: ${jobs.length} | ยังอยู่: ${visibleCount} | REMOVED: ${suspectedRemovedCount} | ไม่ชัดเจน: ${errorCount}`,
     ];
 
+    if (active.length > 0) {
+      compactLines.push("", `❌ ยังอยู่ (${active.length}) — รายชื่อแยกในข้อความถัดไป`);
+      overflowActiveDetails = active.map((item, index) => formatCheckItem(item, index, true));
+    }
+
     if (suspected.length > 0) {
       compactLines.push("", `🚨 REMOVED (${suspected.length})`);
       suspected.forEach((item, index) => {
-        compactLines.push(`${index + 1}. ${item.businessName || "-"} | Job ${item.jobId}`);
+        compactLines.push(formatCheckItem(item, index, true));
       });
       compactLines.push(
         "",
@@ -6617,6 +6686,25 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     triggerMessageId,
     resultText
   );
+
+  // Extra detail is only needed when the approval/summary card exceeds
+  // Telegram's message limit. These messages do NOT change approval binding.
+  if (overflowActiveDetails.length > 0) {
+    try {
+      let chunk = `❌ ${targetCode} ยังอยู่ — ชื่อลูกค้า | ชื่อแมพ`;
+      for (const line of overflowActiveDetails) {
+        if ((chunk + "\n" + line).length > 3400) {
+          await sendTelegramText({ chatId, text: chunk });
+          chunk = `❌ ${targetCode} ยังอยู่ (ต่อ)`;
+        }
+        chunk += `\n${line}`;
+      }
+      if (chunk.trim()) await sendTelegramText({ chatId, text: chunk });
+    } catch (error) {
+      // Secondary detail messages must not block REMOVED batch approval binding.
+      console.error(`TELEGRAM ${targetCode} ACTIVE DETAILS SEND FAILED:`, error);
+    }
+  }
 
   if (suspected.length > 0) {
     const alertedAt = new Date().toISOString();
@@ -23406,6 +23494,19 @@ applyKtcBillerRecipientOverride({
     imageClassification,
 });
 
+if (Array.isArray(paymentVerification.reasons) &&
+    paymentVerification.reasons.includes("BILLER_ID_MISMATCH")) {
+  console.warn("GMR PAYMENT BILLER ID NEEDS REVIEW:", {
+    customerId: customer.id,
+    jobId: paymentJob.id,
+    recipientBillerIdParsed: imageClassification.recipientBillerId || null,
+    recipientCardLast4Parsed: imageClassification.recipientCardLast4 || null,
+    recipientNameParsed: imageClassification.recipientName ||
+      imageClassification.recipientBankOrBiller || null,
+    reasons: paymentVerification.reasons,
+  });
+}
+
 
 const transactionReference =
   imageClassification.reference
@@ -24366,6 +24467,19 @@ applyKtcBillerRecipientOverride({
   classification:
     imageClassification,
 });
+
+if (Array.isArray(paymentVerification.reasons) &&
+    paymentVerification.reasons.includes("BILLER_ID_MISMATCH")) {
+  console.warn("GMR PAYMENT BILLER ID NEEDS REVIEW:", {
+    customerId: customer.id,
+    jobId: paymentJob.id,
+    recipientBillerIdParsed: imageClassification.recipientBillerId || null,
+    recipientCardLast4Parsed: imageClassification.recipientCardLast4 || null,
+    recipientNameParsed: imageClassification.recipientName ||
+      imageClassification.recipientBankOrBiller || null,
+    reasons: paymentVerification.reasons,
+  });
+}
 
   const transactionReference = imageClassification.reference
     ? String(imageClassification.reference).trim()
