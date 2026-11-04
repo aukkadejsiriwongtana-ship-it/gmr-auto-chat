@@ -2707,6 +2707,28 @@ export async function createPayment({
   return data;
 }
 
+
+export async function getPaymentById(paymentId) {
+  const id = String(paymentId || "").trim();
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+  ) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_payments")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) throw error;
+
+  return data;
+}
+
+
 export async function getPaymentByLineGroupMessageId(
   lineGroupMessageId
 ) {
