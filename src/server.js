@@ -10582,6 +10582,19 @@ function looksLikeReviewSelectionPhrase(value) {
   return /^(?:please\s+)?(?:use|choose|take|do|handle)\s+(?:this|that)(?:\s+one|\s+review)?(?:\s+please)?$/i.test(text);
 }
 
+// A brief confirmation often refers to a Map already discussed by a human
+// in LINE OA. Such outbound human messages are not necessarily saved in the
+// inbound webhook DB. Never misinterpret this as an invitation to ask again.
+function isContextualCustomerConfirmation(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.!?。！？，,]+$/g, "");
+
+  return /^(?:ใช่|ใช่แล้ว|ถูกต้อง|ส่งแล้ว|ส่งให้แล้ว|ส่งไปแล้ว|ส่งให้ไปแล้ว|ให้ไปแล้ว|อันนี้|อันนั้น|ตามนั้น|yes|yep|correct|already sent|sent it)(?:ครับ|ค่ะ|คะ|ครับผม|จ้า|แล้ว|แล้วครับ|แล้วค่ะ)?$/i.test(text);
+}
+
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
   const text = normalizeInboundUrlText(message).trim();
   if (!text) return { actionable: false, inputType: null, payload: null };
@@ -10796,7 +10809,7 @@ async function handleV2NewCustomerInbound({
   if (faqMatch?.reply) {
     let botReply = faqMatch.reply;
 
-    if (!lead?.info_requested_at) {
+    if (!lead?.info_requested_at && !lead?.info_received_at && !isContextualCustomerConfirmation(message)) {
       botReply = `${botReply}\n\n${getLeadRequestText(customer)}`;
       await updateSalesLead(customer.id, {
         info_requested_at: new Date().toISOString(),
@@ -10834,8 +10847,33 @@ async function handleV2NewCustomerInbound({
     }
   }
 
+  // Customer confirms something already discussed with a human. We cannot
+  // rely on that outbound human message being visible in the webhook DB.
+  // Pass to Sales instead of asking the same question again.
+  if (isContextualCustomerConfirmation(message)) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason: "V2_CONTEXT_CONFIRMATION_NEEDS_SALES",
+    });
+    return {
+      handled: true,
+      result: {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        botReply: null,
+        softHandoff: true,
+        note: "Customer confirmed prior context; Sales notified, no repeated Map request.",
+      },
+    };
+  }
+
   // 4) First non-FAQ contact: ask for Map/business once only.
-  if (!lead?.info_requested_at) {
+  // Do not ask if the Sales Lead already contains a submitted Map/review.
+  if (!lead?.info_requested_at && !lead?.info_received_at) {
     const botReply = getLeadRequestText(customer);
 
     await updateSalesLead(customer.id, {
@@ -22491,6 +22529,54 @@ const screenshotReviewText =
     ""
   ).trim();
 
+// V2 new customers are Sales-controlled. A Map URL shared by a human agent
+// in LINE OA is not guaranteed to be stored in gmr_jobs. Therefore, when
+// a new customer sends a review screenshot, send it to Sales for context
+// matching instead of requesting the Map again or guessing the business.
+const screenshotHasPaidHistory = await hasPaymentByCustomerId(customer.id);
+if (!screenshotHasPaidHistory) {
+  await triggerHumanAttention({
+    customer,
+    conversation,
+    message: [
+      "ลูกค้าใหม่ส่งรูปรีวิวผ่าน LINE OA",
+      `Business from screenshot: ${businessName || "-"}`,
+      `Reviewer: ${screenshotReviewerName || "-"}`,
+      `Rating: ${screenshotRating || "-"}`,
+      `Review: ${screenshotReviewText || "-"}`,
+      "กรุณาตรวจ Map ที่คุยกับลูกค้าใน LINE OA เดิม อย่าขอ Map ซ้ำ",
+    ].join("\n"),
+    reason: "V2_NEW_CUSTOMER_REVIEW_SCREENSHOT_HUMAN_CONTEXT",
+  });
+
+  const receivedReply = getCustomerText(
+    customer,
+    "ได้รับรูปรีวิวแล้วครับ ทีมงานกำลังตรวจสอบข้อมูลให้ครับ",
+    "We've received the review screenshot. Our team is checking the details."
+  );
+  const freshConversation = await getConversationByCustomerId(customer.id);
+  if (!shouldSuppressDuplicateBotReply({
+    conversation: freshConversation || conversation,
+    botReply: receivedReply,
+  })) {
+    await saveMessage({
+      customerId: customer.id,
+      platform: "line",
+      direction: "outbound",
+      messageType: "text",
+      messageText: receivedReply,
+    });
+    await updateLastBotMessage(customer.id, receivedReply);
+    await replyLineTextMessage(replyToken, receivedReply);
+  }
+
+  console.log("V2 REVIEW SCREENSHOT ROUTED TO SALES WITHOUT MAP REPROMPT:", {
+    customerId: customer.id,
+    reviewer: screenshotReviewerName || null,
+    business: businessName || null,
+  });
+  continue;
+}
 
 // ========================================
 // STEP 1
@@ -22596,11 +22682,24 @@ if (!placeId) {
     });
 
 
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message: [
+        "มีรูปรีวิว แต่ยังไม่พบ Map ที่ผูกกับ Job",
+        `Reviewer: ${screenshotReviewerName || "-"}`,
+        `Rating: ${screenshotRating || "-"}`,
+        `Review: ${screenshotReviewText || "-"}`,
+        "กรุณาตรวจ Map ในแชทเดิมก่อนขอข้อมูลลูกค้าเพิ่ม",
+      ].join("\n"),
+      reason: "REVIEW_SCREENSHOT_MAP_CONTEXT_MISSING",
+    });
+
     const botReply =
       getCustomerText(
         customer,
-        "รบกวนส่งลิงก์ Google Map ของธุรกิจมาก่อนครับ แล้วผมจะค้นหารีวิวในแมพให้",
-        "Please send the Google Maps link for the business first, and I'll locate this review on the map."
+        "ได้รับรูปรีวิวแล้วครับ ทีมงานกำลังตรวจสอบข้อมูลให้ครับ",
+        "We've received the review screenshot. Our team is checking the details."
       );
 
 
