@@ -6048,3 +6048,22 @@ export async function getCustomerMapsForCustomerMaster() {
 
   return data || [];
 }
+
+// V2.2 — Post-payment customer job-status reconciliation.
+// Read from gmr_jobs (source of truth), not the department sheets or
+// getJobsForReviewMonitoring(), which only returns "processing".
+export async function getJobsForCustomerPaymentFollowUp(customerId) {
+  const safeCustomerId = String(customerId || "").trim();
+  if (!safeCustomerId) {
+    throw new Error("Missing customerId for post-payment job check");
+  }
+
+  const { data, error } = await supabase
+    .from("gmr_jobs")
+    .select("id, status, business_name, review_url, created_at")
+    .eq("customer_id", safeCustomerId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw error;
+  return data || [];
+}
