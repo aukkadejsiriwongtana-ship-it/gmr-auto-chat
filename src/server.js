@@ -9633,6 +9633,25 @@ function thaiPhoneToE164(localPhone) {
   return `+66${digits.slice(1)}`;
 }
 
+// Capture international numbers without binding the customer to a job state.
+// Requires an explicit '+' country prefix to avoid treating reference numbers
+// or payment amounts as phone numbers.
+function extractInternationalPhoneE164(value) {
+  const text = String(value || "")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .trim();
+
+  const matched = text.match(
+    /(?:^|[^\d+])(\+[1-9](?:[\s().-]*\d){7,14})(?!\d)/
+  );
+  if (!matched) return null;
+
+  const normalized = `+${matched[1].replace(/\D/g, "")}`;
+  return /^\+[1-9]\d{7,14}$/.test(normalized)
+    ? normalized
+    : null;
+}
+
 function stripGoogleTrackingParams(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -12260,102 +12279,101 @@ let autoConfirmDirectMap =
   }
 
   // =======================================================
-  // GLOBAL 10-DIGIT PHONE CAPTURE — V2.2.15
-  // Store a Thai 10-digit phone whenever the customer sends it,
-  // regardless of the current conversation state. This does not
-  // force a state transition and does not send an extra bot reply.
+  // GLOBAL PHONE CAPTURE — TH + INTERNATIONAL
+  // No dependency on a job's state.
   // =======================================================
-  const capturedLocalPhone = extractThaiTenDigitPhone(message);
-  if (capturedLocalPhone) {
-    const capturedPhoneE164 = thaiPhoneToE164(capturedLocalPhone);
-    if (capturedPhoneE164 && String(customer.phone || "").trim() !== capturedPhoneE164) {
-      try {
-        await updateCustomerPhone(customer.id, capturedPhoneE164);
-        customer = { ...customer, phone: capturedPhoneE164 };
-        console.log("GLOBAL CUSTOMER PHONE CAPTURED:", {
-          customerId: customer.id,
-          platform,
-          phone: capturedPhoneE164,
-        });
-      } catch (phoneCaptureError) {
-        console.error("GLOBAL CUSTOMER PHONE CAPTURE FAILED:", {
-          customerId: customer.id,
-          platform,
-          error: phoneCaptureError?.message || String(phoneCaptureError),
-        });
-      }
+  const capturedPhoneE164 =
+    extractInternationalPhoneE164(message) ||
+    thaiPhoneToE164(extractThaiTenDigitPhone(message));
+
+  if (
+    capturedPhoneE164 &&
+    String(customer.phone || "").trim() !== capturedPhoneE164
+  ) {
+    try {
+      await updateCustomerPhone(customer.id, capturedPhoneE164);
+      customer = { ...customer, phone: capturedPhoneE164 };
+      console.log("GLOBAL CUSTOMER PHONE CAPTURED:", {
+        customerId: customer.id,
+        platform,
+        phone: capturedPhoneE164,
+      });
+    } catch (phoneCaptureError) {
+      console.error("GLOBAL CUSTOMER PHONE CAPTURE FAILED:", {
+        customerId: customer.id,
+        platform,
+        error: phoneCaptureError?.message || String(phoneCaptureError),
+      });
     }
   }
 
   // =======================================================
-// NEW CUSTOMER — ASK PHONE WHEN CUSTOMER TYPES "ยืนยัน"
-// ไม่เปลี่ยน State / ไม่หยุด Flow เดิม
-// =======================================================
-
-const normalizedPhoneConfirm =
-  String(message || "")
+  // NEW CUSTOMER — CONFIRM -> REQUEST PHONE
+  // The only decision criteria:
+  // 1) no verified payment history (isNewCustomer)
+  // 2) a standalone confirmation message
+  // Skip asking when a phone is already saved. Never gate on job state.
+  // Reply through the normal LINE/ManyChat inbound response path, so this
+  // turn cannot send an extra Map question or a duplicate direct push.
+  // =======================================================
+  const normalizedPhoneConfirm = String(message || "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[.!?。！？]+$/g, "")
+    .trim();
 
-const phoneConfirmWords = [
-  "ยืนยัน",
-  "ยืนยันครับ",
-  "ยืนยันค่ะ"
-];
+  const phoneConfirmWords = new Set([
+    "ยืนยัน",
+    "ยืนยันครับ",
+    "ยืนยันค่ะ",
+    "confirm",
+    "confirmed",
+  ]);
 
-if (
-  isNewCustomer &&
-  !String(customer.phone || "").trim() &&
-  phoneConfirmWords.includes(normalizedPhoneConfirm) &&
+  if (
+    isNewCustomer &&
+    !String(customer.phone || "").trim() &&
+    phoneConfirmWords.has(normalizedPhoneConfirm)
+  ) {
+    const phonePrompt = getCustomerText(
+      customer,
+      "รบกวนทิ้งเบอร์กรณีติดต่อไม่ได้ให้ด้วยครับ",
+      "Could you please share your phone number in case we can't reach you here? Please include your country code (e.g., +66)."
+    );
 
-  // 2 State นี้มีระบบถามเบอร์ของตัวเองอยู่แล้ว
-  // ป้องกันข้อความซ้ำ
-  conversation.state !== GMR_STATES.WAITING_CONFIRM &&
-  conversation.state !== GMR_STATES.WAITING_PHONE
-) {
-  const phonePrompt =
-    "รบกวนทิ้งเบอร์กรณีติดต่อไม่ได้ให้ด้วยครับ";
-
-  try {
-    await sendMessageToCustomer({
-      platform: customer.platform || platform,
-      platformUserId: customer.platform_user_id,
-      text: phonePrompt,
+    // Repeated Confirm immediately after the prompt must not duplicate it.
+    const freshConversation = await getConversationByCustomerId(customer.id);
+    const alreadyAsked = shouldSuppressDuplicateBotReply({
+      conversation: freshConversation || conversation,
+      botReply: phonePrompt,
     });
 
-    await saveMessage({
+    if (!alreadyAsked) {
+      await saveMessage({
+        customerId: customer.id,
+        platform,
+        direction: "outbound",
+        messageType: "text",
+        messageText: phonePrompt,
+      });
+      await updateLastBotMessage(customer.id, phonePrompt);
+    }
+
+    console.log("NEW CUSTOMER CONFIRM PHONE REQUEST:", {
       customerId: customer.id,
       platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: phonePrompt,
+      alreadyAsked,
     });
 
-    await updateLastBotMessage(
-      customer.id,
-      phonePrompt
-    );
-
-    console.log(
-      "NEW CUSTOMER PHONE PROMPT SENT:",
-      {
-        customerId: customer.id,
-        state: conversation.state,
-      }
-    );
-
-  } catch (phonePromptError) {
-    console.error(
-      "NEW CUSTOMER PHONE PROMPT FAILED:",
-      {
-        customerId: customer.id,
-        error:
-          phonePromptError?.message ||
-          String(phonePromptError),
-      }
-    );
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      phoneRequested: !alreadyAsked,
+      botReply: alreadyAsked ? null : phonePrompt,
+    };
   }
-}
 
   // =======================================================
   // REACTIVATION CUSTOMER RESPONSE
