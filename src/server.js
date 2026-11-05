@@ -12618,65 +12618,44 @@ if (
   welcomeWasSent &&
   wantsToStartService
 ) {
-    console.log(
-      "EXISTING CUSTOMER - MAP HISTORY:",
-      {
-        customerId: customer.id,
-        jobId: previousMapJob.id,
-        mapUrl: previousMapJob.map_url,
-      }
-    );
+  // Previously asked the customer to reconfirm the saved Map.
+  // Do not create a new Job or send a Map confirmation; the review link
+  // will identify the specific work on the next inbound message.
+  await updateConversationState({
+    customerId: customer.id,
+    state: GMR_STATES.WAITING_MAP,
+    handoff: false,
+    handoffReason: null,
+  });
 
-    await updateConversationState({
-      customerId: customer.id,
-      state:
-        GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION,
-      handoff: false,
-      handoffReason: null,
-    });
+  const botReply = getCustomerText(
+    customer,
+    "ได้รับข้อมูล Google Maps เดิมแล้วครับ รบกวนส่งลิงก์รีวิวที่ต้องการดำเนินการมาได้เลยครับ",
+    "We have your Google Maps listing on record. Please send the specific review link you would like us to handle."
+  );
+  await saveMessage({
+    customerId: customer.id,
+    platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: botReply,
+  });
+  await updateLastBotMessage(customer.id, botReply);
 
-    const template =
-      await getTemplate(
-        "confirm_map",
-        customer.language || "th"
-      );
-
-    if (!template) {
-      throw new Error(
-        "confirm_map template not found"
-      );
-    }
-
-    const botReply =
-      template.content.replace(
-        "{{map_url}}",
-        previousMapJob.map_url
-      );
-
-    await saveMessage({
-      customerId: customer.id,
-      platform,
-      direction: "outbound",
-      messageType: "text",
-      messageText: botReply,
-    });
-
-    await updateLastBotMessage(
-      customer.id,
-      botReply
-    );
-
-    return {
-      ok: true,
-      customerId: customer.id,
-      jobId: previousMapJob.id,
-      stateBefore: conversation.state,
-      stateAfter:
-        GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION,
-      resumedFromHistory: true,
-      botReply,
-    };
-  }
+  console.log("MAP CONFIRMATION SKIPPED FOR EXISTING CUSTOMER:", {
+    customerId: customer.id,
+    previousJobId: previousMapJob.id,
+  });
+  return {
+    ok: true,
+    customerId: customer.id,
+    stateBefore: conversation.state,
+    stateAfter: GMR_STATES.WAITING_MAP,
+    resumedFromHistory: true,
+    mapConfirmationSkipped: true,
+    botReply,
+  };
+}
 
     // -------------------------------------------------------
   // EXISTING CUSTOMER WITHOUT IMPORTED HISTORY
@@ -15428,8 +15407,41 @@ try {
     };
   }
 
-  // 2. ตอนนี้เลือกผลลัพธ์อันดับแรกจาก Google
-const place = places[0];
+  // Without an explicit Map URL, multiple similar Places are ambiguous.
+  // Accept a unique exact name match, or a single search result; otherwise
+  // request human verification rather than silently choosing the wrong shop.
+  const normalizeMapName = (value) => String(value || "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  const requestedMapName = normalizeMapName(message);
+  const exactMatches = places.filter((item) =>
+    normalizeMapName(item?.businessName) === requestedMapName
+  );
+  const matchingPlaces = exactMatches.length === 1
+    ? exactMatches
+    : places.length === 1
+      ? places
+      : [];
+
+  if (matchingPlaces.length !== 1) {
+    await triggerHumanAttention({
+      customer,
+      conversation,
+      message,
+      reason: "BUSINESS_NAME_AMBIGUOUS_MAP_RESULTS",
+    });
+    return {
+      ok: true,
+      customerId: customer.id,
+      stateBefore: conversation.state,
+      stateAfter: conversation.state,
+      botReply: null,
+      mapNeedsHumanReview: true,
+      softHandoff: true,
+    };
+  }
+  const place = matchingPlaces[0];
 
 
 const businessNameHasThai =
@@ -15470,118 +15482,45 @@ if (
 }
 
 
-// 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
-      
-  // 3. ดึง Template "ใช่ Google Map นี้ไหมครับ"
-  const template =
-    await getTemplate(
-      "confirm_map",
-      customer.language || "th"
-    );
+// Map lookup succeeded. Skip the yes/no Map confirmation completely.
+  // Reuse a pending draft for the same Place to prevent duplicate draft Jobs.
+  const previousDraft = await getLatestJobWithMapByCustomerId(customer.id);
+  let job = previousDraft &&
+    String(previousDraft.place_id || "") === String(place.placeId || "") &&
+    String(previousDraft.status || "").toLowerCase() === "draft"
+      ? previousDraft
+      : null;
 
-  if (!template) {
-    throw new Error(
-      "confirm_map template not found"
-    );
+  if (!job) {
+    job = await createJob({
+      customerId: customer.id,
+      businessName: place.businessName,
+      placeId: place.placeId,
+      mapUrl: place.mapUrl,
+      status: "draft",
+    });
   }
 
-
-  // 4. แทน {{map_url}} ด้วย URL จริง
-  const botReply =
-    template.content.replace(
-      "{{map_url}}",
-      place.mapUrl
-    );
-
-
-  // 5. สร้าง Draft Job เก็บข้อมูล Map ไว้
-  const job = await createJob({
-    customerId: customer.id,
-    businessName:
-      place.businessName,
-    placeId:
-      place.placeId,
-    mapUrl:
-      place.mapUrl,
-    status: "draft",
-  });
-
-
-  // 6. เปลี่ยน State
-  const nextState =
-    transitionState(
-      conversation.state,
-      GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION
-    );
-
-
+  // Reuse the existing safe automatic-confirmation path. It requests the
+  // exact review URL without asking the customer to reconfirm the Map.
+  const nextState = GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION;
   await updateConversationState({
     customerId: customer.id,
     state: nextState,
     handoff: false,
     handoffReason: null,
   });
+  conversation.state = nextState;
+  autoConfirmDirectMap = true;
 
-
-  // 7. บันทึกข้อความ Bot
-  await saveMessage({
+  console.log("BUSINESS MAP AUTO CONFIRMED (NO YES/NO):", {
     customerId: customer.id,
-    platform,
-    direction: "outbound",
-    messageType: "text",
-    messageText: botReply,
+    jobId: job.id,
+    placeId: place.placeId,
+    businessName: place.businessName,
   });
+  // No return: fall through into the existing auto-confirmation handler.
 
-
-  await updateLastBotMessage(
-    customer.id,
-    botReply
-  );
-
-
-  // 8. ส่งผลกลับ
-  return {
-    ok: true,
-
-    customerId:
-      customer.id,
-
-    jobId:
-      job.id,
-
-    stateBefore:
-      conversation.state,
-
-    stateAfter:
-      nextState,
-
-    inputType:
-      classification.type,
-
-    placeFound: true,
-
-    place: {
-      placeId:
-        place.placeId,
-
-      businessName:
-        place.businessName,
-
-      formattedAddress:
-        place.formattedAddress,
-
-      mapUrl:
-        place.mapUrl,
-
-      rating:
-        place.rating,
-
-      userRatingCount:
-        place.userRatingCount,
-    },
-
-    botReply,
-  };
 }
 
 // -----------------------------------------------------
@@ -28777,101 +28716,119 @@ app.post("/sheet-control", async (req, res) => {
     ) {
 
       // ===================================================
-      // CANCEL JOB — V2.2.55
-      //
-      // Google Sheet T0_ACTIVE / T2_ACTIVE checkbox flow:
-      // 1) Apps Script sends CANCEL_JOB with the row Job ID.
-      // 2) Backend marks the canonical Job as cancelled.
-      // 3) Only after this response succeeds, Apps Script deletes the row.
-      //
-      // Safety: Active sheets can also contain waiting_payment jobs.
-      // Those must NOT be silently cancelled because removal was already
-      // confirmed and payment may still be due.
+      // CANCEL_JOB from JOBS_MASTER (column N) and T0/T2_ACTIVE.
+      // A cancelled job remains in JOBS_MASTER as history; the ACTIVE row
+      // may be removed after this request succeeds. Never notify customer.
       // ===================================================
-      if (
-        normalizedValue === "CANCEL_JOB" ||
-        compactValue === "CANCELJOB"
-      ) {
-        const currentStatus =
-          String(job.status || "")
-            .trim()
-            .toLowerCase();
+      if (normalizedValue === "CANCEL_JOB" || compactValue === "CANCELJOB") {
+        const currentStatus = String(job.status || "").trim().toLowerCase();
+        const cancelStatus = "credit_rejected"; // current DB constraint's terminal status
 
-        // Idempotent retry: credit_rejected is an existing gmr_jobs status
-        // accepted by the current DB constraint and is used as the terminal
-        // cancelled/rejected state for jobs that must no longer run.
-        if (currentStatus === "credit_rejected") {
+        if (currentStatus === cancelStatus) {
           return res.status(200).json({
-            ok: true,
-            action: "manual_action",
-            value: "CANCEL_JOB",
-            jobId: job.id,
-            customerId: customer.id,
-            status: "credit_rejected",
-            cancelled: true,
-            alreadyCancelled: true,
-            deleteSheetRow: true,
-            customerNotified: false,
+            ok: true, action: "manual_action", value: "CANCEL_JOB",
+            jobId: job.id, customerId: customer.id,
+            status: cancelStatus, cancelled: true, alreadyCancelled: true,
+            deleteSheetRow: true, customerNotified: false,
           });
         }
 
-        if (
-          [
-            "waiting_payment",
-            "paid",
-            "completed",
-          ].includes(currentStatus) ||
-          Boolean(job.removed_at)
-        ) {
+        const blockedBecauseRemoval = Boolean(
+          job.removed_at || job.review_removed_detected_at ||
+          Number(job.review_missing_count || 0) > 0
+        );
+        const cancellableStatuses = new Set([
+          "queued", "processing", "draft", "waiting_price",
+          "waiting_credit_approval", "existing_batch_draft",
+        ]);
+
+        // In-flight dispatching is not cancellable by a spreadsheet edit.
+        if (blockedBecauseRemoval || !cancellableStatuses.has(currentStatus)) {
           return res.status(409).json({
             ok: false,
             error: "JOB_NOT_SAFE_TO_CANCEL",
-            message:
-              currentStatus === "waiting_payment" || Boolean(job.removed_at)
-                ? "Review removal was already confirmed / payment may still be due. Cancel from Active Sheet is blocked."
-                : `Job status ${currentStatus || "-"} cannot be cancelled from Active Sheet.`,
+            message: blockedBecauseRemoval
+              ? "Review removal may already have occurred. Manual finance review is required."
+              : `Job status ${currentStatus || "-"} is not cancellable from JOBS_MASTER.`,
             jobId: job.id,
             status: currentStatus,
             deleteSheetRow: false,
           });
         }
 
-        if (currentStatus !== "processing") {
-          return res.status(409).json({
-            ok: false,
-            error: "JOB_NOT_PROCESSING",
-            message: `Only processing jobs can be cancelled from T0/T2 Active Sheet. Current status: ${currentStatus || "-"}`,
+        // First persist the canonical state in Supabase. Monitor/dispatch
+        // queries must no longer see a queued/processing job.
+        await updateJob(job.id, { status: cancelStatus });
+
+        // Sheet sync and department notification are best-effort; their
+        // failure must never cause a cancelled job to be marked active again.
+        let sheetSyncOk = false;
+        let sheetSyncError = null;
+        try {
+          await updateJobInGoogleSheet({
             jobId: job.id,
-            status: currentStatus,
-            deleteSheetRow: false,
+            status: cancelStatus,
+          });
+          sheetSyncOk = true;
+        } catch (error) {
+          sheetSyncError = error?.message || String(error);
+          console.error("JOBS_MASTER CANCEL SYNC FAILED:", {
+            jobId: job.id, error: sheetSyncError,
           });
         }
 
-        await updateJob(job.id, {
-          // The current gmr_jobs_status_check does not allow "cancelled".
-          // credit_rejected is already supported and excluded from processing
-          // workflows, so use it as the persisted terminal cancel state.
-          status: "credit_rejected",
-        });
+        let departmentNotified = false;
+        if (currentStatus === "processing") {
+          try {
+            const departments = await getActiveDepartments();
+            const department = (departments || []).find((item) =>
+              String(item.id || "") === String(job.department_id || "")
+            );
+            const targetChatId = getTelegramDepartmentChatId(department?.code);
+            if (targetChatId) {
+              await sendTelegramText({
+                chatId: targetChatId,
+                text: [
+                  "🛑 ยกเลิกงาน — หยุดดำเนินการ",
+                  `Job: ${job.id}`,
+                  `Customer: ${customer.display_name || "-"}`,
+                  `Business: ${job.business_name || "-"}`,
+                  job.review_url ? `Review: ${job.review_url}` : "",
+                  "ยกเลิกจาก JOBS_MASTER / Sheet Control",
+                ].filter(Boolean).join("\n"),
+              });
+              departmentNotified = true;
+            }
+          } catch (error) {
+            console.error("CANCEL JOB DEPARTMENT NOTIFY FAILED:", {
+              jobId: job.id, error: error?.message || String(error),
+            });
+          }
+        }
 
-        console.log("SHEET ACTIVE JOB CANCELLED:", {
-          jobId: job.id,
-          customerId: customer.id,
-          previousStatus: currentStatus,
-          customerNotify: false,
-        });
-
-        return res.status(200).json({
-          ok: true,
-          action: "manual_action",
-          value: "CANCEL_JOB",
-          jobId: job.id,
-          customerId: customer.id,
-          previousStatus: currentStatus,
-          status: "credit_rejected",
-          cancelled: true,
-          deleteSheetRow: true,
+        console.log("SHEET JOB CANCELLED:", {
+          jobId: job.id, customerId: customer.id,
+          previousStatus: currentStatus, status: cancelStatus,
+          sheetSyncOk, departmentNotified,
           customerNotified: false,
+        });
+        return res.status(200).json({
+          ok: true, action: "manual_action", value: "CANCEL_JOB",
+          jobId: job.id, customerId: customer.id,
+          previousStatus: currentStatus, status: cancelStatus,
+          cancelled: true, deleteSheetRow: true,
+          customerNotified: false, sheetSyncOk, sheetSyncError,
+          departmentNotified,
+        });
+      }
+
+      // Refuse all other manual actions on already cancelled jobs.
+      if (String(job.status || "").trim().toLowerCase() === "credit_rejected") {
+        return res.status(409).json({
+          ok: false,
+          error: "JOB_ALREADY_CANCELLED",
+          jobId: job.id,
+          status: "credit_rejected",
         });
       }
 
