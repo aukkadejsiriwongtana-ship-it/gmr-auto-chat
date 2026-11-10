@@ -4257,8 +4257,7 @@ await markDispatchStuckAlerted({
               ...sheetSyncFailedJobIds.slice(0, 30).map((id) => `Job: ${id}`),
               'JOBS_MASTER may say processing while department ACTIVE lacks these rows.',
               'Use Apps Script gmrPreviewT2ActiveRepair then gmrRepairT2Active if T2.',
-            ].join('
-'));
+            ].join('\n'));
           } catch (telegramError) {
             console.error('SHEET SYNC ALERT FAILED:', telegramError);
           }
