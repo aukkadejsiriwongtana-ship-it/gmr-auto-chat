@@ -620,6 +620,7 @@ async function sendStartMessageToCustomerReliable({ customer, text }) {
 // Keep the legacy LINE group service untouched in the repository; this server no longer imports it.
 
 import {
+  supabase,
   getCustomerByPlatformUserId,
   getCustomerById,
   getConversationByCustomerId,
@@ -1120,6 +1121,268 @@ function getCustomerText(
   );
 }
 
+
+
+// =============================================================
+// T2_ACTIVE -- MANUAL 21+ DAY CONTINUATION PERMISSION
+// The operator selects ASK_CONTINUE in T2_ACTIVE. No automatic
+// calendar threshold is used. This state is separate from job.status.
+// SQL migration gmr_overdue_continue.sql is required before deployment.
+// =============================================================
+const OVERDUE_BLOCKING_STATUSES = ["pending", "send_failed", "cancel_requested"];
+
+async function getOverdueConsentByJobId(jobId) {
+  const { data, error } = await supabase
+    .from("gmr_overdue_continue")
+    .select("*")
+    .eq("job_id", jobId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function getBlockedOverdueJobIds() {
+  const { data, error } = await supabase
+    .from("gmr_overdue_continue")
+    .select("job_id")
+    .in("status", OVERDUE_BLOCKING_STATUSES);
+  if (error) throw error;
+  return new Set((data || []).map((x) => String(x.job_id)));
+}
+
+async function sendT2OverdueContinuationRequest({ job, customer }) {
+  const code = String(job.id).slice(0, 8).toUpperCase();
+  const message = getCustomerText(
+    customer,
+    [
+      "สวัสดีครับ ขออัปเดตงานตรวจสอบรีวิวของคุณครับ",
+      "",
+      "งานนี้ใช้เวลาดำเนินการเกินกรอบ 1–21 วันที่เคยแจ้งไว้ และยังไม่สำเร็จครับ",
+      "ทางเราจึงขออนุญาตสอบถามว่าคุณยังต้องการให้ดำเนินการต่อหรือไม่",
+      "",
+      `รหัสงาน: ${code}`,
+      `หากต้องการให้ดำเนินการต่อ กรุณาตอบ: ยืนยันดำเนินการต่อ ${code}`,
+      `หากต้องการยกเลิก กรุณาตอบ: ยกเลิกงาน ${code}`,
+      "",
+      "ระหว่างรอคำตอบ ทางเราจะพักการดำเนินการเพิ่มเติมไว้ก่อนครับ",
+    ].join("\n"),
+    [
+      "Hello, we'd like to update you on your review case.",
+      "",
+      "The case has exceeded the 1–21 day timeframe we previously communicated and is still unresolved.",
+      "Would you like us to continue working on it?",
+      "",
+      `Case code: ${code}`,
+      `To continue, reply: CONFIRM CONTINUE ${code}`,
+      `To cancel, reply: CANCEL JOB ${code}`,
+      "",
+      "Further work will remain on hold until we hear from you.",
+    ].join("\n")
+  );
+  const result = await sendMessageToCustomer({
+    platform: customer.platform,
+    platformUserId: customer.platform_user_id,
+    text: message,
+  });
+  assertOutboundSendAccepted(result, "OVERDUE_CONTINUATION_SEND");
+  await saveMessage({
+    customerId: customer.id,
+    platform: customer.platform,
+    direction: "outbound",
+    messageType: "text",
+    messageText: message,
+  });
+  await updateLastBotMessage(customer.id, message);
+  return message;
+}
+
+async function requestT2OverdueContinuation({ job, customer }) {
+  const route = await getDepartmentSheetRouteForJob(job);
+  if (route?.code !== "T2") {
+    return { ok: false, httpStatus: 409, error: "JOB_NOT_IN_T2" };
+  }
+  if (String(job.status || "").toLowerCase() !== "processing" ||
+      job.removed_at || job.review_removed_detected_at ||
+      Number(job.review_missing_count || 0) > 0) {
+    return {
+      ok: false, httpStatus: 409, error: "JOB_NOT_ELIGIBLE",
+      message: "Only unresolved processing T2 jobs can be queried."
+    };
+  }
+  if (!customer?.platform_user_id ||
+      !["line", "facebook_en", "facebook_th"].includes(String(customer.platform || "").toLowerCase())) {
+    return { ok: false, httpStatus: 409, error: "CUSTOMER_CANNOT_BE_MESSAGED" };
+  }
+
+  const existing = await getOverdueConsentByJobId(job.id);
+  if (existing) {
+    return { ok: false, httpStatus: 409, error: "CONTINUATION_ALREADY_REQUESTED",
+      status: existing.status, askedAt: existing.asked_at,
+      message: "A continuation request already exists for this job. Check the Sales alert / database; do not resend blindly." };
+  }
+
+  const { error: createError } = await supabase
+    .from("gmr_overdue_continue")
+    .insert({
+      job_id: job.id, customer_id: customer.id,
+      status: "pending", asked_at: new Date().toISOString(),
+      source: "T2_ACTIVE",
+    });
+  if (createError) {
+    if (String(createError.code) === "23505") {
+      return { ok: false, httpStatus: 409, error: "CONTINUATION_ALREADY_REQUESTED" };
+    }
+    throw createError;
+  }
+
+  let message;
+  try {
+    message = await sendT2OverdueContinuationRequest({ job, customer });
+  } catch (error) {
+    // Preserve a hold because a transport failure can be ambiguous (message
+    // may have reached the customer); never auto-retry this action.
+    await supabase.from("gmr_overdue_continue")
+      .update({ status: "send_failed", send_error: String(error?.message || error).slice(0, 1000) })
+      .eq("job_id", job.id).eq("status", "pending");
+    try {
+      await pushTelegramSales([
+        '⚠️ T2 ASK_CONTINUE — ส่งข้อความไม่สำเร็จ / ผลส่งไม่แน่ชัด',
+        `Customer: ${customer.display_name || '-'}`,
+        `Job: ${job.id}`,
+        `Platform: ${customer.platform || '-'}`,
+        `Error: ${String(error?.message || error).slice(0, 250)}`,
+        'กรุณาตรวจแชทลูกค้าก่อนลองส่งซ้ำ ระบบพักงานไว้แล้ว',
+        'Facebook อาจมีข้อจำกัดการส่งข้อความนอกช่วงสนทนาที่อนุญาต',
+      ].join('\n'));
+    } catch (alertError) {
+      console.error('OVERDUE SEND FAILED SALES ALERT FAILED:', alertError);
+    }
+    throw error;
+  }
+
+  try {
+    await pushTelegramSales([
+      "⏸️ T2 — ขอความยินยอมดำเนินงานต่อแล้ว",
+      `ลูกค้า: ${customer.display_name || "-"}`,
+      `ธุรกิจ: ${job.business_name || "-"}`,
+      `Job: ${job.id}`,
+      "สถานะ: WAITING_CUSTOMER_REPLY",
+      "ระหว่างรอ ห้ามดำเนินงานเพิ่มเติม / ห้ามอนุมัติเก็บเงิน",
+    ].join("\n"));
+  } catch (error) {
+    console.error("OVERDUE SALES ALERT FAILED:", error);
+  }
+  try {
+    const t2Chat = getTelegramInternalConfig()?.t2ChatId;
+    if (t2Chat) {
+      await sendTelegramText({
+        chatId: t2Chat,
+        text: ["⏸️ พักงาน T2 รอลูกค้ายืนยัน", `Job: ${job.id}`,
+          `Customer: ${customer.display_name || "-"}`,
+          `Business: ${job.business_name || "-"}`,
+          "กรุณาหยุดการดำเนินงานเพิ่มเติมจนกว่าจะได้รับแจ้งยืนยัน"].join("\n"),
+      });
+    }
+  } catch (error) {
+    console.error("OVERDUE T2 STOP ALERT FAILED:", error);
+  }
+  return { ok: true, status: "WAITING_REPLY", jobId: job.id,
+    customerId: customer.id, customerNotified: true, messageText: message };
+}
+
+function parseOverdueDecision(message) {
+  const value = String(message || "").trim().replace(/\s+/g, " ");
+  const confirm = value.match(/^(?:ยืนยันดำเนินการต่อ|ยืนยันให้ดำเนินการต่อ|confirm continue)(?:\s+([0-9a-f]{8}))?$/i);
+  if (confirm) return { status: "confirmed", code: (confirm[1] || "").toUpperCase() };
+  const cancel = value.match(/^(?:ยกเลิกงาน|cancel job)(?:\s+([0-9a-f]{8}))?$/i);
+  if (cancel) return { status: "cancel_requested", code: (cancel[1] || "").toUpperCase() };
+  return null;
+}
+
+async function handleOverdueContinuationInbound({ customer, conversation, platform, message, messageType }) {
+  if (messageType !== "text" || !String(message || "").trim()) return null;
+  const { data: pendingRows, error } = await supabase
+    .from("gmr_overdue_continue")
+    .select("job_id,status,asked_at")
+    .eq("customer_id", customer.id)
+    .in("status", OVERDUE_BLOCKING_STATUSES)
+    .order("asked_at", { ascending: false });
+  if (error) throw error;
+  if (!pendingRows?.length) return null;
+
+  const decision = parseOverdueDecision(message);
+  // No unrecognized reply should accidentally restart a pending job. Sales
+  // reviews free-text messages while the continuation request is outstanding.
+  const matching = decision
+    ? pendingRows.filter((row) => !decision.code ||
+        String(row.job_id).slice(0, 8).toUpperCase() === decision.code)
+    : [];
+  const resolved = Boolean(decision && matching.length === 1);
+  const text = resolved ? getCustomerText(
+    customer,
+    decision.status === "confirmed"
+      ? "ขอบคุณครับ เราได้รับคำยืนยันให้ดำเนินการต่อแล้วครับ"
+      : "รับทราบคำขอยกเลิกครับ ทีมงานจะตรวจสอบและยืนยันการปิดงานให้ทราบ โดยระหว่างนี้งานยังถูกพักไว้ครับ",
+    decision.status === "confirmed"
+      ? "Thank you. We've recorded your authorization to continue this case."
+      : "We've received your cancellation request. Our team will review and confirm closure; the case remains on hold in the meantime."
+  ) : (decision && matching.length !== 1 ? getCustomerText(
+    customer,
+    "มีงานที่รอการตอบหลายรายการ กรุณาตอบพร้อมรหัสงาน 8 ตัวตามข้อความที่ส่งให้ครับ",
+    "There are multiple pending cases. Please reply with the 8-character case code from the message we sent."
+  ) : null);
+
+  // This interception happens before the main inbound save in processTestMessage.
+  await saveMessage({ customerId: customer.id, platform, direction: "inbound",
+    messageType: "text", messageText: message });
+  await updateLastUserMessage(customer.id, message);
+
+  if (resolved) {
+    const target = matching[0];
+    const { data: updated, error: updateError } = await supabase
+      .from("gmr_overdue_continue")
+      .update({ status: decision.status, replied_at: new Date().toISOString(), reply_text: message })
+      .eq("job_id", target.job_id)
+      .in("status", OVERDUE_BLOCKING_STATUSES)
+      .select("job_id,status")
+      .maybeSingle();
+    if (updateError) throw updateError;
+    if (!updated) {
+      return { ok: true, botReply: null, alreadySent: false, softHandoff: true,
+        note: "Continuation was already handled concurrently." };
+    }
+    // Only explicit confirmation releases the hold; cancellation stays held.
+    try {
+      await pushTelegramSales([
+        decision.status === "confirmed" ? "✅ T2 ลูกค้ายืนยันดำเนินงานต่อ" : "🛑 T2 ลูกค้าขอยกเลิกงาน",
+        `Customer: ${customer.display_name || "-"}`,
+        `Job: ${target.job_id}`,
+        `คำตอบ: ${message}`,
+        decision.status === "confirmed" ? "ทีม T2 สามารถดำเนินการต่อได้" : "พักงานต่อ และให้ Sales ตรวจสอบการยกเลิกจาก JOBS_MASTER",
+      ].join("\n"));
+    } catch (alertError) { console.error("OVERDUE REPLY SALES ALERT FAILED:", alertError); }
+    if (decision.status === "confirmed") {
+      try {
+        const t2Chat = getTelegramInternalConfig()?.t2ChatId;
+        if (t2Chat) await sendTelegramText({ chatId: t2Chat,
+          text: `✅ T2 ลูกค้ายืนยันให้ดำเนินการต่อแล้ว\nJob: ${target.job_id}` });
+      } catch (alertError) { console.error("OVERDUE RESUME T2 ALERT FAILED:", alertError); }
+    }
+  } else if (!decision) {
+    try {
+      await triggerHumanAttention({ customer, conversation, message,
+        reason: "OVERDUE_CONTINUATION_AWAITING_REPLY" });
+    } catch (alertError) { console.error("OVERDUE FREE-TEXT SALES ALERT FAILED:", alertError); }
+  }
+  if (text) {
+    await saveMessage({ customerId: customer.id, platform, direction: "outbound",
+      messageType: "text", messageText: text });
+    await updateLastBotMessage(customer.id, text);
+  }
+  return { ok: true, customerId: customer.id, stateBefore: conversation?.state || null,
+    stateAfter: conversation?.state || null, botReply: text, softHandoff: !resolved,
+    overdueContinuation: resolved ? decision.status : "awaiting_reply" };
+}
 
 // =========================================================
 // POST-PAYMENT CUSTOMER FOLLOW-UP — per-customer, per-job.
@@ -3433,6 +3696,113 @@ async function sendDispatchStuckAlertToMainGroup({
   }
 }
 
+
+// =============================================================
+// T2_ACTIVE RECONCILIATION -- manual, idempotent repair
+// A job in JOBS_MASTER with status=processing is NOT proof it is
+// T2. Require the active T2 department, an actual dispatch_round_id,
+// an active processing status and a review URL. Google Apps Script's
+// dispatch_append deduplicates by Job ID in T2_ACTIVE.
+// =============================================================
+async function reconcileT2ActiveSheet({ apply = false, offset = 0, pageSize = 15 } = {}) {
+  const departments = await getActiveDepartments();
+  const t2 = (departments || []).find((d) => String(d.code || '').trim().toUpperCase() === 'T2');
+  if (!t2?.id) throw new Error('Active T2 department not configured');
+  const sheetName = String(t2.active_sheet_name || 'T2_ACTIVE').trim();
+  if (sheetName !== 'T2_ACTIVE') throw new Error(`T2 destination is ${sheetName}, not T2_ACTIVE; check department config`);
+
+  const safeOffset = Math.max(0, Math.min(10000, Number(offset) || 0));
+  const safePageSize = Math.max(1, Math.min(20, Number(pageSize) || 15));
+  const { data: candidates, error, count } = await supabase
+    .from('gmr_jobs')
+    .select('*', { count: 'exact' })
+    .eq('department_id', t2.id)
+    .eq('status', 'processing')
+    .order('created_at', { ascending: true })
+    .range(safeOffset, safeOffset + safePageSize - 1);
+  if (error) throw error;
+
+  const results = [];
+  for (const job of (candidates || [])) {
+    const row = { jobId: job.id, status: String(job.status || ''), action: 'skipped' };
+    if (!job.dispatch_round_id) {
+      row.reason = 'NO_DISPATCH_ROUND_NOT_SAFE_TO_REPAIR';
+      results.push(row); continue;
+    }
+    if (!String(job.review_url || '').trim()) {
+      row.reason = 'MISSING_REVIEW_URL';
+      results.push(row); continue;
+    }
+    if (job.removed_at || job.review_removed_detected_at || Number(job.review_missing_count || 0) > 0) {
+      row.reason = 'REMOVAL_ALREADY_DETECTED';
+      results.push(row); continue;
+    }
+    if (!apply) {
+      row.action = 'eligible_for_idempotent_sheet_sync';
+      results.push(row); continue;
+    }
+
+    try {
+      // Recheck immediately before writing, avoiding the common transition
+      // processing -> waiting_payment / paid during a manual repair.
+      const current = await getJobById(job.id);
+      if (!current || current.status !== 'processing' ||
+          current.department_id !== t2.id || !current.dispatch_round_id ||
+          current.removed_at || current.review_removed_detected_at ||
+          Number(current.review_missing_count || 0) > 0) {
+        row.reason = 'JOB_CHANGED_WHILE_REPAIRING';
+        results.push(row); continue;
+      }
+      const customer = await getCustomerById(current.customer_id);
+      const reviews = await getReviewsByJobId(current.id);
+      const selected = (reviews || []).find((review) => review?.selected_by_customer === true) ||
+        ((reviews || []).length === 1 ? reviews[0] : null);
+      const originalStartedAt = current.dispatched_at || current.started_at ||
+        current.queued_at || current.created_at || '';
+      const response = await appendDispatchJobToGoogleSheet({
+        sheetName,
+        dispatchRoundId: current.dispatch_round_id,
+        sentAt: originalStartedAt,
+        batchId: current.batch_id || '',
+        jobId: current.id,
+        customerName: customer?.display_name || '',
+        mapName: current.business_name || '',
+        reviewUrl: current.review_url,
+        reviewAge: selected ? getReviewAgeDays(selected) ?? '' : '',
+        startedAt: originalStartedAt,
+        status: 'processing',
+        removedAt: '', cycleCompleted: '', elapsedTime: '',
+      });
+      if (response === false || response?.ok === false || response?.success === false) {
+        throw new Error(`T2 sheet append returned unsuccessful response: ${JSON.stringify(response)}`);
+      }
+      row.action = response?.skipped ? 'already_in_sheet' : 'synced_or_already_present';
+      row.originalStartedAt = originalStartedAt || null;
+    } catch (syncError) {
+      row.action = 'error';
+      row.reason = String(syncError?.message || syncError).slice(0, 300);
+      console.error('T2 ACTIVE RECONCILE FAILED:', row);
+    }
+    results.push(row);
+  }
+
+  return {
+    ok: !results.some((row) => row.action === 'error'),
+    applied: Boolean(apply),
+    sheetName,
+    totalProcessingInT2: count ?? 0,
+    offset: safeOffset,
+    pageSize: safePageSize,
+    returned: (candidates || []).length,
+    nextOffset: safeOffset + (candidates || []).length < (count || 0)
+      ? safeOffset + (candidates || []).length : null,
+    warning: apply
+      ? 'Idempotent sheet append attempted; compare Job IDs in T2_ACTIVE after completion.'
+      : 'Preview includes ALL T2 processing candidates; not all necessarily missing from T2_ACTIVE.',
+    results,
+  };
+}
+
 // =========================================================
 // RUN DEPARTMENT DISPATCH
 //
@@ -3723,6 +4093,7 @@ await markDispatchStuckAlerted({
         // - sync JOBS_MASTER status
         // - append department active sheet
         // ========================================
+        const sheetSyncFailedJobIds = [];
 
         for (
           const job of
@@ -3805,10 +4176,9 @@ await markDispatchStuckAlerted({
                 : null;
 
 
-            await appendDispatchJobToGoogleSheet({
+            const sheetResult = await appendDispatchJobToGoogleSheet({
               sheetName:
-                department
-                  .active_sheet_name,
+                department.active_sheet_name || `${String(department.code || '').toUpperCase()}_ACTIVE`,
 
               dispatchRoundId,
 
@@ -3853,8 +4223,12 @@ await markDispatchStuckAlerted({
               elapsedTime:
                 "",
             });
+            if (sheetResult === false || sheetResult?.ok === false || sheetResult?.success === false) {
+              throw new Error(`Apps Script dispatch append rejected: ${JSON.stringify(sheetResult)}`);
+            }
 
           } catch (error) {
+            sheetSyncFailedJobIds.push(String(job.id));
             console.error(
               "DISPATCH GOOGLE SHEET FAILED:",
               {
@@ -3871,6 +4245,24 @@ await markDispatchStuckAlerted({
           }
         }
 
+
+        // Dispatch is already committed in Supabase. Do not silently hide
+        // a failed Sheets append; the Job will NOT be re-claimed automatically.
+        if (sheetSyncFailedJobIds.length > 0) {
+          try {
+            await pushTelegramSales([
+              '⚠️ GMR SHEET SYNC INCOMPLETE',
+              `Department: ${department.code || '-'}`,
+              `Rows not confirmed in ${department.active_sheet_name || department.code + '_ACTIVE'}: ${sheetSyncFailedJobIds.length}`,
+              ...sheetSyncFailedJobIds.slice(0, 30).map((id) => `Job: ${id}`),
+              'JOBS_MASTER may say processing while department ACTIVE lacks these rows.',
+              'Use Apps Script gmrPreviewT2ActiveRepair then gmrRepairT2Active if T2.',
+            ].join('
+'));
+          } catch (telegramError) {
+            console.error('SHEET SYNC ALERT FAILED:', telegramError);
+          }
+        }
 
         console.log(
           "DEPARTMENT DISPATCH COMPLETE:",
@@ -3891,14 +4283,11 @@ await markDispatchStuckAlerted({
           departmentCode:
             department.code,
 
-          dispatched:
-            true,
-
+          dispatched: true,
           dispatchRoundId,
-
-          jobCount:
-            completeResult
-              .dispatched_count,
+          jobCount: completeResult.dispatched_count,
+          sheetSyncFailedCount: sheetSyncFailedJobIds.length,
+          sheetSyncFailedJobIds,
         });
 
 
@@ -6529,8 +6918,10 @@ async function getMonitoringJobsForDepartmentCode(departmentCode) {
     ])
   );
 
+  const heldJobs = targetCode === "T2" ? await getBlockedOverdueJobIds() : new Set();
   const matched = [];
   for (const job of (jobs || [])) {
+    if (heldJobs.has(String(job.id))) continue;
     const directCode = String(
       departmentCodeById.get(String(job?.department_id || job?.departmentId || "")) || ""
     ).trim().toUpperCase();
@@ -9675,6 +10066,31 @@ app.post(
   }
 );
 
+
+// =========================================================
+// MANUAL REPAIR: processing T2 jobs that failed department sheet append.
+// This is NOT a new Dispatch, customer notification, or approval.
+// Preview: apply=false. Only apply=true may write to T2_ACTIVE.
+// =========================================================
+app.post('/reconcile-t2-active', async (req, res) => {
+  try {
+    const secret = String(req.body?.secret || '');
+    const expected = String(process.env.SHEET_CONTROL_SECRET || '');
+    if (!expected || secret !== expected) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+    const result = await reconcileT2ActiveSheet({
+      apply: req.body?.apply === true,
+      offset: req.body?.offset,
+      pageSize: req.body?.pageSize,
+    });
+    return res.status(result.ok ? 200 : 207).json(result);
+  } catch (error) {
+    console.error('RECONCILE T2 ACTIVE ERROR:', error);
+    return res.status(500).json({ ok: false, error: String(error?.message || error) });
+  }
+});
+
 // =========================================================
 // DEPARTMENT DISPATCH ENDPOINT
 // ใช้สำหรับ Cron / Manual Trigger
@@ -12127,6 +12543,13 @@ let conversation =
   await getOrCreateConversation(
     customer.id
   );
+
+// A T2 continuation request must take precedence over the normal bot and
+// legacy/FAQ flows; otherwise the customer can get an unrelated Maps prompt.
+const pendingOverdueReply = await handleOverdueContinuationInbound({
+  customer, conversation, platform, message, messageType,
+});
+if (pendingOverdueReply) return pendingOverdueReply;
 
 // =========================================================
 // LEGACY CUSTOMER AUTO MATCH CHECK
@@ -29012,6 +29435,28 @@ app.post("/sheet-control", async (req, res) => {
       action === "manual_action"
     ) {
 
+      // Read-only refresh for the Follow-up Status column in T2_ACTIVE.
+      if (normalizedValue === "CHECK_CONTINUE") {
+        if (String(req.body?.sheetName || "").trim().toUpperCase() !== "T2_ACTIVE") {
+          return res.status(403).json({ ok: false, error: "T2_ACTIVE_ONLY" });
+        }
+        const authorization = await getOverdueConsentByJobId(job.id);
+        return res.status(200).json({ ok: true, jobId: job.id,
+          status: authorization?.status?.toUpperCase() || "NOT_REQUESTED",
+          askedAt: authorization?.asked_at || null,
+          repliedAt: authorization?.replied_at || null });
+      }
+
+      // Explicit, staff-selected continuation question from T2_ACTIVE.
+      // Do not rely on age calculation or alter the canonical job status.
+      if (normalizedValue === "ASK_CONTINUE") {
+        if (String(req.body?.sheetName || "").trim().toUpperCase() !== "T2_ACTIVE") {
+          return res.status(403).json({ ok: false, error: "T2_ACTIVE_ONLY" });
+        }
+        const result = await requestT2OverdueContinuation({ job, customer });
+        return res.status(result.httpStatus || (result.ok ? 200 : 409)).json(result);
+      }
+
       // ===================================================
       // CANCEL_JOB from JOBS_MASTER (column N) and T0/T2_ACTIVE.
       // A cancelled job remains in JOBS_MASTER as history; the ACTIVE row
@@ -29145,6 +29590,15 @@ app.post("/sheet-control", async (req, res) => {
   normalizedValue ===
   "CONFIRM_REMOVED"
 ) {
+
+  const overdueConsent = await getOverdueConsentByJobId(job.id);
+  if (overdueConsent && OVERDUE_BLOCKING_STATUSES.includes(overdueConsent.status)) {
+    return res.status(409).json({ ok: false,
+      error: "OVERDUE_CUSTOMER_PERMISSION_REQUIRED",
+      message: "Job is on hold pending customer confirmation / cancellation review.",
+      jobId: job.id, overdueStatus: overdueConsent.status,
+    });
+  }
 
   // Idempotency: a retry must never charge/notify/KPI twice.
   // V2.2.28 also uses the retry to self-heal Sheet state if a previous
@@ -30424,6 +30878,7 @@ app.post(
 
       const jobs =
         await getJobsForReviewMonitoring();
+      const heldOverdueJobs = await getBlockedOverdueJobIds();
 
       const monitorRunId =
         crypto.randomUUID();
@@ -30452,6 +30907,10 @@ app.post(
       for (
         const job of jobs
       ) {
+        if (heldOverdueJobs.has(String(job.id))) {
+          results.push({ jobId: job.id, result: "ON_HOLD_AWAITING_CUSTOMER" });
+          continue;
+        }
 
         const reviewUrl =
           String(
