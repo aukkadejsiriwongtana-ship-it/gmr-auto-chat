@@ -5287,6 +5287,65 @@ ${thaiPriceLines.join("\n")}
   }
 
 
+  // V2.2.43 — Language and payment currency are independent.
+  // A THB job for an English-speaking customer must remain THB but read in English.
+  // A USD job for a Thai-speaking customer must remain USD but read in Thai.
+  const startNoticeLanguage =
+    String(customer?.platform || "").trim().toLowerCase() === "facebook_en" ||
+    String(customer?.language || "").trim().toLowerCase() === "en"
+      ? "en"
+      : "th";
+
+  if (startNoticeLanguage === "en" && hasTHB) {
+    const duration = hasUSD
+      ? "Estimated duration:\n• THB cases: 1–20 business days\n• USD cases: 1–14 days (depending on Google's system)"
+      : "Estimated duration: 1–20 business days";
+    const paymentMethod = hasUSD
+      ? "THB items are payable by QR scan (not bank transfer), while USD items are payable by Stripe (credit card)."
+      : "Payment for THB items is by QR scan only; bank transfer is not accepted.";
+    botReply = `We have started processing your review request.
+
+Total: ${startedJobs.length} review(s)
+
+Service fees:
+${englishPriceLines.join("\n")}
+
+${duration}
+
+🔥 We will notify you promptly once the review removal has been confirmed. 🔥
+
+📌 Terms & Conditions:
+1. ${paymentMethod}
+2. Payment is due immediately after a review is successfully removed.
+3. Once work begins, cancellation or changes are not permitted, including if a reviewer later agrees to remove their review. The agreed fee remains payable.
+4. Service fees are non-refundable once work has begun.
+5. A case is complete once the review has been removed and the customer has checked the result and paid.
+6. If payment is more than 7 days late after invoicing, we reserve the right to remove 5-star reviews from the Google Maps listing until payment is received.
+
+Note: If you are concerned about the payment deadline, you may request advance payment.`;
+  } else if (startNoticeLanguage === "th" && hasUSD && !hasTHB) {
+    botReply = `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
+
+จำนวนทั้งหมด ${startedJobs.length} รีวิว
+
+รายละเอียดค่าบริการ:
+${thaiPriceLines.join("\n")}
+
+ระยะเวลาดำเนินการโดยประมาณ: 1–14 วัน (ขึ้นอยู่กับระบบของ Google)
+
+🔥 เราจะแจ้งให้ทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
+
+📌 เงื่อนไขการให้บริการ:
+1. ชำระรายการ USD ผ่าน Stripe (บัตรเครดิต)
+2. ชำระค่าบริการทันทีหลังรีวิวถูกลบสำเร็จ
+3. เมื่อเริ่มงานแล้วไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ รวมถึงกรณีเจ้าของรีวิวยอมลบรีวิวเองภายหลัง โดยยังต้องชำระค่าบริการเต็มจำนวน
+4. ไม่สามารถขอคืนค่าบริการหลังเริ่มดำเนินการแล้ว
+5. ถือว่างานเสร็จสมบูรณ์เมื่อรีวิวถูกลบ ลูกค้าตรวจสอบผล และชำระเงินเรียบร้อย
+6. หากชำระล่าช้าเกิน 7 วันหลังวันเรียกเก็บเงิน ทางเราสงวนสิทธิ์ลบรีวิว 5 ดาวบน Google Maps จนกว่าจะชำระเงิน
+
+หมายเหตุ: หากกังวลเรื่องกำหนดชำระ สามารถขอชำระล่วงหน้าก่อนได้`;
+  }
+
   // ========================================
   // 5. SAVE OUTBOUND MESSAGE
   // ========================================
@@ -5428,6 +5487,51 @@ Duration: 1-14days(depends on GG system)
 Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
   }
 
+
+  // V2.2.43 — Start notice follows customer language, not currency.
+  const singleStartLanguage =
+    String(customer?.platform || "").trim().toLowerCase() === "facebook_en" ||
+    String(customer?.language || "").trim().toLowerCase() === "en"
+      ? "en"
+      : "th";
+
+  if (currency === "THB" && singleStartLanguage === "en") {
+    botReply = `We have started processing your review request.
+
+Service fee (payable after successful removal): ${formattedPrice} THB per review
+
+Estimated duration: 1–20 business days
+
+🔥 We will notify you promptly once the review removal has been confirmed. 🔥
+
+📌 Terms & Conditions:
+1. Payment is by QR scan only; bank transfer is not accepted.
+2. Payment is due immediately after a review is successfully removed.
+3. Once work begins, cancellation or changes are not permitted, including if a reviewer later agrees to remove their review. The agreed fee remains payable.
+4. Service fees are non-refundable once work has begun.
+5. A case is complete once the review has been removed and the customer has checked the result and paid.
+6. If payment is more than 7 days late after invoicing, we reserve the right to remove 5-star reviews from the Google Maps listing until payment is received.
+
+Note: If you are concerned about the payment deadline, you may request advance payment.`;
+  } else if (currency === "USD" && singleStartLanguage === "th") {
+    botReply = `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
+
+ค่าดำเนินการหลังลบรีวิวสำเร็จ: $${formattedPrice} USD/รีวิว
+
+ระยะเวลาดำเนินการโดยประมาณ: 1–14 วัน (ขึ้นอยู่กับระบบของ Google)
+
+🔥 เราจะแจ้งให้ทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
+
+📌 เงื่อนไขการให้บริการ:
+1. ชำระผ่าน Stripe (บัตรเครดิต)
+2. ชำระค่าบริการทันทีหลังรีวิวถูกลบสำเร็จ
+3. เมื่อเริ่มงานแล้วไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ รวมถึงกรณีเจ้าของรีวิวยอมลบรีวิวเองภายหลัง โดยยังต้องชำระค่าบริการเต็มจำนวน
+4. ไม่สามารถขอคืนค่าบริการหลังเริ่มดำเนินการแล้ว
+5. ถือว่างานเสร็จสมบูรณ์เมื่อรีวิวถูกลบ ลูกค้าตรวจสอบผล และชำระเงินเรียบร้อย
+6. หากชำระล่าช้าเกิน 7 วันหลังวันเรียกเก็บเงิน ทางเราสงวนสิทธิ์ลบรีวิว 5 ดาวบน Google Maps จนกว่าจะชำระเงิน
+
+หมายเหตุ: หากกังวลเรื่องกำหนดชำระ สามารถขอชำระล่วงหน้าก่อนได้`;
+  }
 
   // ========================================
   // QUEUE TIME
