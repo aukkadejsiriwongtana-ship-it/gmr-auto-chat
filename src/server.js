@@ -2559,6 +2559,54 @@ async function createManualAssignedWorkFromGroupText(groupText) {
     email: parsed.email,
   });
 
+  // Reuse a manual customer on repeat bulk submissions. The previous code
+  // created a fresh customer for every message without phone/email, which
+  // also defeated per-customer duplicate review detection.
+  let matchingManualCustomers = [];
+  if (!customer && parsed.customerName && !parsed.phone && !parsed.email) {
+    matchingManualCustomers = (await findCustomersByPlatformAndDisplayName({
+      platform: "manual",
+      displayName: parsed.customerName,
+    })).filter((item) =>
+      String(item?.display_name || "").trim().toLowerCase() ===
+      String(parsed.customerName).trim().toLowerCase() &&
+      (!item.platform_account || item.platform_account === "manual_internal")
+    );
+
+    if (matchingManualCustomers.length > 0) {
+      // Deterministic selection: latest matching manual customer.
+      customer = matchingManualCustomers[0];
+      if (matchingManualCustomers.length > 1) {
+        console.warn("MANUAL OUTWORK DUPLICATE CUSTOMER NAME:", {
+          name: parsed.customerName,
+          candidates: matchingManualCustomers.length,
+          selectedCustomerId: customer.id,
+        });
+      }
+    }
+  }
+
+  // Existing jobs for this exact manual name may have been created in an
+  // earlier split message under another manual customer ID. Detect exact URL
+  // matches across those historical same-name records before creating jobs.
+  const legacyManualJobsByUrl = new Map();
+  if (matchingManualCustomers.length > 1 && parsed.reviewUrls.length > 0) {
+    const manualIds = matchingManualCustomers.slice(0, 30).map((item) => item.id);
+    for (let index = 0; index < parsed.reviewUrls.length; index += 60) {
+      const urlSlice = parsed.reviewUrls.slice(index, index + 60);
+      const { data, error } = await supabase
+        .from("gmr_jobs")
+        .select("id,review_url,status,customer_id")
+        .in("customer_id", manualIds)
+        .in("review_url", urlSlice)
+        .limit(500);
+      if (error) throw error;
+      for (const job of data || []) {
+        legacyManualJobsByUrl.set(String(job.review_url), job);
+      }
+    }
+  }
+
   if (!customer) {
     customer = await createManualCustomer({
       platformUserId: `manual:${crypto.randomUUID()}`,
@@ -2656,7 +2704,10 @@ async function createManualAssignedWorkFromGroupText(groupText) {
       (await getJobByCustomerAndReviewUrl(customer.id, canonicalReviewUrl)) ||
       (canonicalReviewUrl !== originalUrl
         ? await getJobByCustomerAndReviewUrl(customer.id, originalUrl)
-        : null);
+        : null) ||
+      legacyManualJobsByUrl.get(canonicalReviewUrl) ||
+      legacyManualJobsByUrl.get(originalUrl) ||
+      null;
 
     if (duplicate) {
       createdJobs.push({
@@ -2688,6 +2739,10 @@ async function createManualAssignedWorkFromGroupText(groupText) {
       departmentId,
       status: departmentId ? "queued" : "processing",
     });
+
+    if (parsed.price < 2000 && parsed.currency !== "USD") {
+      throw new Error("MANUAL_CURRENCY_RULE_VIOLATION");
+    }
 
     job = await updateJob(job.id, {
       price: parsed.price,
@@ -3374,6 +3429,156 @@ async function replyTelegramInternal(chatId, incomingMessageId, text) {
     text,
     replyToMessageId: incomingMessageId,
   });
+}
+
+
+// =========================================================
+// GMR OUTWORK BULK INPUT — V2.2.XX
+// Telegram splits text at ~4096 chars and can split in the middle of a URL.
+// Never import a partial piece. Big text collects until "จบ" + count-confirm;
+// a .txt attachment is safer (the full content arrives as one document).
+// No DB schema change: sessions live only in this Node process. Lost sessions
+// fail closed and can be safely restarted using a .txt resend.
+// =========================================================
+const outworkInputSessions = new Map();
+const OUTWORK_TEXT_NEAR_LIMIT = 3200;
+const OUTWORK_MAX_URLS = 150;
+const OUTWORK_SESSION_TTL_MS = 60 * 60 * 1000;
+const OUTWORK_MAX_DOCUMENT_BYTES = 256 * 1024;
+
+function getOutworkSessionKey(chatId, actorId) {
+  return `${String(chatId)}:${String(actorId || "unknown")}`;
+}
+function getActiveOutworkSession(key) {
+  const session = outworkInputSessions.get(key);
+  if (!session) return null;
+  if (Date.now() - session.updatedAt > OUTWORK_SESSION_TTL_MS) {
+    outworkInputSessions.delete(key);
+    return null;
+  }
+  return session;
+}
+function joinTelegramSplitOutworkSegments(parts) {
+  const ordered = [...parts].sort((a, b) => a.messageId - b.messageId);
+  return ordered.reduce((text, item) => {
+    const next = String(item.text || "");
+    if (!text) return next;
+    // When a segment starts at the beginning of a NEW complete URL,
+    // preserve the URL boundary. Otherwise Telegram may have cut within
+    // an existing URL, so concatenate without injecting a newline.
+    if (/^https?:\/\//i.test(next) && !/\s$/.test(text)) {
+      return `${text}\n${next}`;
+    }
+    return text + next;
+  }, "");
+}
+function parseOutworkImportStrict(raw) {
+  const manualText = convertTelegramOutworkToManualText(raw);
+  const parsed = parseManualAssignedWorkText(manualText);
+  if (!parsed.customerName || !parsed.workType) {
+    throw new Error("OUTWORK_FORMAT_INVALID");
+  }
+  if (parsed.reviewUrls.length > OUTWORK_MAX_URLS) {
+    throw new Error("OUTWORK_TOO_MANY_URLS");
+  }
+  // Reject obviously cut or malformed links rather than silently importing
+  // just the initial portion. Short Google links remain supported.
+  for (const reviewUrl of parsed.reviewUrls) {
+    let url;
+    try { url = new URL(reviewUrl); } catch { throw new Error("OUTWORK_INCOMPLETE_URL"); }
+    const host = String(url.hostname || "").toLowerCase();
+    const isGoogle = host === "google.com" || host.endsWith(".google.com") ||
+      /^google\.[a-z.]+$/.test(host) || /\.google\.[a-z.]+$/.test(host);
+    const isShort = host === "maps.app.goo.gl" || host === "goo.gl" || host === "share.google";
+    if ((!isGoogle && !isShort) || reviewUrl.includes("https://", 8)) {
+      throw new Error("OUTWORK_INCOMPLETE_URL");
+    }
+    if (isGoogle && !/\/maps\/reviews\//i.test(url.pathname)) {
+      throw new Error("OUTWORK_INCOMPLETE_URL");
+    }
+    if (isGoogle && !/!3m1!1s/i.test(reviewUrl)) {
+      throw new Error("OUTWORK_INCOMPLETE_URL");
+    }
+  }
+  return { manualText, parsed };
+}
+function outworkPreviewText(parsed) {
+  return [
+    "📋 ตรวจรายการ Outwork ก่อนนำเข้า",
+    `ลูกค้า: ${parsed.customerName}`,
+    `แผนก: ${parsed.workType}`,
+    `ราคา: ${parsed.price.toLocaleString()} ${parsed.currency}/รีวิว`,
+    `ลิงก์ไม่ซ้ำ: ${parsed.reviewUrls.length} รายการ`,
+    "",
+    `หากครบ ให้พิมพ์: ยืนยัน ${parsed.reviewUrls.length}`,
+    "หากไม่ครบ ให้พิมพ์: ยกเลิกชุด แล้วส่งไฟล์ .txt ใหม่",
+    "⚠️ ยังไม่มีการสร้าง Job ในขั้นตอนนี้",
+  ].join("\n");
+}
+async function downloadTelegramOutworkDocument(document) {
+  const fileName = String(document?.file_name || "");
+  const size = Number(document?.file_size || 0);
+  if (!/\.txt$/i.test(fileName) || size <= 0 || size > OUTWORK_MAX_DOCUMENT_BYTES) {
+    throw new Error("OUTWORK_TXT_REQUIRED");
+  }
+  const { token } = getTelegramInternalConfig();
+  if (!token) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+  const api = await fetchWithNetworkRetry(
+    `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(document.file_id)}`,
+    {}, { attempts: 2, timeoutMs: 15000, label: "OUTWORK GET FILE" }
+  );
+  const json = await api.json();
+  const path = String(json?.result?.file_path || "");
+  if (!api.ok || !json?.ok || !path || !/^[-\w./]+$/.test(path)) {
+    throw new Error("OUTWORK_FILE_LOOKUP_FAILED");
+  }
+  const downloaded = await fetchWithNetworkRetry(
+    `https://api.telegram.org/file/bot${token}/${path}`,
+    {}, { attempts: 2, timeoutMs: 20000, label: "OUTWORK DOWNLOAD" }
+  );
+  if (!downloaded.ok) throw new Error("OUTWORK_FILE_DOWNLOAD_FAILED");
+  const bytes = await downloaded.arrayBuffer();
+  if (bytes.byteLength > OUTWORK_MAX_DOCUMENT_BYTES) throw new Error("OUTWORK_TXT_REQUIRED");
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+}
+function outworkCompactResult(result) {
+  const jobs = Array.isArray(result?.createdJobs) ? result.createdJobs : [];
+  const added = jobs.filter((job) => !job?.duplicate);
+  const duplicates = jobs.filter((job) => job?.duplicate);
+  const lines = [
+    "✅ เพิ่ม Outwork เข้าระบบเสร็จแล้ว",
+    `ลูกค้า: ${result?.customer?.display_name || "-"}`,
+    `แผนก: ${result?.parsed?.workType || "-"}`,
+    `ราคา: ${Number(result?.parsed?.price || 0).toLocaleString()} ${result?.parsed?.currency || "-"}/รีวิว`,
+    `ลิงก์ทั้งหมด: ${jobs.length}`,
+    `เพิ่มใหม่: ${added.length}`,
+    `มีในระบบแล้ว: ${duplicates.length}`,
+    "",
+    "Job ตัวอย่าง:",
+    ...jobs.slice(0, 5).map((item) => `${item?.duplicate ? "🔁" : "✅"} ${item.jobId}`),
+    ...(jobs.length > 5 ? [`... อีก ${jobs.length - 5} รายการ ตรวจทั้งหมดใน JOBS_MASTER`] : []),
+  ];
+  return lines.join("\n");
+}
+// Telegram webhook must receive a fast 200. Large imports are handled as a
+// tracked in-process task; if Render restarts, retry the same file. Existing
+// job detection prevents recreating the same exact review for the same name.
+function startOutworkImportInProcess({ chatId, messageId, manualText, count }) {
+  void (async () => {
+    try {
+      console.log("OUTWORK BULK IMPORT START:", { count, chatId });
+      const result = await createManualAssignedWorkFromGroupText(manualText);
+      await replyTelegramInternal(chatId, messageId, outworkCompactResult(result));
+      console.log("OUTWORK BULK IMPORT COMPLETE:", { chatId, jobs: result.createdJobs.length });
+    } catch (error) {
+      console.error("OUTWORK BULK IMPORT FAILED:", error);
+      try {
+        await replyTelegramInternal(chatId, messageId,
+          `❌ นำเข้า Outwork ไม่ครบ: ${String(error?.message || error).slice(0,250)}\n` +
+          "ตรวจ JOBS_MASTER ก่อนส่งไฟล์เดิมซ้ำ ระบบอาจสร้างงานบางรายการแล้ว");
+      } catch (notifyError) { console.error("OUTWORK FAILURE NOTIFICATION FAILED:", notifyError); }
+    }
+  })();
 }
 
 // Compatibility wrappers for old call sites that previously used lineGroupService.
@@ -7489,7 +7694,8 @@ const allowed = new Set(
       .map((entity) => String(entity.url).trim())
       .filter(Boolean);
     const groupText = [baseGroupText, ...entityUrls].filter(Boolean).join("\n").trim();
-    if (!groupText) return res.sendStatus(200);
+    const isOutworkDocumentMessage = Boolean(msg.document && String(msg.chat.id) === addOutworkChatId);
+    if (!groupText && !isOutworkDocumentMessage) return res.sendStatus(200);
 
     const normalizedGroupText = groupText.toLowerCase();
 
@@ -7575,148 +7781,147 @@ if (
 
 
 // -----------------------------------------------------
-// GMR ADD OUTWORK
-// Short format:
-//   5500 T2
-//   Customer Name
-//   https://review-url-1
-//   https://review-url-2
+// GMR ADD OUTWORK — small text auto-import / large text or TXT confirmation.
+// For a long paste Telegram can split mid-URL. Never process the first
+// fragment as though it were the entire work order.
 // -----------------------------------------------------
-if (
-  addOutworkChatId &&
-  chatId === addOutworkChatId
-) {
-  try {
-    const manualText =
-      convertTelegramOutworkToManualText(groupText);
+if (addOutworkChatId && chatId === addOutworkChatId) {
+  const sessionKey = getOutworkSessionKey(chatId, actorId);
+  let session = getActiveOutworkSession(sessionKey);
+  const isCompleteCommand = /^(?:จบ|done|end)$/i.test(groupText);
+  const isCancelCommand = /^(?:ยกเลิกชุด|cancel batch|cancel outwork)$/i.test(groupText);
+  const confirmMatch = groupText.match(/^(?:ยืนยัน|confirm)\s+(\d+)$/i);
+  const hasHeader = /^\s*[\$฿]?\s*\d[\d,.]*(?:\.\d+)?\s*(?:THB|USD|บาท|\$)?\s*T[02]\b/i.test(groupText);
 
-    const result =
-      await createManualAssignedWorkFromGroupText(
-        manualText
-      );
-
-    const createdJobs =
-      Array.isArray(result?.createdJobs)
-        ? result.createdJobs
-        : [];
-
-    const newJobs =
-      createdJobs.filter(
-        (item) => item?.duplicate !== true
-      );
-
-    const duplicateJobs =
-      createdJobs.filter(
-        (item) => item?.duplicate === true
-      );
-
-    const lines = [
-      "✅ เพิ่ม Outwork เข้าระบบแล้ว",
-      "",
-      `ลูกค้า: ${result?.customer?.display_name || "-"}`,
-      `ประเภท: ${result?.parsed?.workType || "-"}`,
-      `ราคา: ${Number(result?.parsed?.price || 0).toLocaleString()} ${result?.parsed?.currency || "THB"}/รีวิว`,
-      `จำนวนทั้งหมด: ${createdJobs.length} รีวิว`,
-      `เพิ่มใหม่: ${newJobs.length}`,
-    ];
-
-    if (duplicateJobs.length > 0) {
-      lines.push(
-        `รายการซ้ำ: ${duplicateJobs.length}`
-      );
-    }
-
-    lines.push("");
-
-    createdJobs.forEach((item, index) => {
-      lines.push(
-        `${index + 1}. ${
-          item?.duplicate
-            ? "⚠️ มีในระบบแล้ว"
-            : "✅ เพิ่มสำเร็จ"
-        }`,
-        `Job: ${item?.jobId || "-"}`,
-        `${item?.reviewUrl || "-"}`
-      );
-    });
-
-    await replyTelegramInternal(
-      chatId,
-      msg.message_id,
-      lines.join("\n")
-    );
-  } catch (error) {
-    console.error(
-      "TELEGRAM ADD OUTWORK FAILED:",
-      error
-    );
-
-    let message =
-      `❌ เพิ่ม Outwork ไม่สำเร็จ: ${error?.message || String(error)}`;
-
-    if (
-      error?.message ===
-      "OUTWORK_FORMAT_INVALID"
-    ) {
-      message =
-        "❌ รูปแบบไม่ถูกต้อง\n\nกรุณาส่งตามรูปแบบ:\n\n5500 T2\nชื่อลูกค้า\nReview Link 1\nReview Link 2";
-    } else if (
-      error?.message ===
-      "OUTWORK_TYPE_INVALID"
-    ) {
-      message =
-        "❌ ไม่พบประเภทงาน\n\nบรรทัดแรกต้องมี T0 หรือ T2\nตัวอย่าง: 5500 T2";
-    } else if (
-      error?.message ===
-      "OUTWORK_PRICE_INVALID"
-    ) {
-      message =
-        "❌ ราคาไม่ถูกต้อง\n\nตัวอย่าง:\n5500 T2\nหรือ\n$159 T0";
-    } else if (
-      error?.message ===
-      "OUTWORK_CUSTOMER_REQUIRED"
-    ) {
-      message =
-        "❌ กรุณาระบุชื่อลูกค้าในบรรทัดที่ 2";
-    } else if (
-      error?.message ===
-      "OUTWORK_NO_REVIEW_URL" ||
-      error?.message ===
-      "MANUAL_WORK_NO_REVIEW_URL"
-    ) {
-      message =
-        "❌ ไม่พบ Review Link กรุณาใส่ลิงก์ตั้งแต่บรรทัดที่ 3 เป็นต้นไป";
-    } else if (
-      error?.message ===
-      "MANUAL_WORK_TYPE_REQUIRED"
-    ) {
-      message =
-        "❌ ระบบไม่สามารถระบุแผนก T0/T2 ได้";
-    } else if (
-      String(error?.message || "").startsWith(
-        "MANUAL_WORK_TYPE_MISMATCH:"
-      )
-    ) {
-      const parts =
-        String(error.message).split(":");
-
-      message =
-        `❌ ประเภทงานไม่ตรงกับอายุรีวิว\n\n` +
-        `เซลล์ระบุ: ${parts[1] || "-"}\n` +
-        `ระบบตรวจพบ: ${parts[2] || "-"}\n\n` +
-        `กรุณาตรวจสอบก่อนเพิ่มใหม่`;
-    }
-
-    await replyTelegramInternal(
-      chatId,
-      msg.message_id,
-      message
-    );
+  if (isCancelCommand) {
+    outworkInputSessions.delete(sessionKey);
+    await replyTelegramInternal(chatId, msg.message_id, "✅ ยกเลิกชุด Outwork ที่พักไว้แล้ว ไม่ได้สร้าง Job เพิ่ม");
+    return res.sendStatus(200);
   }
 
+  if (confirmMatch) {
+    const confirmedCount = Number(confirmMatch[1]);
+    if (!session || session.mode !== "confirming") {
+      await replyTelegramInternal(chatId, msg.message_id, "⚠️ ไม่มีชุดที่รอยืนยัน ส่งข้อความงานหรือไฟล์ .txt ใหม่ได้เลยครับ");
+      return res.sendStatus(200);
+    }
+    if (confirmedCount !== session.parsed.reviewUrls.length) {
+      await replyTelegramInternal(chatId, msg.message_id,
+        `⚠️ จำนวนไม่ตรง ระบบอ่านได้ ${session.parsed.reviewUrls.length} ลิงก์ กรุณาตรวจแล้วพิมพ์ ยืนยัน ${session.parsed.reviewUrls.length}`);
+      return res.sendStatus(200);
+    }
+    outworkInputSessions.delete(sessionKey);
+    await replyTelegramInternal(chatId, msg.message_id,
+      `📥 เริ่มนำเข้า ${confirmedCount} รีวิวของ ${session.parsed.customerName} แล้ว\n` +
+      "ระบบจะส่งสรุปจำนวนงานที่สร้างใหม่และงานซ้ำเมื่อเสร็จครับ");
+    startOutworkImportInProcess({
+      chatId, messageId: msg.message_id,
+      manualText: session.manualText, count: confirmedCount,
+    });
+    return res.sendStatus(200);
+  }
+
+  if (isCompleteCommand) {
+    if (!session || session.mode !== "collecting") {
+      await replyTelegramInternal(chatId, msg.message_id,
+        "⚠️ ไม่พบข้อความที่รอรวมอยู่ อาจถูกรีสตาร์ท กรุณาส่งเป็นไฟล์ .txt เพื่อป้องกันลิงก์ขาด");
+      return res.sendStatus(200);
+    }
+    try {
+      const fullText = joinTelegramSplitOutworkSegments(session.parts);
+      const parsedInput = parseOutworkImportStrict(fullText);
+      session = { ...session, mode: "confirming", ...parsedInput, updatedAt: Date.now() };
+      outworkInputSessions.set(sessionKey, session);
+      await replyTelegramInternal(chatId, msg.message_id, outworkPreviewText(session.parsed));
+    } catch (error) {
+      console.error("OUTWORK SPLIT COMBINE FAILED:", error);
+      outworkInputSessions.delete(sessionKey);
+      await replyTelegramInternal(chatId, msg.message_id,
+        `❌ ข้อความยาวมีลิงก์ไม่ครบหรือรูปแบบผิด (${error.message})\n` +
+        "ยังไม่ได้สร้าง Job จากชุดนี้ กรุณารวบรวมเป็นไฟล์ .txt แล้วส่งใหม่ครับ");
+    }
+    return res.sendStatus(200);
+  }
+
+  if (msg.document) {
+    try {
+      const fileText = await downloadTelegramOutworkDocument(msg.document);
+      const parsedInput = parseOutworkImportStrict(fileText);
+      if (session) {
+        await replyTelegramInternal(chatId, msg.message_id,
+          "⚠️ มีชุด Outwork ค้างอยู่ กรุณาพิมพ์ ยกเลิกชุด แล้วส่งไฟล์ใหม่");
+      } else {
+        session = { mode: "confirming", ...parsedInput, updatedAt: Date.now() };
+        outworkInputSessions.set(sessionKey, session);
+        await replyTelegramInternal(chatId, msg.message_id, outworkPreviewText(session.parsed));
+      }
+    } catch (error) {
+      console.error("OUTWORK TXT FAILED:", error);
+      await replyTelegramInternal(chatId, msg.message_id,
+        `❌ อ่านไฟล์ Outwork ไม่สำเร็จ (${error.message})\n` +
+        "ส่งไฟล์ .txt (ไม่เกิน 256 KB) เริ่มด้วย ราคา T2, ชื่อลูกค้า และลิงก์รีวิวครับ");
+    }
+    return res.sendStatus(200);
+  }
+
+  if (session?.mode === "collecting" && !hasHeader) {
+    session.parts.push({ messageId: Number(msg.message_id), text: groupText });
+    session.updatedAt = Date.now();
+    return res.sendStatus(200); // Wait for explicit "จบ", never partially import.
+  }
+  if (session) {
+    await replyTelegramInternal(chatId, msg.message_id,
+      session.mode === "collecting"
+        ? "⚠️ กำลังรวบรวมข้อความชุดเดิมอยู่ เมื่อส่งครบพิมพ์ จบ หรือพิมพ์ ยกเลิกชุด เพื่อเริ่มใหม่"
+        : `⚠️ ชุดเดิมรอยืนยัน ${session.parsed.reviewUrls.length} ลิงก์ พิมพ์ ยืนยัน ${session.parsed.reviewUrls.length} หรือ ยกเลิกชุด`);
+    return res.sendStatus(200);
+  }
+
+  if (!hasHeader) {
+    if (/https?:\/\/|\/maps\/reviews\/|^com\/maps\//i.test(groupText)) {
+      await replyTelegramInternal(chatId, msg.message_id,
+        "⚠️ ได้รับชิ้นส่วนของลิงก์โดยไม่มีหัวคำสั่ง งานส่วนนี้ยังไม่ถูกนำเข้า\n" +
+        "หากมีหลายลิงก์ แนะนำส่งเป็นไฟล์ .txt เพื่อให้ครบทั้งชุดครับ");
+    } else {
+      await replyTelegramInternal(chatId, msg.message_id,
+        "❌ ไม่พบประเภทงาน\nบรรทัดแรกต้องเป็นเช่น 180 T2 ตามด้วยชื่อลูกค้าและลิงก์รีวิว");
+    }
+    return res.sendStatus(200);
+  }
+
+  // A message near Telegram's 4096 limit may be only the FIRST fragment.
+  // Collect more fragments and require end+confirm rather than creating jobs.
+  if (groupText.length >= OUTWORK_TEXT_NEAR_LIMIT) {
+    session = { mode: "collecting", parts: [{ messageId: Number(msg.message_id), text: groupText }], updatedAt: Date.now() };
+    outworkInputSessions.set(sessionKey, session);
+    await replyTelegramInternal(chatId, msg.message_id,
+      "📥 ข้อความงานยาว ระบบพักไว้ก่อนเพื่อไม่ให้ลิงก์ขาด\n" +
+      "ส่งข้อความส่วนที่เหลือให้ครบ แล้วพิมพ์ จบ\n" +
+      "Bot จะนับลิงก์ให้ตรวจ ก่อนพิมพ์ ยืนยัน จำนวน\n" +
+      "หรือส่งเป็นไฟล์ .txt จะปลอดภัยกว่า (ยังไม่ได้สร้าง Job)");
+    return res.sendStatus(200);
+  }
+
+  try {
+    const input = parseOutworkImportStrict(groupText);
+    if (input.parsed.reviewUrls.length > 8) {
+      session = { mode: "confirming", ...input, updatedAt: Date.now() };
+      outworkInputSessions.set(sessionKey, session);
+      await replyTelegramInternal(chatId, msg.message_id, outworkPreviewText(session.parsed));
+      return res.sendStatus(200);
+    }
+    // Preserve existing simple 1-8 review workflow; report concisely.
+    const result = await createManualAssignedWorkFromGroupText(input.manualText);
+    await replyTelegramInternal(chatId, msg.message_id, outworkCompactResult(result));
+  } catch (error) {
+    console.error("TELEGRAM ADD OUTWORK FAILED:", error);
+    await replyTelegramInternal(chatId, msg.message_id,
+      `❌ เพิ่ม Outwork ไม่สำเร็จ: ${String(error?.message || error).slice(0,250)}\n` +
+      "รูปแบบ: 180 T2 / ชื่อลูกค้า / URL แต่ละบรรทัด");
+  }
   return res.sendStatus(200);
 }
-    
+
     // -----------------------------------------------------
     // DEDICATED REVIEW-LINK CHECK GROUP — V47
     // Any message that contains URL(s) is buffered automatically.
