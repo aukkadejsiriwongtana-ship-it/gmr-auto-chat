@@ -6516,6 +6516,42 @@ async function resetMonitoringJobAsVisible(job, checkedAt) {
   }
 }
 
+// V2026-11-10: Job IDs printed in a genuine bot CHECK card provide a
+// second recoverable binding if a Supabase alert-message-id update failed.
+// Never approve from a user's forged/forwarded text or from an ACTIVE/UNKNOWN
+// section. The Telegram bot id is encoded before ':' in its own API token.
+function parseOwnTelegramCheckRemovedCard(quotedMessage, departmentCode) {
+  const text = String(quotedMessage?.text || quotedMessage?.caption || "").trim();
+  const expectedBotId = String(process.env.TELEGRAM_BOT_TOKEN || "").split(":")[0];
+  const quotedSenderId = String(quotedMessage?.from?.id || "");
+  const ownBot = Boolean(expectedBotId && quotedSenderId === expectedBotId);
+  const header = new RegExp(String.raw`^✅\s+${departmentCode}\s+CHECK\s+เสร็จแล้ว`, "m");
+  if (!ownBot || !header.test(text)) return { recognized: false, jobIds: [], removedCount: null };
+
+  const countText =
+    (text.match(/🚨\s*REMOVED\s*\((\d+)\)/i) || [])[1] ??
+    (text.match(/🚨\s*ออกแล้ว\s*\/\s*รอยืนยัน:\s*(\d+)/i) || [])[1] ??
+    (text.match(/\bREMOVED:\s*(\d+)/i) || [])[1];
+  const removedCount = countText === undefined ? null : Number(countText);
+
+  if (removedCount === 0) {
+    return { recognized: true, complete: true, removedCount: 0, jobIds: [] };
+  }
+  // Isolate ONLY the REMOVED section. An ACTIVE item must never be approved.
+  const sectionMatch = text.match(/🚨\s*REMOVED\s*\(\d+\)([\s\S]*?)(?=\n⚠️\s*ไม่ชัดเจน|\nตรวจด้วย Apify|\nReply\b|$)/i);
+  const section = sectionMatch?.[1] || "";
+  const jobIds = [...new Set(
+    [...section.matchAll(/\bJob\s*:?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)]
+      .map((match) => match[1].toLowerCase())
+  )];
+  return {
+    recognized: true,
+    complete: Number.isInteger(removedCount) && removedCount > 0 && jobIds.length === removedCount,
+    removedCount,
+    jobIds,
+  };
+}
+
 async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, departmentCode }) {
   const targetCode = String(departmentCode || "").trim().toUpperCase();
   if (!["T0", "T2"].includes(targetCode)) {
@@ -6751,6 +6787,7 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
     suspected.forEach((item, index) => {
       resultLines.push(
         formatCheckItem(item, index),
+        `Job: ${item.jobId}`,
         item.reviewUrl || "-"
       );
     });
@@ -6772,8 +6809,14 @@ async function runTelegramDepartmentManualCheck({ chatId, triggerMessageId, depa
   if (suspected.length > 0) {
     resultLines.push(
       "",
-      `Reply ข้อความนี้ว่า \"อนุมัติ\" = ยืนยัน REMOVED ทั้งหมด ${suspected.length} ลิงก์`,
+      `Reply ข้อความนี้ว่า "อนุมัติ" = ยืนยัน REMOVED ทั้งหมด ${suspected.length} ลิงก์`,
       'Reply "ยังอยู่" = Reset REMOVED ทั้งหมดในรอบนี้'
+    );
+  } else {
+    resultLines.push(
+      "",
+      "ℹ️ ไม่มีรายการ REMOVED ที่ยืนยันได้ใน CHECK รอบนี้ — จึงยังไม่มีงานให้อนุมัติเก็บเงิน",
+      "งานที่ผลตรวจไม่ชัดเจนต้องตรวจซ้ำก่อน ห้ามนับเป็น REMOVED"
     );
   }
 
@@ -7243,15 +7286,64 @@ if (
       if (quotedMessageId && ["อนุมัติ", "ยังอยู่"].includes(normalizedGroupText)) {
         try {
           const monitoringJobs = await getMonitoringJobsForDepartmentCode(departmentCode);
-          const removalJobs = (monitoringJobs || []).filter(
-            (item) => String(item?.removal_team_alert_message_id || "") === quotedMessageId
+          const quotedCheck = parseOwnTelegramCheckRemovedCard(
+            msg.reply_to_message, departmentCode
           );
+          let removalJobs = (monitoringJobs || []).filter(
+            (item) =>
+              String(item?.removal_team_alert_message_id || "") === quotedMessageId &&
+              Number(item?.review_missing_count || 0) >= 1 &&
+              Boolean(item?.review_removed_detected_at)
+          );
+
+          // A summary card with zero REMOVED is a report, NOT approval evidence.
+          if (quotedCheck.recognized && quotedCheck.removedCount === 0) {
+            await replyTelegramInternal(
+              chatId, msg.message_id,
+              `ℹ️ ${departmentCode} CHECK รอบนี้ไม่มี REMOVED ที่อนุมัติได้ครับ` +
+              "\nรายการที่ยังอยู่หรือผลตรวจไม่ชัดเจนยังไม่สามารถแจ้งเก็บเงินได้"
+            );
+            return res.sendStatus(200);
+          }
+
+          // Recover cases where CHECK successfully sent a Telegram card but
+          // one or more alert-message-id updates failed. We only trust exact
+          // Job IDs in the REMOVED section of this bot's genuine CHECK card;
+          // IDs must all be present or we fail closed (no guessed approvals).
+          if (quotedCheck.recognized) {
+            if (!quotedCheck.complete) {
+              await replyTelegramInternal(
+                chatId, msg.message_id,
+                `⚠️ ${departmentCode} CHECK card ไม่มีรายการ Job ID ของ REMOVED ครบถ้วน ` +
+                "ไม่สามารถอนุมัติโดยเดางานได้ กรุณาพิมพ์ check ใหม่ แล้ว Reply ผลตรวจล่าสุด"
+              );
+              return res.sendStatus(200);
+            }
+            const currentById = new Map(
+              (monitoringJobs || []).map((item) => [String(item.id || "").toLowerCase(), item])
+            );
+            removalJobs = quotedCheck.jobIds
+              .map((id) => currentById.get(id))
+              .filter((item) =>
+                item &&
+                Number(item.review_missing_count || 0) >= 1 &&
+                Boolean(item.review_removed_detected_at)
+              );
+            if (removalJobs.length !== quotedCheck.jobIds.length) {
+              console.warn("TELEGRAM CHECK APPROVAL PARTIAL ELIGIBILITY", {
+                departmentCode, quotedMessageId,
+                cardJobs: quotedCheck.jobIds.length,
+                eligibleJobs: removalJobs.length,
+              });
+            }
+          }
 
           if (removalJobs.length === 0) {
             await replyTelegramInternal(
-              chatId,
-              msg.message_id,
-              `⚠️ ไม่พบงาน ${departmentCode} ที่ผูกกับข้อความนี้ หรือ Batch นี้ถูกยืนยันไปแล้ว`
+              chatId, msg.message_id,
+              `⚠️ ไม่พบงาน ${departmentCode} ที่ยังรออนุมัติจาก CHECK นี้` +
+              "\nอาจยังไม่มี REMOVED, งานถูกยืนยันไปแล้ว หรือมีการตรวจซ้ำจนรีวิวกลับเป็น ACTIVE" +
+              "\nกรุณาตรวจผล CHECK และสถานะ Job ก่อน ไม่ควรสั่งเก็บเงินซ้ำ"
             );
             return res.sendStatus(200);
           }
@@ -7317,7 +7409,11 @@ if (
               price: Number(removalJob?.price || 0),
               currency: removalJob?.currency,
             });
-            const groupKey = `${String(removalJob?.customer_id || "-")}|${groupCurrency}`;
+            // /sheet-control builds its invoice using removal_detection_batch_id.
+            // Suppress earlier notices ONLY inside the same invoice batch.
+            // Different detection batches must not be silently omitted from payment.
+            const detectionBatchId = String(removalJob?.removal_detection_batch_id || removalJob?.id || "-");
+            const groupKey = `${String(removalJob?.customer_id || "-")}|${groupCurrency}|${detectionBatchId}`;
 
             if (!approvalGroups.has(groupKey)) approvalGroups.set(groupKey, []);
             approvalGroups.get(groupKey).push(removalJob);
@@ -10611,7 +10707,22 @@ function isContextualCustomerConfirmation(value) {
     .replace(/\s+/g, " ")
     .replace(/[.!?。！？，,]+$/g, "");
 
-  return /^(?:ใช่|ใช่แล้ว|ถูกต้อง|ส่งแล้ว|ส่งให้แล้ว|ส่งไปแล้ว|ส่งให้ไปแล้ว|ให้ไปแล้ว|อันนี้|อันนั้น|ตามนั้น|yes|yep|correct|already sent|sent it)(?:ครับ|ค่ะ|คะ|ครับผม|จ้า|แล้ว|แล้วครับ|แล้วค่ะ)?$/i.test(text);
+  return /^(?:ใช่|ใช่แล้ว|ถูกต้อง|ส่งแล้ว|ส่งให้แล้ว|ส่งไปแล้ว|ส่งให้ไปแล้ว|ให้ไปแล้ว|อันนี้|อันนั้น|ตามนั้น|yes|yep|correct|already sent|sent it)(?:ครับ|ค่ะ|คะ|ครับผม|จ้า|แล้ว|แล้วครับ|แล้วค่ะ)?$/i.test(text) ||
+    /^(?:ครับ|ค่ะ|คะ|ครับผม|โอเค|รับทราบ|ได้ครับ|ได้ค่ะ|ขอบคุณครับ|ขอบคุณค่ะ|ok|okay|thanks|thank you)$/i.test(text);
+}
+
+// Customer follow-ups about an already discussed/processed review are NOT
+// fresh leads needing a generic Google Maps request.
+function isV2ExistingReviewFollowUp(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return /กลับมา|กลับมาอีก|เคยลบ|ลบไปแล้ว|ลบแล้ว|เคยส่ง|ส่งไปแล้ว|ยังไม่หาย|ไม่หาย|รีวิวกลับ|review (?:came back|returned|reappeared)|came back|reappeared|already (?:sent|removed)|follow[ -]?up|check again/i.test(text);
+}
+
+function isV2FirstContactInquiry(value) {
+  const text = String(value || "").trim();
+  if (!text || isV2ExistingReviewFollowUp(text)) return false;
+  return isServiceInquiryMessage(text) ||
+    /^(?:สวัสดี|หวัดดี|hi\b|hello\b|hey\b)/i.test(text);
 }
 
 function classifyV2LeadInput(message, messageType = "text", options = {}) {
@@ -10745,6 +10856,11 @@ async function handleV2NewCustomerInbound({
   messageType,
 }) {
   const lead = await getOrCreateSalesLead(customer.id);
+  const latestCustomerJob = await getLatestJobByCustomerId(customer.id);
+  const leadAlreadyHasContext = Boolean(lead?.info_received_at || latestCustomerJob);
+  const mapRequestWasLastBotReply = String(conversation?.last_bot_message || "")
+    .includes(getLeadRequestText(customer));
+  const isFollowUp = isV2ExistingReviewFollowUp(message);
 
   const acceptLeadInput = async (leadInput) => {
     try {
@@ -10755,6 +10871,12 @@ async function handleV2NewCustomerInbound({
       });
     } catch (error) {
       console.error("V2 SALES LEAD CARD FAILED:", error);
+      // Persist the submitted information even if Telegram is temporarily down;
+      // otherwise the next customer message incorrectly triggers Map request.
+      await updateSalesLead(customer.id, {
+        info_received_at: new Date().toISOString(),
+        status: "open",
+      });
       await triggerHumanAttention({
         customer,
         conversation,
@@ -10828,7 +10950,38 @@ async function handleV2NewCustomerInbound({
   if (faqMatch?.reply) {
     let botReply = faqMatch.reply;
 
-    if (!lead?.info_requested_at && !lead?.info_received_at && !isContextualCustomerConfirmation(message)) {
+    // Database FAQ replies can themselves include the generic Map prompt.
+    // Do not repeat it once the customer already supplied Map/review details,
+    // already has a Job, or was already asked for Maps earlier.
+    if (
+      (leadAlreadyHasContext || lead?.info_requested_at ||
+       mapRequestWasLastBotReply || isFollowUp) &&
+      String(botReply).includes(getLeadRequestText(customer))
+    ) {
+      botReply = String(botReply).replace(getLeadRequestText(customer), "").trim();
+      if (!botReply) {
+        await triggerHumanAttention({
+          customer, conversation, message,
+          reason: "V2_FAQ_MAP_PROMPT_SUPPRESSED_CONTEXT_KNOWN",
+        });
+        return {
+          handled: true,
+          result: {
+            ok: true, customerId: customer.id,
+            stateBefore: conversation.state, stateAfter: conversation.state,
+            botReply: null, softHandoff: true,
+            note: "FAQ Map prompt suppressed; Sales notified",
+          },
+        };
+      }
+    }
+
+    if (
+      !lead?.info_requested_at && !leadAlreadyHasContext &&
+      !mapRequestWasLastBotReply && !isFollowUp &&
+      !isContextualCustomerConfirmation(message) &&
+      isV2FirstContactInquiry(message)
+    ) {
       botReply = `${botReply}\n\n${getLeadRequestText(customer)}`;
       await updateSalesLead(customer.id, {
         info_requested_at: new Date().toISOString(),
@@ -10892,7 +11045,11 @@ async function handleV2NewCustomerInbound({
 
   // 4) First non-FAQ contact: ask for Map/business once only.
   // Do not ask if the Sales Lead already contains a submitted Map/review.
-  if (!lead?.info_requested_at && !lead?.info_received_at) {
+  if (
+    !lead?.info_requested_at && !leadAlreadyHasContext &&
+    !mapRequestWasLastBotReply && !isFollowUp &&
+    isV2FirstContactInquiry(message)
+  ) {
     const botReply = getLeadRequestText(customer);
 
     await updateSalesLead(customer.id, {
@@ -15041,8 +15198,8 @@ When you are ready to start, please reply "Confirm all".`
 
     const botReply = getCustomerText(
       customer,
-      "ได้รับลิงก์รีวิวแล้วครับ รายการนี้ยังไม่มีราคาประวัติที่ยืนยันไว้ เจ้าหน้าที่จะตรวจสอบและแจ้งราคาในแชทนี้ครับ",
-      "We received the review link. There is no verified historical rate for this review type yet, so our team will review it and quote you in this chat."
+      "ได้รับลิงก์รีวิวแล้วครับ แอดมินตรวจสอบให้สักครู่ครับ",
+      "We received the review link, please wait our team to check it in this chat."
     );
 
     await saveV2BotReply({ customer, platform, botReply });
@@ -15644,6 +15801,24 @@ if (faqResult.matched) {
 }
 
 if (!autoConfirmDirectMap) {
+  const alreadyAskedMap = String(conversation?.last_bot_message || "")
+    .includes(getLeadRequestText(customer));
+  const followUpInsteadOfNewMap = isContextualCustomerConfirmation(message) ||
+    isV2ExistingReviewFollowUp(message) ||
+    !isV2FirstContactInquiry(message);
+
+  if (alreadyAskedMap || followUpInsteadOfNewMap) {
+    await triggerHumanAttention({
+      customer, conversation, message,
+      reason: "WAITING_MAP_CONTEXT_NEEDS_SALES_NO_REPEAT",
+    });
+    return {
+      ok: true, customerId: customer.id,
+      stateBefore: conversation.state, stateAfter: conversation.state,
+      botReply: null, softHandoff: true,
+      note: "Map request suppressed for an existing/contextual conversation",
+    };
+  }
 
   const botReply =
     getLeadRequestText(customer);
