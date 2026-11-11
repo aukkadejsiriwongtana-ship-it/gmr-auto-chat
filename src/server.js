@@ -1049,7 +1049,8 @@ async function syncExistingCustomerAfterVerifiedPayment(
 
 async function ensureVerifiedPaymentForManualPaidJob(
   job,
-  verifiedAt
+  verifiedAt,
+  paymentReference = null
 ) {
   if (!job?.id) {
     throw new Error(
@@ -1100,6 +1101,7 @@ async function ensureVerifiedPaymentForManualPaidJob(
         true,
 
       verifiedAt,
+      transactionReference: paymentReference || undefined,
     });
 
   return {
@@ -1390,7 +1392,7 @@ async function handleOverdueContinuationInbound({ customer, conversation, platfo
 // A completed/paid review does NOT imply other jobs are complete.
 // =========================================================
 const PAYMENT_TERMINAL_JOB_STATUSES = new Set([
-  "paid", "cancelled", "canceled", "credit_rejected",
+  "paid", "cancelled", "canceled", "credit_rejected", "unpaid_closed",
   "rejected", "failed", "expired", "void", "voided", "duplicate",
 ]);
 
@@ -3049,6 +3051,80 @@ async function getDepartmentSheetRouteForJob(job) {
     code,
     activeSheetName,
     doneSheetName,
+  };
+}
+
+// =========================================================
+// T0/T2 UNPAID — status is terminal for collection work, not a cancellation.
+// Google Sheets sync reuses existing dispatch_update and dispatch_move_done
+// transports, avoiding new URLs, secrets, or changes to service imports.
+// SQL migration 01_gmr_unpaid_close.sql is required first.
+// =========================================================
+async function getUnpaidClosureByJobId(jobId) {
+  const { data, error } = await supabase.from("gmr_unpaid_closures")
+    .select("*").eq("job_id", String(jobId)).maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function closeUnpaidJobFromActive({ job, customer, sheetName, reason }) {
+  const requestedSheet = String(sheetName || "").trim().toUpperCase();
+  const route = await getDepartmentSheetRouteForJob(job);
+  if (!route || !["T0", "T2"].includes(route.code) ||
+      requestedSheet !== route.activeSheetName.toUpperCase()) {
+    return { ok: false, httpStatus: 409, error: "JOB_DEPARTMENT_SHEET_MISMATCH",
+      message: "Choose CLOSE_UNPAID only on the Job's original ACTIVE sheet." };
+  }
+  const currentStatus = String(job.status || "").trim().toLowerCase();
+  if (!["waiting_payment", "unpaid_closed"].includes(currentStatus)) {
+    return { ok: false, httpStatus: 409, error: "JOB_NOT_WAITING_PAYMENT",
+      message: `Only a confirmed waiting_payment case can be closed unpaid (${currentStatus}).` };
+  }
+
+  const { data, error } = await supabase.rpc("gmr_close_unpaid_job", {
+    p_job_id: job.id, p_reason: reason,
+    p_department_code: route.code,
+    p_source: requestedSheet,
+  });
+  if (error || data?.ok !== true) {
+    throw new Error(`UNPAID DB CLOSE FAILED: ${error?.message || JSON.stringify(data)}`);
+  }
+
+  let masterSynced = false, activeMoved = false;
+  let masterError = null, moveError = null;
+  try {
+    const updated = await updateJobInGoogleSheet({
+      jobId: job.id, status: "unpaid_closed",
+    });
+    if (updated === false || updated?.ok === false) throw new Error("JOBS_MASTER update rejected");
+    masterSynced = true;
+  } catch (e) {
+    masterError = String(e?.message || e);
+    console.error("UNPAID MASTER SYNC FAILED", { jobId: job.id, error: masterError });
+  }
+  try {
+    // Apps Script dispatch_update moves Active -> UNPAID if status is unpaid_closed.
+    const moved = await updateDispatchJobInGoogleSheet({
+      sheetName: route.activeSheetName, jobId: job.id,
+      status: "unpaid_closed",
+      removedAt: job.removed_at || job.review_removed_detected_at || "",
+    });
+    if (moved === false || moved?.ok === false || moved?.success === false) {
+      throw new Error(`Active -> UNPAID rejected: ${JSON.stringify(moved)}`);
+    }
+    activeMoved = true;
+  } catch (e) {
+    moveError = String(e?.message || e);
+    console.error("UNPAID ACTIVE MOVE FAILED", { jobId: job.id, error: moveError });
+  }
+  // Never claim that a row moved until the server-side Sheet operation accepts it.
+  return {
+    ok: masterSynced && activeMoved,
+    httpStatus: masterSynced && activeMoved ? 200 : 503,
+    jobId: job.id, status: "unpaid_closed",
+    alreadyClosed: data.alreadyClosed === true,
+    masterSynced, activeMoved, masterError, moveError,
+    customerNotified: false,
   };
 }
 
@@ -9684,6 +9760,7 @@ app.post(
           [
             "waiting_payment",
             "removed_waiting_payment",
+            "unpaid_closed", // real Stripe payment can arrive after manual write-off
           ].includes(
             paymentJob.status
           );
@@ -29667,6 +29744,29 @@ app.post("/sheet-control", async (req, res) => {
       }
 
       // ===================================================
+      // CLOSE_UNPAID: staff-confirmed uncollectible completed job.
+      // Changes actual DB status to unpaid_closed; no fake paid record.
+      // Apps Script routes to T0_UNPAID/T2_UNPAID via dispatch_update.
+      // ===================================================
+      if (normalizedValue === "CLOSE_UNPAID") {
+        const reason = String(req.body?.reason || "").trim();
+        const result = await closeUnpaidJobFromActive({
+          job, customer, sheetName: req.body?.sheetName, reason,
+        });
+        return res.status(result.httpStatus || (result.ok ? 200 : 409)).json(result);
+      }
+
+      if (normalizedValue === "CHECK_UNPAID") {
+        const closure = await getUnpaidClosureByJobId(job.id);
+        return res.status(200).json({ ok: true, jobId: job.id,
+          status: String(job.status || "").toUpperCase(),
+          closureStatus: closure?.status || null,
+          closedAt: closure?.closed_at || null,
+          recoveredAt: closure?.recovered_at || null,
+        });
+      }
+
+      // ===================================================
       // CANCEL_JOB from JOBS_MASTER (column N) and T0/T2_ACTIVE.
       // A cancelled job remains in JOBS_MASTER as history; the ACTIVE row
       // may be removed after this request succeeds. Never notify customer.
@@ -30741,6 +30841,28 @@ if (
         normalizedValue ===
         "MARK_PAID"
       ) {
+        const paidStatus = String(job.status || "").trim().toLowerCase();
+        if (!["waiting_payment", "removed_waiting_payment", "unpaid_closed", "paid"].includes(paidStatus)) {
+          return res.status(409).json({ ok: false, error: "JOB_NOT_PAYABLE",
+            message: `Job status ${paidStatus || '-'} is not eligible for MARK_PAID.` });
+        }
+        const unpaidRecovery = paidStatus === "unpaid_closed";
+        const paymentReference = String(req.body?.paymentReference || "").trim();
+        if (unpaidRecovery && !/^[A-Za-z0-9_\/-]{6,120}$/.test(paymentReference)) {
+          return res.status(422).json({ ok: false, error: "PAYMENT_REFERENCE_REQUIRED",
+            message: "Unpaid recovery requires a real, verified payment reference (6-120 letters/numbers)." });
+        }
+
+        // A bank/Stripe reference must never be re-used to claim a different
+        // payment. Existing verified payment for this SAME Job remains retry-safe.
+        if (unpaidRecovery) {
+          const verifiedForThisJob = await getVerifiedPaymentByJobId(job.id);
+          if (!verifiedForThisJob && await isPaymentReferenceUsed(paymentReference)) {
+            return res.status(409).json({ ok: false,
+              error: "PAYMENT_REFERENCE_ALREADY_USED",
+              message: "The payment reference is already recorded. Verify it before marking this job paid." });
+          }
+        }
 
         // V2.2.37: MARK_PAID must create the same verified-payment
         // history as an auto/manual slip approval. This is also
@@ -30755,7 +30877,8 @@ if (
         const paymentResult =
           await ensureVerifiedPaymentForManualPaidJob(
             job,
-            paidAt
+            paidAt,
+            unpaidRecovery ? paymentReference : null
           );
 
 
@@ -30822,7 +30945,18 @@ if (
           );
         }
 
-        await movePaidJobToDepartmentDoneSheet(job, paidAt);
+        const doneSheetMove = await movePaidJobToDepartmentDoneSheet(job, paidAt);
+        if (unpaidRecovery &&
+            (doneSheetMove === false || doneSheetMove?.ok === false ||
+             doneSheetMove?.skipped === true)) {
+          // Funds are already verified in the database. Report an incomplete
+          // sheet sync rather than claiming UNPAID -> DONE is complete.
+          return res.status(503).json({ ok: false,
+            error: "UNPAID_TO_DONE_SYNC_FAILED",
+            message: "Payment recorded, but UNPAID -> DONE sheet sync requires retry.",
+            jobId: job.id, paymentVerified: true,
+            sheetMove: doneSheetMove || null });
+        }
 
         const mapSync =
           await syncExistingCustomerAfterVerifiedPayment(
