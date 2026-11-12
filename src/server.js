@@ -1126,6 +1126,59 @@ function getCustomerText(
 
 
 // =============================================================
+// GMR TERMS V1 14D — first-time customer onboarding (TH / EN)
+// SQL migration required: gmr_terms_v1_14d.sql
+// Prior-service answer is separate from terms acceptance. An ambiguous OK
+// at the prior-service question never counts as a YES or acceptance.
+// =============================================================
+const GMR_TERMS_VERSION = "GMR_TERMS_V1_14D";
+const GMR_TERMS_HISTORY_PROMPT_TH =
+  "ก่อนเริ่มงาน ขอสอบถามว่าเคยใช้บริการลบรีวิวกับ GMR มาก่อนหรือไม่ครับ?\nตอบ ‘เคย’ หรือ ‘ไม่เคย’ ครับ";
+const GMR_TERMS_HISTORY_PROMPT_EN =
+  "Before we begin, have you used GMR's review-removal service before?\nPlease reply ‘Yes, I have’ or ‘No, I haven't’.";
+
+function gmrTermsNormalize(text) {
+  return String(text || "").trim().toLowerCase()
+    .replace(/[.!?。！？\s]+$/g, "").replace(/\s+/g, " ");
+}
+function gmrTermsHistoryAnswer(message) {
+  const x = gmrTermsNormalize(message);
+  if (["ไม่เคย", "ไม่เคยครับ", "ไม่เคยค่ะ", "ยังไม่เคย", "never", "no", "nope", "no i haven't", "no, i haven't", "not yet"].includes(x)) return "new";
+  if (["เคย", "เคยครับ", "เคยค่ะ", "เคยใช้แล้ว", "yes", "yes i have", "yes, i have", "i have", "used before"].includes(x)) return "existing";
+  return null;
+}
+function gmrTermsAcceptanceAnswer(message) {
+  const x = gmrTermsNormalize(message);
+  if (["ไม่ยอมรับ", "ไม่ตกลง", "ปฏิเสธ", "ไม่โอเค", "ไม่", "no", "decline", "disagree", "do not agree", "cancel"].includes(x)) return "declined";
+  if (["ยืนยัน", "ยืนยันครับ", "ยืนยันค่ะ", "ยืนยันค่า", "รับทราบ", "รับทราบครับ", "รับทราบค่ะ", "รับทราบค่า", "ตกลง", "ตกลงครับ", "ตกลงค่ะ", "โอเค", "โอเคครับ", "โอเคค่ะ", "โอเคค่า", "ได้", "ได้ครับ", "ได้ค่ะ", "ได้ค่า", "ครับ", "ค่ะ", "ค่า", "ok", "okay", "okครับ", "okค่ะ", "yes", "yes i agree", "i agree", "agree", "accepted", "accept", "confirm", "confirmed", "sure", "sounds good", "all good", "understood", "acknowledged"].includes(x)) return "accepted";
+  return null;
+}
+function gmrTermsText(customer) {
+  return getCustomerText(customer,
+    "เงื่อนไขการให้บริการ GMR (สำหรับการเริ่มงานครั้งแรก)\n\n1. หลังเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกงานได้\n2. หากรีวิวเดิมกลับมาภายใน 14 วันหลังยืนยันผลสำเร็จ เราจะยื่นตรวจสอบให้ใหม่ฟรี (ไม่รับประกันผลการลบโดย Google)\n3. ชำระค่าบริการหลังดำเนินการสำเร็จ ผ่าน QR Code ที่ระบบออกให้เท่านั้น\n4. เงื่อนไขเวอร์ชันนี้ใช้กับบริการครั้งต่อไปด้วย ไม่ต้องยืนยันซ้ำ เว้นแต่มีการเปลี่ยนเงื่อนไข\n\nหากรับทราบและยอมรับ พิมพ์ ‘ยืนยัน’ หรือ ‘โอเค’ เพื่อเริ่มงาน หากไม่ยอมรับ พิมพ์ ‘ไม่ยอมรับ’ ครับ",
+    "GMR Terms of Service (first-time customers)\n\n1. Once work has started, it cannot be cancelled.\n2. If the same review reappears within 14 days after confirmed successful removal, we will resubmit it for review free of charge (Google's removal decision cannot be guaranteed).\n3. Payment is due after successful completion, via our Stripe Checkout payment link only.\n4. These terms apply to future orders without repeated acceptance unless the terms change.\n\nReply 'Confirm', 'OK', or 'I agree' to accept and proceed, or 'Decline' if you do not agree.");
+}
+async function gmrTermsRecord(customerId) {
+  const { data, error } = await supabase.from("gmr_terms_acceptances")
+    .select("*").eq("customer_id", customerId).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+async function gmrTermsUpsert(customerId, values) {
+  const { data, error } = await supabase.from("gmr_terms_acceptances")
+    .upsert({ customer_id: customerId, terms_version: GMR_TERMS_VERSION,
+      ...values, updated_at: new Date().toISOString() }, { onConflict: "customer_id" })
+    .select("*").single();
+  if (error) throw error;
+  return data;
+}
+async function gmrTermsReply(customer, platform, text, stateBefore, extras={}) {
+  await saveMessage({customerId:customer.id,platform,direction:"outbound",messageType:"text",messageText:text});
+  await updateLastBotMessage(customer.id,text);
+  return {ok:true,customerId:customer.id,stateBefore,stateAfter:stateBefore,botReply:text,...extras};
+}
+
+// =============================================================
 // T2_ACTIVE -- MANUAL 21+ DAY CONTINUATION PERMISSION
 // The operator selects ASK_CONTINUE in T2_ACTIVE. No automatic
 // calendar threshold is used. This state is separate from job.status.
@@ -6204,110 +6257,12 @@ async function startApprovedJob({
   let botReply = "";
 
 
-  // ========================================
-  // THB
-  // ========================================
-
-  if (
-    currency === "THB"
-  ) {
-    const priceText =
-      `${formattedPrice} บาท/รีวิว`;
-
-    botReply =
-      `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
-
-หากลบออก ${priceText}
-
-ระยะเวลาดำเนินการโดยประมาณ: 1–20 วันทำการ
-
-🔥 แจ้งให้ลูกค้าทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
-
-📌 เงื่อนไขการให้บริการ:
-1. ชำระผ่านแสกนจ่ายเท่านั้น ไม่รับผ่านโอนเข้าบัญชี
-2. ชำระค่าบริการทันทีหลังจากลบออก
-3. เมื่อเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ เช่น เจ้าของรีวิวยินดีลบรีวิวให้ภายหลัง (ค่าบริการเต็มจำนวนยังคงต้องชำระ)
-4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
-5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
-6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
-
-หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
-  }
-
-
-  // ========================================
-  // USD
-  // ========================================
-
-  else {
-    const priceText =
-      `$${formattedPrice} (USD) per review`;
-
-    botReply =
-      `We have already commenced the service.
-
-Service Fee: ${priceText}
-
-Duration: 1-14days(depends on GG system)
-
-🔥We will promptly notify the client upon successful completion🔥
-
-📌 Terms & Conditions:
-1. Payment is accepted via STRIPE (credit card).
-2. Full payment is required immediately after the review has been successfully removed.
-3. Once the service has started, cancellation or changes are not permitted, including cases where the reviewer later agrees to remove the review themselves. The full service fee remains payable.
-4. Service fees are non-refundable once the service has started.
-5. The service is considered complete once the review has been removed and payment has been completed after the result is checked.
-6. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
-
-Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
-  }
-
-
-  // V2.2.43 — Start notice follows customer language, not currency.
-  const singleStartLanguage =
-    String(customer?.platform || "").trim().toLowerCase() === "facebook_en" ||
-    String(customer?.language || "").trim().toLowerCase() === "en"
-      ? "en"
-      : "th";
-
-  if (currency === "THB" && singleStartLanguage === "en") {
-    botReply = `We have started processing your review request.
-
-Service fee (payable after successful removal): ${formattedPrice} THB per review
-
-Estimated duration: 1–20 business days
-
-🔥 We will notify you promptly once the review removal has been confirmed. 🔥
-
-📌 Terms & Conditions:
-1. Payment is by QR scan only; bank transfer is not accepted.
-2. Payment is due immediately after a review is successfully removed.
-3. Once work begins, cancellation or changes are not permitted, including if a reviewer later agrees to remove their review. The agreed fee remains payable.
-4. Service fees are non-refundable once work has begun.
-5. A case is complete once the review has been removed and the customer has checked the result and paid.
-6. If payment is more than 7 days late after invoicing, we reserve the right to remove 5-star reviews from the Google Maps listing until payment is received.
-
-Note: If you are concerned about the payment deadline, you may request advance payment.`;
-  } else if (currency === "USD" && singleStartLanguage === "th") {
-    botReply = `ทางเราได้เริ่มดำเนินการเรียบร้อยแล้วครับ
-
-ค่าดำเนินการหลังลบรีวิวสำเร็จ: $${formattedPrice} USD/รีวิว
-
-ระยะเวลาดำเนินการโดยประมาณ: 1–14 วัน (ขึ้นอยู่กับระบบของ Google)
-
-🔥 เราจะแจ้งให้ทราบทันทีเมื่อดำเนินการสำเร็จ 🔥
-
-📌 เงื่อนไขการให้บริการ:
-1. ชำระผ่าน Stripe (บัตรเครดิต)
-2. ชำระค่าบริการทันทีหลังรีวิวถูกลบสำเร็จ
-3. เมื่อเริ่มงานแล้วไม่สามารถยกเลิกหรือเปลี่ยนแปลงได้ รวมถึงกรณีเจ้าของรีวิวยอมลบรีวิวเองภายหลัง โดยยังต้องชำระค่าบริการเต็มจำนวน
-4. ไม่สามารถขอคืนค่าบริการหลังเริ่มดำเนินการแล้ว
-5. ถือว่างานเสร็จสมบูรณ์เมื่อรีวิวถูกลบ ลูกค้าตรวจสอบผล และชำระเงินเรียบร้อย
-6. หากชำระล่าช้าเกิน 7 วันหลังวันเรียกเก็บเงิน ทางเราสงวนสิทธิ์ลบรีวิว 5 ดาวบน Google Maps จนกว่าจะชำระเงิน
-
-หมายเหตุ: หากกังวลเรื่องกำหนดชำระ สามารถขอชำระล่วงหน้าก่อนได้`;
-  }
+  // Terms are presented and accepted before the first job is started.
+  // Do not resend older or contradictory terms in every start notice.
+  const startLang = String(customer?.language || "th").toLowerCase();
+  botReply = startLang === "en"
+    ? `We have started processing your review request.\n\nService fee (payable after successful removal): ${currency === "USD" ? "$" : ""}${formattedPrice} ${currency} per review\n\nWe will notify you once the removal is confirmed.`
+    : `เริ่มดำเนินการเรียบร้อยแล้วครับ\n\nค่าบริการเมื่อดำเนินการสำเร็จ: ${formattedPrice} ${currency === "THB" ? "บาท" : "USD"}/รีวิว\n\nเราจะแจ้งให้ทราบเมื่อยืนยันผลสำเร็จครับ`;
 
   // ========================================
   // QUEUE TIME
@@ -12618,6 +12573,7 @@ async function processTestMessage({
   message,
   messageType = "text",
   displayName = "Test User",
+  gmrTermsResuming = false,
 }) {
 
   if (!platform) {
@@ -13259,6 +13215,49 @@ let autoConfirmDirectMap =
       customer.id,
       message
     );
+  }
+
+  // A first-time customer may reply with casual acknowledgements to terms.
+  // Process these before FAQ / generic confirmation handlers can consume them.
+  if (!gmrTermsResuming && messageType === "text") {
+    const termsRecord = await gmrTermsRecord(customer.id);
+    if (termsRecord?.stage === "awaiting_history" || termsRecord?.stage === "awaiting_acceptance") {
+      let replyText = null;
+      let stage = termsRecord.stage;
+      if (stage === "awaiting_history") {
+        const answer = gmrTermsHistoryAnswer(message);
+        if (answer === "existing") {
+          await gmrTermsUpsert(customer.id, {stage:"self_reported_existing",accepted_at:null,accepted_source:null});
+          // Customer says they used GMR before; skip the first-time terms.
+          // The existing credit/payment checks still run on resume.
+          return await processTestMessage({platform,platformUserId,displayName,message:termsRecord.phone_e164,messageType:"text",gmrTermsResuming:true});
+        }
+        if (answer === "new") {
+          await gmrTermsUpsert(customer.id, {stage:"awaiting_acceptance"});
+          return await gmrTermsReply(customer,platform,gmrTermsText(customer),conversation.state,{termsStage:"awaiting_acceptance"});
+        }
+        replyText = getCustomerText(customer,
+          "รบกวนตอบว่า ‘เคย’ หรือ ‘ไม่เคย’ ใช้บริการกับ GMR ครับ (คำว่า โอเค/ได้ครับ ยังไม่ระบุคำตอบ)",
+          "Please reply 'Yes, I have' or 'No, I haven't' used GMR before. 'OK' doesn't identify which one.");
+      } else {
+        const answer = gmrTermsAcceptanceAnswer(message);
+        if (answer === "accepted") {
+          await gmrTermsUpsert(customer.id,{stage:"accepted",accepted_at:new Date().toISOString(),accepted_source:String(platform||"chat"),accepted_message:String(message||"").slice(0,200)});
+          return await processTestMessage({platform,platformUserId,displayName,message:termsRecord.phone_e164,messageType:"text",gmrTermsResuming:true});
+        }
+        if (answer === "declined") {
+          await gmrTermsUpsert(customer.id,{stage:"declined",accepted_at:null,accepted_source:null});
+          await updateConversationState({customerId:customer.id,state:GMR_STATES.HANDOFF,handoff:true,handoffReason:"GMR_TERMS_DECLINED"});
+          return await gmrTermsReply(customer,platform,getCustomerText(customer,
+            "รับทราบครับ จะยังไม่เริ่มงาน หากต้องการสอบถามเงื่อนไขเพิ่มเติมแจ้งได้ครับ",
+            "Understood. We will not start the service. Please let us know if you have questions."),conversation.state,{termsStage:"declined",handoff:true});
+        }
+        replyText = getCustomerText(customer,
+          "รบกวนยืนยันการยอมรับเงื่อนไข โดยพิมพ์ ‘ยืนยัน’, ‘โอเค’ หรือ ‘ไม่ยอมรับ’ ครับ",
+          "Please reply 'Confirm', 'OK', 'I agree' or 'Decline' to the terms above.");
+      }
+      return await gmrTermsReply(customer,platform,replyText,conversation.state,{termsStage:stage});
+    }
   }
 
   // =======================================================
@@ -18781,6 +18780,19 @@ const hasPaymentHistory =
     customer.id
   );
 
+// Gate the very first job after phone capture, BEFORE credit approval/queue.
+// Existing customers and accepted terms pass unchanged. Do not ask repeat.
+if (!gmrTermsResuming && !hasPaymentHistory) {
+  const termsRecord = await gmrTermsRecord(customer.id);
+  if (!termsRecord || !["accepted", "self_reported_existing"].includes(termsRecord.stage) ||
+      (termsRecord.stage === "accepted" && termsRecord.terms_version !== GMR_TERMS_VERSION)) {
+    await gmrTermsUpsert(customer.id, { stage:"awaiting_history",phone_e164:phoneForDb,
+      accepted_at:null,accepted_source:null });
+    return await gmrTermsReply(customer,platform,getCustomerText(customer,
+      GMR_TERMS_HISTORY_PROMPT_TH,GMR_TERMS_HISTORY_PROMPT_EN),conversation.state,
+      {termsStage:"awaiting_history",phoneAccepted:true});
+  }
+}
 
 const needsCreditApproval =
   Number(
