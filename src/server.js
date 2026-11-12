@@ -9687,6 +9687,7 @@ app.post(
 
 
       const paidJobs = [];
+      const newlyPaidJobs = [];
 
 
       // ========================================
@@ -9787,6 +9788,16 @@ app.post(
 
 
         if (!existingPayment) {
+          // One Stripe Checkout may pay several jobs. Supabase enforces a
+          // UNIQUE transaction_reference, so only the first job may retain
+          // the bare payment-intent ID. Later jobs receive a deterministic
+          // per-job reference tied to the same Stripe payment (not a new charge).
+          const baseStripeReference = String(
+            session.payment_intent || session.id || ""
+          ).trim();
+          const stripePaymentReference = jobIds.indexOf(jobId) === 0
+            ? baseStripeReference
+            : `${baseStripeReference}:job:${jobId}`;
 
           await createPayment({
             jobId:
@@ -9810,8 +9821,7 @@ app.post(
             verifiedAt,
 
             transactionReference:
-              session.payment_intent ||
-              session.id,
+              stripePaymentReference,
           });
         }
 
@@ -9864,6 +9874,7 @@ app.post(
         paidJobs.push(
           paymentJob.id
         );
+        newlyPaidJobs.push(paymentJob.id);
       }
 
 
@@ -9879,7 +9890,7 @@ app.post(
 
       if (
         customer &&
-        paidJobs.length > 0
+        newlyPaidJobs.length > 0
       ) {
 
         await syncExistingCustomerAfterVerifiedPayment(
@@ -9955,6 +9966,7 @@ app.post(
           jobIds,
 
           paidJobs,
+          newlyPaidJobs,
 
           amountTotal:
             session.amount_total,
@@ -9972,6 +9984,7 @@ app.post(
             true,
 
           paidJobs,
+          newlyPaidJobs,
         });
 
 
