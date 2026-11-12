@@ -25593,6 +25593,12 @@ async function processManychatPaymentSlipImage({
     throw new Error("Payment slip customer not found");
   }
 
+  console.log("MANYCHAT PAYMENT SLIP DOWNLOAD START:", {
+    customerId: customer.id,
+    platform,
+    host: (() => { try { return new URL(safeImageUrl).hostname; } catch { return "invalid"; } })(),
+  });
+
   const imageResponse = await fetchWithNetworkRetry(
     safeImageUrl,
     {
@@ -25621,6 +25627,12 @@ async function processManychatPaymentSlipImage({
   ).split(";")[0].trim() || "image/jpeg";
 
   const buffer = Buffer.from(await imageResponse.arrayBuffer());
+  console.log("MANYCHAT PAYMENT SLIP DOWNLOAD COMPLETE:", {
+    customerId: customer.id,
+    httpStatus: imageResponse.status,
+    contentType,
+    bytes: buffer.length,
+  });
 
   if (!buffer.length) {
     throw new Error("Payment slip image is empty");
@@ -26066,6 +26078,30 @@ if (paymentDateTooOld) {
     });
   }
 
+  // Receipt acknowledgement is NOT a payment confirmation.
+  try {
+    const receiptText = getCustomerText(
+      customer,
+      "ได้รับรูปสลิปแล้วครับ ขณะนี้อยู่ระหว่างตรวจสอบยอดรับเงินจริง เมื่อยืนยันเรียบร้อยจะแจ้งให้ทราบครับ",
+      "We've received your payment slip and are checking the payment. We'll confirm once verification is complete."
+    );
+    await sendMessageToCustomer({
+      platform: customer.platform,
+      platformUserId: customer.platform_user_id,
+      text: receiptText,
+    });
+    await saveMessage({
+      customerId: customer.id, platform: customer.platform,
+      direction: "outbound", messageType: "text", messageText: receiptText,
+    });
+    await updateLastBotMessage(customer.id, receiptText);
+  } catch (error) {
+    console.error("MANYCHAT PENDING PAYMENT ACK FAILED:", {
+      customerId: customer.id, paymentId: pendingPayment.id,
+      error: error?.message || String(error),
+    });
+  }
+
   return {
     ok: true,
     handled: true,
@@ -26498,13 +26534,65 @@ app.post("/manychat/inbound", async (req, res) => {
             }
           );
 
-          const paymentSlipResult =
-            await processManychatPaymentSlipImage({
+          let paymentSlipResult;
+          try {
+            paymentSlipResult = await processManychatPaymentSlipImage({
               platform,
               platformUserId,
               displayName,
               imageUrl: inboundImageUrl,
             });
+            console.log("MANYCHAT PAYMENT FALLBACK RESULT:", {
+              customerId: existingCustomer.id,
+              handled: paymentSlipResult?.handled ?? null,
+              autoVerified: paymentSlipResult?.autoVerified ?? null,
+              needsReview: paymentSlipResult?.needsReview ?? null,
+              reason: paymentSlipResult?.reason || null,
+            });
+          } catch (error) {
+            const detail = String(error?.message || error).slice(0, 350);
+            console.error("MANYCHAT PAYMENT FALLBACK FAILED:", {
+              customerId: existingCustomer.id, platform,
+              error: detail, stack: error?.stack || null,
+            });
+            // Escalate to human review. Never verify payment on a failed image check.
+            try {
+              await pushTelegramUpsales([
+                "⚠️ GMR PAYMENT SLIP — AUTO CHECK FAILED / MANUAL REVIEW REQUIRED",
+                `Customer: ${displayName || existingCustomer.display_name || "-"}`,
+                `Customer ID: ${existingCustomer.id}`,
+                `Platform: ${platform}`,
+                `Error: ${detail}`,
+                "Image URL (may expire):", inboundImageUrl,
+                "ตรวจยอดเข้าจริงก่อนอนุมัติ ห้ามกด Verified โดยอ้างอิงเพียงรูป",
+              ].join("\n"));
+            } catch (alertError) {
+              console.error("MANYCHAT PAYMENT FALLBACK TELEGRAM ALERT FAILED:", alertError);
+            }
+            try {
+              const pendingText = getCustomerText(
+                existingCustomer,
+                "ได้รับรูปสลิปแล้วครับ แต่ระบบยังตรวจสอบอัตโนมัติไม่สำเร็จ ทีมงานจะตรวจสอบเพิ่มเติมและแจ้งผลครับ",
+                "We received your payment slip, but automatic verification did not complete. Our team will review it and update you."
+              );
+              await sendMessageToCustomer({
+                platform: existingCustomer.platform,
+                platformUserId: existingCustomer.platform_user_id,
+                text: pendingText,
+              });
+              await saveMessage({ customerId: existingCustomer.id,
+                platform: existingCustomer.platform, direction: "outbound",
+                messageType: "text", messageText: pendingText });
+              await updateLastBotMessage(existingCustomer.id, pendingText);
+            } catch (replyError) {
+              console.error("MANYCHAT PAYMENT FALLBACK CUSTOMER ACK FAILED:", replyError);
+            }
+            return res.status(200).json({
+              ok: true, payment_slip_fallback: true, needs_manual_review: true,
+              should_reply: false, reply: null,
+              customer_id: existingCustomer.id,
+            });
+          }
 
           return res.status(200).json({
             ok: true,
@@ -30521,34 +30609,21 @@ if (
           }
         }
 
-        // Only start the ordinary image Data Collection flow when the normal
-        // Messenger send worked. Utility delivery does not reopen the normal
-        // 24h automation window. If the customer replies with a slip image,
-        // V36's waiting-payment image fallback handles it.
+        // V42: Do NOT start ManyChat image Data Collection automatically.
+        // Its native validation prompt can repeatedly ask for an image in
+        // English when a Thai customer sends ordinary text instead.
+        // Payment slips sent as Messenger images are handled directly by the
+        // waiting-payment image fallback (/manychat inbound, V36).
+        // Keep the payment notification and Utility fallback unchanged.
+        // An ALREADY RUNNING ManyChat Flow must also be stopped in ManyChat.
         if (customerNotificationTransport === "manychat_content") {
-          try {
-            const slipFlowResult = await startManychatPaymentSlipFlow({
-              platform: customer.platform,
-              platformUserId: customer.platform_user_id,
-            });
-
-            paymentSlipFlowStarted = slipFlowResult?.ok === true;
-
-            if (slipFlowResult?.skipped === true) {
-              paymentSlipFlowError = slipFlowResult?.reason ||
-                "PAYMENT_SLIP_FLOW_NOT_STARTED";
-            }
-          } catch (slipFlowStartError) {
-            paymentSlipFlowError =
-              slipFlowStartError?.message || String(slipFlowStartError);
-
-            console.error("MANYCHAT PAYMENT SLIP FLOW START FAILED:", {
-              customerId: customer.id,
-              platform: customer.platform,
-              platformUserId: customer.platform_user_id,
-              error: paymentSlipFlowError,
-            });
-          }
+          paymentSlipFlowStarted = false;
+          paymentSlipFlowError = null;
+          console.log("MANYCHAT PAYMENT IMAGE DATA COLLECTION SKIPPED:", {
+            customerId: customer.id,
+            platform: customer.platform,
+            reason: "USE_WAITING_PAYMENT_IMAGE_FALLBACK",
+          });
         }
       } else {
         await sendMessageToCustomer({
@@ -30901,23 +30976,8 @@ if (
         }
 
 
-        if (conversation) {
-          await updateConversationState({
-            customerId:
-              customer.id,
-
-            state:
-              GMR_STATES
-                .WAITING_MAP,
-
-            handoff:
-              false,
-
-            handoffReason:
-              null,
-          });
-        }
-
+        // Reconcile conversation using remaining jobs after payment below;
+        // do not force WAITING_MAP if other reviews remain open.
 
         try {
 
@@ -30943,6 +31003,43 @@ if (
                 error.message,
             }
           );
+        }
+
+        // Customer notification is best effort after the verified DB transition.
+        // A retry of an already-paid job must not send a duplicate receipt.
+        if (paidStatus !== "paid") {
+          try {
+            const followUp = await buildPostPaymentCustomerFollowUp(customer, [job.id]);
+            await updateConversationForPostPayment(customer, followUp);
+            await sendMessageToCustomer({
+              platform: customer.platform,
+              platformUserId: customer.platform_user_id,
+              text: followUp.text,
+            });
+            await saveMessage({
+              customerId: customer.id, platform: customer.platform,
+              direction: "outbound", messageType: "text", messageText: followUp.text,
+            });
+            await updateLastBotMessage(customer.id, followUp.text);
+            console.log("SHEET MANUAL MARK PAID CUSTOMER NOTIFIED:", {
+              customerId: customer.id, jobId: job.id,
+            });
+          } catch (notifyError) {
+            console.error("SHEET MANUAL MARK PAID CUSTOMER NOTIFY FAILED:", {
+              customerId: customer.id, jobId: job.id,
+              error: notifyError?.message || String(notifyError),
+            });
+            try {
+              await pushTelegramUpsales([
+                "⚠️ GMR PAID — CUSTOMER CONFIRMATION SEND FAILED",
+                `Job: ${job.id}`, `Customer ID: ${customer.id}`,
+                `Error: ${String(notifyError?.message || notifyError).slice(0, 250)}`,
+                "Payment already verified; check customer conversation before resending.",
+              ].join("\n"));
+            } catch (alertError) {
+              console.error("SHEET MANUAL MARK PAID NOTIFY ALERT FAILED:", alertError);
+            }
+          }
         }
 
         const doneSheetMove = await movePaidJobToDepartmentDoneSheet(job, paidAt);
