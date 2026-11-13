@@ -377,6 +377,63 @@ async function setManychatCustomFieldByName({
   return { ok: true, fieldName: safeFieldName };
 }
 
+// =========================================================
+// Stripe payment receipt — EN Utility fallback for Meta 24h limitation.
+// The approved template reads gmr_payment_amount from the subscriber.
+// Do not use the Pay Now template (that is a collection notice).
+// =========================================================
+async function sendStripePaymentReceivedEnUtility({ customer, session }) {
+  const platform = String(customer?.platform || "").trim().toLowerCase();
+  if (platform !== "facebook_en") {
+    return { ok: false, skipped: true, reason: "NOT_FACEBOOK_EN" };
+  }
+  const flowNs = String(process.env.MANYCHAT_PAYMENT_RECEIVED_EN_FLOW_NS || "").trim();
+  if (!flowNs) {
+    throw new Error("MANYCHAT_PAYMENT_RECEIVED_EN_FLOW_NS is not configured");
+  }
+  const subscriberId = String(customer?.platform_user_id || "").trim();
+  if (!subscriberId) throw new Error("No ManyChat subscriber ID for Stripe receipt");
+  const token = getManychatApiTokenForPlatform(platform);
+  if (!token) throw new Error("No ManyChat EN API token for Stripe receipt");
+
+  const currency = String(session?.currency || "").toLowerCase();
+  const cents = Number(session?.amount_total);
+  if (currency !== "usd" || !Number.isInteger(cents) || cents <= 0) {
+    throw new Error("Stripe receipt utility requires a paid USD Checkout amount");
+  }
+  const amount = (cents / 100).toFixed(2);
+  // Set the field BEFORE starting the Flow to avoid sending a stale invoice amount.
+  await setManychatCustomFieldByName({
+    platform,
+    platformUserId: subscriberId,
+    fieldName: "gmr_payment_amount",
+    fieldValue: amount,
+  });
+
+  // Do not automatically retry ambiguous sendFlow network errors. The request
+  // might have been accepted even if the response was lost.
+  const response = await fetchWithNetworkRetry(
+    "https://api.manychat.com/fb/sending/sendFlow",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ subscriber_id: subscriberId, flow_ns: flowNs }),
+    },
+    { attempts: 1, timeoutMs: 15000, label: "STRIPE RECEIPT EN UTILITY" }
+  );
+  const responseText = await response.text();
+  let result = {};
+  try { result = responseText ? JSON.parse(responseText) : {}; } catch {}
+  if (!response.ok || result?.status === "error" || result?.status === "failed") {
+    throw new Error(`Stripe receipt utility sendFlow failed ${response.status}: ${responseText.slice(0, 400)}`);
+  }
+  console.log("STRIPE PAYMENT RECEIPT UTILITY ACCEPTED:", {
+    sessionId: session.id || null, customerId: customer.id || null,
+    flowNs, amount, currency,
+  });
+  return { ok: true, transport: "manychat_utility", amount };
+}
+
 async function startManychatCompletedPaymentUtilityFlow({
   platform,
   platformUserId,
@@ -1126,12 +1183,12 @@ function getCustomerText(
 
 
 // =============================================================
-// GMR TERMS V1 14D — first-time customer onboarding (TH / EN)
+// GMR TERMS V2 14D — first-time customer onboarding (TH / EN)
 // SQL migration required: gmr_terms_v1_14d.sql
 // Prior-service answer is separate from terms acceptance. An ambiguous OK
 // at the prior-service question never counts as a YES or acceptance.
 // =============================================================
-const GMR_TERMS_VERSION = "GMR_TERMS_V1_14D";
+const GMR_TERMS_VERSION = "GMR_TERMS_V3_14D_EXISTING";
 const GMR_TERMS_HISTORY_PROMPT_TH =
   "ก่อนเริ่มงาน ขอสอบถามว่าเคยใช้บริการลบรีวิวกับ GMR มาก่อนหรือไม่ครับ?\nตอบ ‘เคย’ หรือ ‘ไม่เคย’ ครับ";
 const GMR_TERMS_HISTORY_PROMPT_EN =
@@ -1153,11 +1210,23 @@ function gmrTermsAcceptanceAnswer(message) {
   if (["ยืนยัน", "ยืนยันครับ", "ยืนยันค่ะ", "ยืนยันค่า", "รับทราบ", "รับทราบครับ", "รับทราบค่ะ", "รับทราบค่า", "ตกลง", "ตกลงครับ", "ตกลงค่ะ", "โอเค", "โอเคครับ", "โอเคค่ะ", "โอเคค่า", "ได้", "ได้ครับ", "ได้ค่ะ", "ได้ค่า", "ครับ", "ค่ะ", "ค่า", "ok", "okay", "okครับ", "okค่ะ", "yes", "yes i agree", "i agree", "agree", "accepted", "accept", "confirm", "confirmed", "sure", "sounds good", "all good", "understood", "acknowledged"].includes(x)) return "accepted";
   return null;
 }
-function gmrTermsText(customer) {
-  return getCustomerText(customer,
-    "เงื่อนไขการให้บริการ GMR (สำหรับการเริ่มงานครั้งแรก)\n\n1. หลังเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกงานได้\n2. หากรีวิวเดิมกลับมาภายใน 14 วันหลังยืนยันผลสำเร็จ เราจะยื่นตรวจสอบให้ใหม่ฟรี (ไม่รับประกันผลการลบโดย Google)\n3. ชำระค่าบริการหลังดำเนินการสำเร็จ ผ่าน QR Code ที่ระบบออกให้เท่านั้น\n4. เงื่อนไขเวอร์ชันนี้ใช้กับบริการครั้งต่อไปด้วย ไม่ต้องยืนยันซ้ำ เว้นแต่มีการเปลี่ยนเงื่อนไข\n\nหากรับทราบและยอมรับ พิมพ์ ‘ยืนยัน’ หรือ ‘โอเค’ เพื่อเริ่มงาน หากไม่ยอมรับ พิมพ์ ‘ไม่ยอมรับ’ ครับ",
-    "GMR Terms of Service (first-time customers)\n\n1. Once work has started, it cannot be cancelled.\n2. If the same review reappears within 14 days after confirmed successful removal, we will resubmit it for review free of charge (Google's removal decision cannot be guaranteed).\n3. Payment is due after successful completion, via our Stripe Checkout payment link only.\n4. These terms apply to future orders without repeated acceptance unless the terms change.\n\nReply 'Confirm', 'OK', or 'I agree' to accept and proceed, or 'Decline' if you do not agree.");
+function gmrTermsText(customer, isExisting = false) {
+  const isEN = String(customer?.platform || "").toLowerCase() === "facebook_en" ||
+    String(customer?.language || "").toLowerCase() === "en";
+  const paymentTH = "ชำระค่าบริการหลังดำเนินการสำเร็จ ผ่าน QR Code ที่ระบบออกให้เท่านั้น";
+  const paymentEN = "Payment is due after successful completion, via our Stripe Checkout payment link only.";
+  const overlapTH = "หลังเริ่มงาน กรุณาอย่าส่งลิงก์รีวิวเดียวกันให้ผู้ให้บริการรายอื่น เพราะอาจทำให้ต้องชำระค่าบริการทั้งสองฝ่าย หากต้องการทดลองบริการเจ้าอื่น แนะนำให้ใช้ลิงก์รีวิวคนละรายการ";
+  const overlapEN = "Once work has started, please do not submit the same review link to another provider, as you may be charged by both. If you wish to try another provider, we recommend using a different review link.";
+  if (isExisting) {
+    return isEN
+      ? `GMR Terms of Service (returning customers)\n\n1. Once work has started, it cannot be cancelled.\n2. ${paymentEN}\n3. These terms apply to future orders without repeated acceptance unless the terms change.\n4. ${overlapEN}\n\nReply 'Confirm', 'OK', or 'I agree' to accept and proceed, or 'Decline' if you do not agree.`
+      : `เงื่อนไขการให้บริการ GMR (ลูกค้าเคยใช้บริการ)\n\n1. หลังเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกงานได้\n2. ${paymentTH}\n3. เงื่อนไขเวอร์ชันนี้ใช้กับบริการครั้งต่อไปด้วย ไม่ต้องยืนยันซ้ำ เว้นแต่มีการเปลี่ยนเงื่อนไข\n4. ${overlapTH}\n\nหากรับทราบและยอมรับ พิมพ์ ‘ยืนยัน’ หรือ ‘โอเค’ เพื่อเริ่มงาน หากไม่ยอมรับ พิมพ์ ‘ไม่ยอมรับ’ ครับ`;
+  }
+  return isEN
+    ? `GMR Terms of Service (first-time customers)\n\n1. Once work has started, it cannot be cancelled.\n2. If the same review reappears within 14 days after confirmed successful removal, we will resubmit it for review free of charge (Google's removal decision cannot be guaranteed).\n3. ${paymentEN}\n4. These terms apply to future orders without repeated acceptance unless the terms change.\n5. ${overlapEN}\n\nReply 'Confirm', 'OK', or 'I agree' to accept and proceed, or 'Decline' if you do not agree.`
+    : `เงื่อนไขการให้บริการ GMR (สำหรับการเริ่มงานครั้งแรก)\n\n1. หลังเริ่มดำเนินการแล้ว ไม่สามารถยกเลิกงานได้\n2. หากรีวิวเดิมกลับมาภายใน 14 วันหลังยืนยันผลสำเร็จ เราจะยื่นตรวจสอบให้ใหม่ฟรี (ไม่รับประกันผลการลบโดย Google)\n3. ${paymentTH}\n4. เงื่อนไขเวอร์ชันนี้ใช้กับบริการครั้งต่อไปด้วย ไม่ต้องยืนยันซ้ำ เว้นแต่มีการเปลี่ยนเงื่อนไข\n5. ${overlapTH}\n\nหากรับทราบและยอมรับ พิมพ์ ‘ยืนยัน’ หรือ ‘โอเค’ เพื่อเริ่มงาน หากไม่ยอมรับ พิมพ์ ‘ไม่ยอมรับ’ ครับ`;
 }
+
 async function gmrTermsRecord(customerId) {
   const { data, error } = await supabase.from("gmr_terms_acceptances")
     .select("*").eq("customer_id", customerId).maybeSingle();
@@ -1172,6 +1241,50 @@ async function gmrTermsUpsert(customerId, values) {
   if (error) throw error;
   return data;
 }
+// Acceptance is version-bound. A prior V1/V2 acceptance is not a V3 acceptance.
+async function gmrTermsIsAccepted(customerId) {
+  const row = await gmrTermsRecord(customerId);
+  return row?.stage === "accepted" && row?.terms_version === GMR_TERMS_VERSION && Boolean(row?.accepted_at);
+}
+
+// Send the appropriate pending terms without implying that agreement exists.
+// Used only by manual-start paths, not on every inbound message.
+async function gmrTermsRequestForManualStart(customer) {
+  const row = await gmrTermsRecord(customer.id);
+  if (row?.stage === "awaiting_history" && row?.terms_version === GMR_TERMS_VERSION) return "awaiting_history";
+  if (row?.stage === "awaiting_acceptance" && row?.terms_version === GMR_TERMS_VERSION) return "awaiting_acceptance";
+  const hasHistory = await hasPaymentByCustomerId(customer.id);
+  const phone = String(customer.phone || "").trim();
+  if (!phone) {
+    const prompt = getCustomerText(customer,
+      "รบกวนส่งเบอร์โทรศัพท์สำหรับติดต่อก่อนเริ่มงานครับ",
+      "Please provide a contact phone number before we start.");
+    if (!customer.platform_user_id) throw new Error("GMR_TERMS_CONTACT_UNREACHABLE");
+    await sendMessageToCustomer({platform:customer.platform,
+      platformUserId:customer.platform_user_id,text:prompt});
+    await saveMessage({customerId:customer.id,platform:customer.platform,
+      direction:"outbound",messageType:"text",messageText:prompt});
+    await updateLastBotMessage(customer.id,prompt);
+    throw new Error("GMR_PHONE_REQUIRED_BEFORE_START: ขอเบอร์ลูกค้าแล้ว กรุณารอให้ลูกค้าส่งเบอร์ก่อนยืนยันงาน");
+  }
+  const nextStage = hasHistory ? "awaiting_acceptance" : "awaiting_history";
+  await gmrTermsUpsert(customer.id, {
+    stage: nextStage, phone_e164: phone || null,
+    accepted_at: null, accepted_source: null, accepted_message: null,
+  });
+  const text = hasHistory ? gmrTermsText(customer, true) : getCustomerText(
+    customer, GMR_TERMS_HISTORY_PROMPT_TH, GMR_TERMS_HISTORY_PROMPT_EN);
+  if (!customer.platform_user_id) throw new Error("GMR_TERMS_CONTACT_UNREACHABLE");
+  // If send fails, block the start; status remains pending for manual review.
+  await sendMessageToCustomer({platform: customer.platform,
+    platformUserId: customer.platform_user_id, text});
+  await saveMessage({customerId:customer.id, platform:customer.platform,
+    direction:"outbound",messageType:"text",messageText:text});
+  await updateLastBotMessage(customer.id,text);
+  console.log("GMR TERMS MANUAL START REQUESTED", {customerId:customer.id,stage:nextStage});
+  return nextStage;
+}
+
 async function gmrTermsReply(customer, platform, text, stateBefore, extras={}) {
   await saveMessage({customerId:customer.id,platform,direction:"outbound",messageType:"text",messageText:text});
   await updateLastBotMessage(customer.id,text);
@@ -5807,6 +5920,10 @@ async function startApprovedExistingCustomerBatch({
   // Safety Check
   // ========================================
 
+  if (!(await gmrTermsIsAccepted(customer.id))) {
+    throw new Error("GMR_TERMS_NOT_ACCEPTED: ลูกค้ายังไม่ยืนยันเงื่อนไข V3 — ห้ามเริ่มงาน");
+  }
+
   const invalidJobs =
     jobs.filter(
       (job) => {
@@ -6045,6 +6162,7 @@ ${thaiPriceLines.join("\n")}
 4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
 5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
 6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
+7. หลังเริ่มงาน กรุณาอย่าส่งลิงก์รีวิวเดียวกันให้ผู้ให้บริการรายอื่น เพราะอาจทำให้ต้องชำระค่าบริการทั้งสองฝ่าย หากต้องการทดลองบริการเจ้าอื่น แนะนำให้ใช้ลิงก์รีวิวคนละรายการ
 
 หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
   }
@@ -6077,6 +6195,7 @@ Duration: 1-14days(depends on GG system)
 4. Service fees are non-refundable once the service has started.
 5. The service is considered complete once the review has been removed and payment has been completed after the result is checked.
 6. If payment is delayed for more than 7 days from the billing date, we reserve the right to remove the 5-star reviews from your Google Maps listing until the outstanding payment has been settled.
+7. Once work has started, please do not submit the same review link to another provider, as you may be charged by both. If you wish to try another provider, we recommend using a different review link.
 
 Note: If you are concerned that you may not be able to make payment within the required timeframe, you may request to make payment in advance before the service begins.`;
   }
@@ -6111,6 +6230,7 @@ ${thaiPriceLines.join("\n")}
 4. ค่าบริการทุกกรณีไม่สามารถขอคืนเงินได้หลังจากเริ่มดำเนินการ
 5. งานจะถือว่าเสร็จสมบูรณ์เมื่อรีวิวถูกลบและลูกค้าชำระหลังเช็คงานแล้วเรียบร้อย
 6. หากชำระล่าช้าเกิน 7 วัน (นับจากวันเรียกเก็บเงิน) ทางเราจะลบรีวิว5ดาวบนแมพ จนกว่าลูกค้าจะชำระ
+7. หลังเริ่มงาน กรุณาอย่าส่งลิงก์รีวิวเดียวกันให้ผู้ให้บริการรายอื่น เพราะอาจทำให้ต้องชำระค่าบริการทั้งสองฝ่าย หากต้องการทดลองบริการเจ้าอื่น แนะนำให้ใช้ลิงก์รีวิวคนละรายการ
 
 หมายเหตุ: กรณีกังวลว่าจะชำระไม่ทัน สามารถขอชำระล่วงหน้าก่อนได้`;
   }
@@ -6150,6 +6270,7 @@ ${duration}
 4. Service fees are non-refundable once work has begun.
 5. A case is complete once the review has been removed and the customer has checked the result and paid.
 6. If payment is more than 7 days late after invoicing, we reserve the right to remove 5-star reviews from the Google Maps listing until payment is received.
+7. Once work has started, please do not submit the same review link to another provider, as you may be charged by both. If you wish to try another provider, we recommend using a different review link.
 
 Note: If you are concerned about the payment deadline, you may request advance payment.`;
   } else if (startNoticeLanguage === "th" && hasUSD && !hasTHB) {
@@ -6171,6 +6292,7 @@ ${thaiPriceLines.join("\n")}
 4. ไม่สามารถขอคืนค่าบริการหลังเริ่มดำเนินการแล้ว
 5. ถือว่างานเสร็จสมบูรณ์เมื่อรีวิวถูกลบ ลูกค้าตรวจสอบผล และชำระเงินเรียบร้อย
 6. หากชำระล่าช้าเกิน 7 วันหลังวันเรียกเก็บเงิน ทางเราสงวนสิทธิ์ลบรีวิว 5 ดาวบน Google Maps จนกว่าจะชำระเงิน
+7. หลังเริ่มงาน กรุณาอย่าส่งลิงก์รีวิวเดียวกันให้ผู้ให้บริการรายอื่น เพราะอาจทำให้ต้องชำระค่าบริการทั้งสองฝ่าย หากต้องการทดลองบริการเจ้าอื่น แนะนำให้ใช้ลิงก์รีวิวคนละรายการ
 
 หมายเหตุ: หากกังวลเรื่องกำหนดชำระ สามารถขอชำระล่วงหน้าก่อนได้`;
   }
@@ -9899,13 +10021,28 @@ app.post(
 
 
         } catch (notifyError) {
-
-          // Payment ต้องถือว่าสำเร็จ
-          // แม้ส่งข้อความหาลูกค้าไม่ได้
-          console.error(
-            "STRIPE PAID CUSTOMER NOTIFICATION FAILED:",
-            notifyError
-          );
+          // Stripe is already paid. If Meta closed the 24h messaging window,
+          // use the APPROVED payment-received Utility Template, not a normal
+          // Messenger send or the pre-payment Pay Now flow.
+          console.error("STRIPE PAID CUSTOMER NOTIFICATION FAILED:", notifyError);
+          const reason = String(notifyError?.message || notifyError);
+          const expiredWindow = /(?:code[\"']?\s*:?\s*3011|more than 24 hours|over 24h|without a message tag)/i.test(reason);
+          if (expiredWindow && String(customer.platform || "").toLowerCase() === "facebook_en") {
+            try {
+              const sent = await sendStripePaymentReceivedEnUtility({ customer, session });
+              console.log("STRIPE PAID CUSTOMER NOTIFICATION FALLBACK:", {
+                sessionId: session.id || null, customerId: customer.id,
+                ...sent,
+              });
+              // The Utility template text is Meta-managed. Do not save an
+              // invented rendered message; log the accepted flow instead.
+            } catch (fallbackError) {
+              console.error("STRIPE PAID CUSTOMER UTILITY FALLBACK FAILED:", {
+                sessionId: session.id || null, customerId: customer.id,
+                error: fallbackError?.message || String(fallbackError),
+              });
+            }
+          }
         }
       }
 
@@ -12462,6 +12599,11 @@ async function confirmV2SalesOrderDraft(draft) {
   const customer = await getCustomerById(draft.customer_id);
   if (!customer) throw new Error("ไม่พบข้อมูลลูกค้า");
 
+  if (!(await gmrTermsIsAccepted(customer.id))) {
+    const stage = await gmrTermsRequestForManualStart(customer);
+    throw new Error(`GMR_TERMS_AWAITING_CUSTOMER: ส่งคำขอยืนยันเงื่อนไขแล้ว (${stage}) กรุณารอลูกค้ายืนยันก่อนกดยืนยันงานอีกครั้ง`);
+  }
+
   const items = Array.isArray(draft.review_items) ? draft.review_items : [];
   if (!items.length) throw new Error("Draft ไม่มี Review URL");
 
@@ -13226,15 +13368,13 @@ let autoConfirmDirectMap =
       let stage = termsRecord.stage;
       if (stage === "awaiting_history") {
         const answer = gmrTermsHistoryAnswer(message);
-        if (answer === "existing") {
-          await gmrTermsUpsert(customer.id, {stage:"self_reported_existing",accepted_at:null,accepted_source:null});
-          // Customer says they used GMR before; skip the first-time terms.
-          // The existing credit/payment checks still run on resume.
-          return await processTestMessage({platform,platformUserId,displayName,message:termsRecord.phone_e164,messageType:"text",gmrTermsResuming:true});
-        }
-        if (answer === "new") {
-          await gmrTermsUpsert(customer.id, {stage:"awaiting_acceptance"});
-          return await gmrTermsReply(customer,platform,gmrTermsText(customer),conversation.state,{termsStage:"awaiting_acceptance"});
+        if (answer === "existing" || answer === "new") {
+          // Both groups accept terms. Returning customers do not receive the
+          // 14-day free re-review warranty clause.
+          const isExisting = answer === "existing";
+          await gmrTermsUpsert(customer.id, {stage:"awaiting_acceptance",
+            accepted_message:isExisting ? "GMR_PRIOR_SERVICE_EXISTING" : "GMR_PRIOR_SERVICE_NEW"});
+          return await gmrTermsReply(customer,platform,gmrTermsText(customer,isExisting),conversation.state,{termsStage:"awaiting_acceptance",priorService:answer});
         }
         replyText = getCustomerText(customer,
           "รบกวนตอบว่า ‘เคย’ หรือ ‘ไม่เคย’ ใช้บริการกับ GMR ครับ (คำว่า โอเค/ได้ครับ ยังไม่ระบุคำตอบ)",
@@ -13286,6 +13426,28 @@ let autoConfirmDirectMap =
         platform,
         error: phoneCaptureError?.message || String(phoneCaptureError),
       });
+    }
+  }
+
+  // V3 PHONE HANDOFF RECOVERY: manual-sales / replied messages may arrive
+  // while the conversation state is NEW, not WAITING_PHONE. A valid phone
+  // must still start the consent sequence. Do not start any work here.
+  if (!gmrTermsResuming && messageType === "text" && capturedPhoneE164) {
+    const termsRow = await gmrTermsRecord(customer.id);
+    const alreadyAccepted = termsRow?.stage === "accepted" &&
+      termsRow?.terms_version === GMR_TERMS_VERSION && Boolean(termsRow?.accepted_at);
+    const alreadyPending = termsRow?.terms_version === GMR_TERMS_VERSION &&
+      ["awaiting_history", "awaiting_acceptance"].includes(termsRow?.stage);
+    if (!alreadyAccepted && !alreadyPending && conversation.state !== GMR_STATES.WAITING_PHONE) {
+      const pastPaid = await hasPaymentByCustomerId(customer.id);
+      const stage = pastPaid ? "awaiting_acceptance" : "awaiting_history";
+      await gmrTermsUpsert(customer.id, {stage,phone_e164:capturedPhoneE164,
+        accepted_at:null,accepted_source:null,accepted_message:null});
+      const reply = pastPaid ? gmrTermsText(customer,true) : getCustomerText(customer,
+        GMR_TERMS_HISTORY_PROMPT_TH,GMR_TERMS_HISTORY_PROMPT_EN);
+      console.log("GMR TERMS PHONE HANDOFF RECOVERY", {customerId:customer.id,stage});
+      return await gmrTermsReply(customer,platform,reply,conversation.state,
+        {termsStage:stage,phoneAccepted:true});
     }
   }
 
@@ -18667,26 +18829,12 @@ if (
   const rawPhone =
     String(message || "").trim();
 
-  const normalizedPhone =
-  rawPhone.replace(
-    /[^\d+]/g,
-    ""
-  );
-
-
-const localPhonePattern =
-  /^\d{10}$/;
-
-const internationalPhonePattern =
-  /^\+[1-9]\d{7,14}$/;
-
-const isValidPhone =
-  localPhonePattern.test(
-    normalizedPhone
-  ) ||
-  internationalPhonePattern.test(
-    normalizedPhone
-  );
+  // Only the first valid phone is used when a customer sends several.
+  // Never concatenate two numbers into an invalid 20-digit string.
+  const localPhone = extractThaiTenDigitPhone(rawPhone);
+  const internationalPhone = extractInternationalPhoneE164(rawPhone);
+  const normalizedPhone = internationalPhone || localPhone || "";
+  const isValidPhone = Boolean(normalizedPhone);
 
 
 if (!isValidPhone) {
@@ -18780,18 +18928,32 @@ const hasPaymentHistory =
     customer.id
   );
 
-// Gate the very first job after phone capture, BEFORE credit approval/queue.
-// Existing customers and accepted terms pass unchanged. Do not ask repeat.
-if (!gmrTermsResuming && !hasPaymentHistory) {
+// Gate after phone capture BEFORE credit approval/queue for BOTH customer groups.
+// Existing customers with verified payment history see returning-customer terms
+// directly. Customers without payment history answer the history question first.
+// Accepted terms for the current version are not requested a second time.
+if (!gmrTermsResuming) {
   const termsRecord = await gmrTermsRecord(customer.id);
-  if (!termsRecord || !["accepted", "self_reported_existing"].includes(termsRecord.stage) ||
-      (termsRecord.stage === "accepted" && termsRecord.terms_version !== GMR_TERMS_VERSION)) {
+  const acceptedCurrentTerms = termsRecord?.stage === "accepted" &&
+    termsRecord.terms_version === GMR_TERMS_VERSION;
+  if (!acceptedCurrentTerms) {
+    if (hasPaymentHistory) {
+      await gmrTermsUpsert(customer.id, {stage:"awaiting_acceptance",
+        phone_e164:phoneForDb,accepted_at:null,accepted_source:null,
+        accepted_message:"GMR_PRIOR_SERVICE_EXISTING"});
+      return await gmrTermsReply(customer,platform,gmrTermsText(customer,true),
+        conversation.state,{termsStage:"awaiting_acceptance",priorService:"existing",phoneAccepted:true});
+    }
     await gmrTermsUpsert(customer.id, { stage:"awaiting_history",phone_e164:phoneForDb,
-      accepted_at:null,accepted_source:null });
+      accepted_at:null,accepted_source:null,accepted_message:null });
     return await gmrTermsReply(customer,platform,getCustomerText(customer,
       GMR_TERMS_HISTORY_PROMPT_TH,GMR_TERMS_HISTORY_PROMPT_EN),conversation.state,
       {termsStage:"awaiting_history",phoneAccepted:true});
   }
+}
+
+if (!(await gmrTermsIsAccepted(customer.id))) {
+  throw new Error("GMR_TERMS_NOT_ACCEPTED_BEFORE_CREDIT_OR_QUEUE");
 }
 
 const needsCreditApproval =
