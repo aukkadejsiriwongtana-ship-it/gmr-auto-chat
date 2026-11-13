@@ -25825,10 +25825,42 @@ async function processManychatPaymentSlipImage({
     throw new Error("Payment slip image is empty");
   }
 
-  const imageClassification = await classifyCustomerImage({
-    buffer,
-    contentType,
+  // Fail closed: an AI image check must not hold this webhook indefinitely.
+  // Promise.race bounds our wait; the underlying model request may continue,
+  // but it cannot mark any payment paid because only its result is used below.
+  const classificationTimeoutMs = 20000;
+  const classificationStartedAt = Date.now();
+  console.log("MANYCHAT PAYMENT IMAGE CLASSIFICATION START:", {
+    customerId: customer.id,
+    platform,
+    bytes: buffer.length,
+    timeoutMs: classificationTimeoutMs,
   });
+  let classificationTimer;
+  let imageClassification;
+  try {
+    imageClassification = await Promise.race([
+      classifyCustomerImage({ buffer, contentType }),
+      new Promise((_, reject) => {
+        classificationTimer = setTimeout(
+          () => reject(new Error("PAYMENT_SLIP_CLASSIFICATION_TIMEOUT")),
+          classificationTimeoutMs
+        );
+      }),
+    ]);
+  } catch (classificationError) {
+    console.error("MANYCHAT PAYMENT IMAGE CLASSIFICATION FAILED:", {
+      customerId: customer.id,
+      platform,
+      elapsedMs: Date.now() - classificationStartedAt,
+      error: classificationError?.message || String(classificationError),
+    });
+    // The caller sends the customer a pending-review message and escalates
+    // to Sales/Telegram; never auto-verify an unclassified slip.
+    throw classificationError;
+  } finally {
+    clearTimeout(classificationTimer);
+  }
 
   console.log("MANYCHAT PAYMENT IMAGE CLASSIFICATION:", {
     customerId: customer.id,
