@@ -5919,6 +5919,7 @@ async function startApprovedExistingCustomerBatch({
   conversation,
   jobs,
   adminFinalActorId = null,
+  telegramSalesActorId = null,
 }) {
   if (
     !Array.isArray(jobs) ||
@@ -5936,14 +5937,19 @@ async function startApprovedExistingCustomerBatch({
 
   const termsAccepted = await gmrTermsIsAccepted(customer.id);
   const adminFinalAuthorized = isAuthorizedGmrFinalAdmin(adminFinalActorId);
-  if (!termsAccepted && !adminFinalAuthorized) {
+  // Only the server-side Telegram Sales handler supplies telegramSalesActorId.
+  // This is an internal order authorization, never customer acceptance.
+  const telegramSalesApproved = Boolean(String(telegramSalesActorId || "").trim());
+  if (!termsAccepted && !adminFinalAuthorized && !telegramSalesApproved) {
     throw new Error("GMR_TERMS_NOT_ACCEPTED: ลูกค้ายังไม่ยืนยันเงื่อนไข V3 — ห้ามเริ่มงาน");
   }
-  if (!termsAccepted && adminFinalAuthorized) {
-    // This is a discretionary staff exception, NOT customer consent.
-    console.warn("GMR ADMIN FINAL START WITHOUT TERMS ACCEPTANCE", {
-      customerId: customer.id, actorId: String(adminFinalActorId),
+  if (!termsAccepted && (adminFinalAuthorized || telegramSalesApproved)) {
+    console.warn("GMR INTERNAL TELEGRAM START WITHOUT TERMS ACCEPTANCE", {
+      customerId: customer.id,
+      actorId: String(adminFinalActorId || telegramSalesActorId),
+      mode: adminFinalAuthorized ? "ADMIN_FINAL" : "TELEGRAM_SALES_APPROVED",
       jobIds: jobs.map((job) => job.id),
+      termsAccepted: false,
     });
   }
 
@@ -8833,6 +8839,7 @@ if (
             }
             const confirmed = await confirmV2SalesOrderDraft(draft, {
               adminFinalActorId: normalizedGroupText === "final" ? actorId : null,
+              telegramSalesActorId: actorId,
             });
             const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
             await reply([
@@ -8910,6 +8917,7 @@ if (
                 customer: existingCustomer,
                 conversation,
                 jobs: batchJobs,
+                telegramSalesActorId: actorId,
               });
               const sheetResults = await appendV2StartedJobsToMasterSheet({
                 customer: existingCustomer,
@@ -8989,6 +8997,7 @@ if (
             if (prepared?.ok) {
               const confirmed = await confirmV2SalesOrderDraft(prepared.draft, {
                 adminFinalActorId: isAdminFinal ? actorId : null,
+                telegramSalesActorId: actorId,
               });
               const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
               const workLines = prepared.reviewItems.map(
@@ -12667,7 +12676,10 @@ async function syncExistingJobToMasterSheet(job) {
   };
 }
 
-async function confirmV2SalesOrderDraft(draft, { adminFinalActorId = null } = {}) {
+async function confirmV2SalesOrderDraft(draft, {
+  adminFinalActorId = null,
+  telegramSalesActorId = null,
+} = {}) {
   if (adminFinalActorId && !isAuthorizedGmrFinalAdmin(adminFinalActorId)) {
     throw new Error("GMR_ADMIN_FINAL_UNAUTHORIZED");
   }
@@ -12679,13 +12691,19 @@ async function confirmV2SalesOrderDraft(draft, { adminFinalActorId = null } = {}
   if (!customer) throw new Error("ไม่พบข้อมูลลูกค้า");
 
   const termsAccepted = await gmrTermsIsAccepted(customer.id);
-  if (!termsAccepted && !adminFinalActorId) {
+  const telegramSalesApproved = Boolean(String(telegramSalesActorId || "").trim());
+  if (!termsAccepted && !adminFinalActorId && !telegramSalesApproved) {
+    // Non-Telegram/manual channels retain their existing onboarding gate.
     const stage = await gmrTermsRequestForManualStart(customer);
     throw new Error(`GMR_TERMS_AWAITING_CUSTOMER: ส่งคำขอยืนยันเงื่อนไขแล้ว (${stage}) กรุณารอลูกค้ายืนยันก่อนกดยืนยันงานอีกครั้ง`);
   }
-  if (!termsAccepted && adminFinalActorId) {
-    console.warn("GMR ADMIN FINAL CONSENT STILL PENDING", {
-      customerId: customer.id, draftId: draft.id, actorId: String(adminFinalActorId),
+  if (!termsAccepted && (adminFinalActorId || telegramSalesApproved)) {
+    // Do not send a phone/terms request, or forge a terms acceptance.
+    console.warn("GMR TELEGRAM SALES ORDER OVERRIDE — CUSTOMER TERMS NOT ACCEPTED", {
+      customerId: customer.id, draftId: draft.id,
+      actorId: String(adminFinalActorId || telegramSalesActorId),
+      mode: adminFinalActorId ? "ADMIN_FINAL" : "TELEGRAM_SALES_APPROVED",
+      phoneProvided: Boolean(String(customer.phone || "").trim()),
     });
   }
 
@@ -12733,7 +12751,9 @@ async function confirmV2SalesOrderDraft(draft, { adminFinalActorId = null } = {}
       status: "waiting_credit_approval",
       source: adminFinalActorId
         ? `sales_line:${draft.id}:ADMIN_FINAL:${adminFinalActorId}`
-        : `sales_line:${draft.id}`,
+        : telegramSalesApproved
+          ? `sales_telegram:${draft.id}:STAFF_OVERRIDE:${telegramSalesActorId}`
+          : `sales_line:${draft.id}`,
       customer_notify: true,
     });
     stagedJobs.push(job);
@@ -12745,12 +12765,15 @@ async function confirmV2SalesOrderDraft(draft, { adminFinalActorId = null } = {}
     conversation,
     jobs: stagedJobs,
     adminFinalActorId,
+    telegramSalesActorId,
   });
 
   const sheetResults = await appendV2StartedJobsToMasterSheet({
     customer,
     jobs: startResult.startedJobs,
-    source: adminFinalActorId ? `sales_line_admin_final:${adminFinalActorId}` : "sales_line",
+    source: adminFinalActorId ? `sales_line_admin_final:${adminFinalActorId}`
+      : telegramSalesApproved ? `sales_telegram_staff_override:${telegramSalesActorId}`
+      : "sales_line",
   });
 
   await updateSalesOrderDraft(draft.id, {
