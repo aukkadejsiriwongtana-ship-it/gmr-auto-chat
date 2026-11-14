@@ -3621,6 +3621,19 @@ function getTelegramInternalConfig() {
   };
 }
 
+// ADMIN FINAL — explicitly allowlisted Telegram user IDs only.
+// An authorized administrator must add FINAL to the Sales order.
+// This bypasses onboarding gates without fabricating customer consent.
+function isAuthorizedGmrFinalAdmin(actorId) {
+  const configured = String(process.env.GMR_FINAL_ADMIN_TELEGRAM_IDS || "").trim();
+  const allowed = new Set(configured.split(/[\s,;]+/).filter((x) => /^\d+$/.test(x)));
+  return Boolean(actorId) && allowed.has(String(actorId));
+}
+
+function isGmrFinalOrderCommand(text) {
+  return /(?:^|\s)FINAL(?:\s|$)/i.test(String(text || ""));
+}
+
 function getTelegramDepartmentChatId(departmentCode) {
   const cfg = getTelegramInternalConfig();
   const code = String(departmentCode || "").trim().toUpperCase();
@@ -5905,6 +5918,7 @@ async function startApprovedExistingCustomerBatch({
   customer,
   conversation,
   jobs,
+  adminFinalActorId = null,
 }) {
   if (
     !Array.isArray(jobs) ||
@@ -5920,8 +5934,17 @@ async function startApprovedExistingCustomerBatch({
   // Safety Check
   // ========================================
 
-  if (!(await gmrTermsIsAccepted(customer.id))) {
+  const termsAccepted = await gmrTermsIsAccepted(customer.id);
+  const adminFinalAuthorized = isAuthorizedGmrFinalAdmin(adminFinalActorId);
+  if (!termsAccepted && !adminFinalAuthorized) {
     throw new Error("GMR_TERMS_NOT_ACCEPTED: ลูกค้ายังไม่ยืนยันเงื่อนไข V3 — ห้ามเริ่มงาน");
+  }
+  if (!termsAccepted && adminFinalAuthorized) {
+    // This is a discretionary staff exception, NOT customer consent.
+    console.warn("GMR ADMIN FINAL START WITHOUT TERMS ACCEPTANCE", {
+      customerId: customer.id, actorId: String(adminFinalActorId),
+      jobIds: jobs.map((job) => job.id),
+    });
   }
 
   const invalidJobs =
@@ -8705,6 +8728,11 @@ if (
 
 
 
+    if (normalizedGroupText === "/gmrid" || normalizedGroupText === "gmrid") {
+      await reply(`Telegram User ID: ${actorId || "unknown"}\nAdmin FINAL authorized: ${isAuthorizedGmrFinalAdmin(actorId) ? "YES" : "NO"}`);
+      return res.sendStatus(200);
+    }
+
     // -----------------------------------------------------
     // V2.2.35 — REPAIR / RESYNC ONE EXISTING JOB TO JOBS_MASTER
     //
@@ -8776,7 +8804,7 @@ if (
     // V2 SALES: Preview confirm/cancel + existing customer approval
     // -----------------------------------------------------
     if (quotedMessageId) {
-      const isConfirmWork = ["ยืนยันงาน", "confirm work", "confirm job"].includes(normalizedGroupText);
+      const isConfirmWork = ["ยืนยันงาน", "confirm work", "confirm job", "final"].includes(normalizedGroupText);
       const isCancelWork = ["ยกเลิก", "cancel", "cancel job"].includes(normalizedGroupText);
 
       if (isConfirmWork || isCancelWork) {
@@ -8800,7 +8828,12 @@ if (
           }
 
           try {
-            const confirmed = await confirmV2SalesOrderDraft(draft);
+            if (normalizedGroupText === "final" && !isAuthorizedGmrFinalAdmin(actorId)) {
+              throw new Error("FINAL เฉพาะแอดมินที่ลงทะเบียน Telegram ID เท่านั้น");
+            }
+            const confirmed = await confirmV2SalesOrderDraft(draft, {
+              adminFinalActorId: normalizedGroupText === "final" ? actorId : null,
+            });
             const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
             await reply([
               "✅ ยืนยันงานเรียบร้อย",
@@ -8918,6 +8951,11 @@ if (
       );
 
       if (directLeadCard || looksLikePricingCommand) {
+        const isAdminFinal = isGmrFinalOrderCommand(groupText);
+        if (isAdminFinal && !isAuthorizedGmrFinalAdmin(actorId)) {
+          await reply("❌ FINAL สำหรับแอดมินที่ลงทะเบียน Telegram ID ไว้เท่านั้น — ไม่ได้สร้างงาน");
+          return res.sendStatus(200);
+        }
         const pricingContext = directLeadCard
           ? {
               customerId: directLeadCard.customer_id,
@@ -8945,10 +8983,13 @@ if (
               groupText,
               lineUserId: actorId,
               skipPreview: true,
+              adminFinalActorId: isAdminFinal ? actorId : null,
             });
 
             if (prepared?.ok) {
-              const confirmed = await confirmV2SalesOrderDraft(prepared.draft);
+              const confirmed = await confirmV2SalesOrderDraft(prepared.draft, {
+                adminFinalActorId: isAdminFinal ? actorId : null,
+              });
               const failedSheets = (confirmed.sheetResults || []).filter((item) => item.ok !== true);
               const workLines = prepared.reviewItems.map(
                 (item, index) => `${index + 1}. ${item.workType} | ${
@@ -12165,7 +12206,10 @@ async function getV223SalesDirectReviewClassification(rawUrl) {
   };
 }
 
-async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null, skipPreview = false }) {
+async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null, skipPreview = false, adminFinalActorId = null }) {
+  if (adminFinalActorId && (!isAuthorizedGmrFinalAdmin(adminFinalActorId) || !isGmrFinalOrderCommand(groupText))) {
+    throw new Error("GMR_ADMIN_FINAL_UNAUTHORIZED");
+  }
   const customer = await getCustomerById(leadCard.customer_id);
   if (!customer) throw new Error("ไม่พบลูกค้าที่ผูกกับข้อความนี้");
 
@@ -12183,6 +12227,38 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
   for (let index = 0; index < parsed.reviewUrls.length; index++) {
     const originalUrl = parsed.reviewUrls[index];
     try {
+      // Explicit FINAL is the administrator's own verification of this link.
+      // Never use the provider to overrule that classification; duplicates,
+      // pricing, department and customer association are still validated.
+      if (adminFinalActorId) {
+        const forcedType = parsed.workTypeOverride;
+        if (!["T0", "T2"].includes(forcedType)) {
+          errors.push(`${index + 1}. FINAL ต้องระบุ T0 หรือ T2 ให้ชัดเจน: ${originalUrl}`);
+          continue;
+        }
+        const existing = await getJobByCustomerAndReviewUrl(customer.id, originalUrl);
+        if (existing) {
+          errors.push(`${index + 1}. มีงานลิงก์นี้แล้ว (${existing.status}): ${originalUrl}`);
+          continue;
+        }
+        const department = await getDepartmentForReviewAge(forcedType === "T0" ? 1 : 15);
+        if (!department?.id) {
+          errors.push(`${index + 1}. ไม่พบแผนก ${forcedType}: ${originalUrl}`);
+          continue;
+        }
+        reviewItems.push({
+          originalUrl, canonicalUrl: originalUrl, businessName: null,
+          reviewerName: null, rating: null, reviewText: null,
+          reviewDate: null, providerReviewId: null, reviewAgeDays: null,
+          workType: forcedType, ageSource: "ADMIN_FINAL_OVERRIDE",
+          departmentId: department.id,
+        });
+        console.warn("GMR ADMIN FINAL REVIEW OVERRIDE", {
+          customerId: customer.id, actorId: String(adminFinalActorId),
+          reviewUrl: originalUrl, workType: forcedType,
+        });
+        continue;
+      }
       const v223Result = await getV223SalesDirectReviewClassification(originalUrl);
 
       // V2.2.25: Sales classification is direct-Google only. No SerpApi
@@ -12591,7 +12667,10 @@ async function syncExistingJobToMasterSheet(job) {
   };
 }
 
-async function confirmV2SalesOrderDraft(draft) {
+async function confirmV2SalesOrderDraft(draft, { adminFinalActorId = null } = {}) {
+  if (adminFinalActorId && !isAuthorizedGmrFinalAdmin(adminFinalActorId)) {
+    throw new Error("GMR_ADMIN_FINAL_UNAUTHORIZED");
+  }
   if (!draft || draft.status !== "pending_confirmation") {
     throw new Error("งานชุดนี้ไม่ได้อยู่ในสถานะรอยืนยันแล้ว");
   }
@@ -12599,9 +12678,15 @@ async function confirmV2SalesOrderDraft(draft) {
   const customer = await getCustomerById(draft.customer_id);
   if (!customer) throw new Error("ไม่พบข้อมูลลูกค้า");
 
-  if (!(await gmrTermsIsAccepted(customer.id))) {
+  const termsAccepted = await gmrTermsIsAccepted(customer.id);
+  if (!termsAccepted && !adminFinalActorId) {
     const stage = await gmrTermsRequestForManualStart(customer);
     throw new Error(`GMR_TERMS_AWAITING_CUSTOMER: ส่งคำขอยืนยันเงื่อนไขแล้ว (${stage}) กรุณารอลูกค้ายืนยันก่อนกดยืนยันงานอีกครั้ง`);
+  }
+  if (!termsAccepted && adminFinalActorId) {
+    console.warn("GMR ADMIN FINAL CONSENT STILL PENDING", {
+      customerId: customer.id, draftId: draft.id, actorId: String(adminFinalActorId),
+    });
   }
 
   const items = Array.isArray(draft.review_items) ? draft.review_items : [];
@@ -12646,7 +12731,9 @@ async function confirmV2SalesOrderDraft(draft) {
       price: Number(draft.price),
       currency: String(draft.currency || "THB").toUpperCase(),
       status: "waiting_credit_approval",
-      source: `sales_line:${draft.id}`,
+      source: adminFinalActorId
+        ? `sales_line:${draft.id}:ADMIN_FINAL:${adminFinalActorId}`
+        : `sales_line:${draft.id}`,
       customer_notify: true,
     });
     stagedJobs.push(job);
@@ -12657,12 +12744,13 @@ async function confirmV2SalesOrderDraft(draft) {
     customer,
     conversation,
     jobs: stagedJobs,
+    adminFinalActorId,
   });
 
   const sheetResults = await appendV2StartedJobsToMasterSheet({
     customer,
     jobs: startResult.startedJobs,
-    source: "sales_line",
+    source: adminFinalActorId ? `sales_line_admin_final:${adminFinalActorId}` : "sales_line",
   });
 
   await updateSalesOrderDraft(draft.id, {
