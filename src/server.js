@@ -30203,9 +30203,31 @@ app.post("/sheet-control", async (req, res) => {
       // ===================================================
 
           if (
-  normalizedValue ===
-  "CONFIRM_REMOVED"
+  normalizedValue === "CONFIRM_REMOVED" ||
+  normalizedValue === "MANUAL_REMOVED"
 ) {
+
+  const isManualRemoved = normalizedValue === "MANUAL_REMOVED";
+  if (isManualRemoved) {
+    // Independent human confirmation: no Apify missing-count required.
+    // Only accept from the matching T0/T2 ACTIVE sheet, with a reviewer identity.
+    const sourceSheet = String(req.body?.sheetName || "").trim().toUpperCase();
+    const route = await getDepartmentSheetRouteForJob(job);
+    if (!route || sourceSheet !== route.activeSheetName.toUpperCase()) {
+      return res.status(403).json({ ok: false, error: "MANUAL_REMOVED_ACTIVE_SHEET_MISMATCH" });
+    }
+    const checkedBy = String(req.body?.checkedBy || "").trim();
+    if (!checkedBy || checkedBy.length > 200) {
+      return res.status(400).json({ ok: false, error: "MANUAL_REMOVED_CHECKED_BY_REQUIRED" });
+    }
+    if (!String(job.review_url || "").trim()) {
+      return res.status(409).json({ ok: false, error: "MANUAL_REMOVED_REVIEW_URL_MISSING" });
+    }
+    console.log("MANUAL REMOVED HUMAN CONFIRM REQUEST:", {
+      jobId: job.id, sheetName: sourceSheet, checkedBy,
+      reviewUrl: job.review_url, customerId: customer.id,
+    });
+  }
 
   const overdueConsent = await getOverdueConsentByJobId(job.id);
   if (overdueConsent && OVERDUE_BLOCKING_STATUSES.includes(overdueConsent.status)) {
@@ -30256,6 +30278,7 @@ app.post("/sheet-control", async (req, res) => {
   }
 
   if (
+    !isManualRemoved &&
     Number(
       job.review_missing_count ||
       0
@@ -30272,6 +30295,11 @@ app.post("/sheet-control", async (req, res) => {
       });
   }
 
+
+  if (isManualRemoved && existingJobStatus !== "processing") {
+    return res.status(409).json({ ok: false,
+      error: "MANUAL_REMOVED_ONLY_PROCESSING", status: existingJobStatus });
+  }
 
   const confirmedAt =
     new Date()
@@ -30330,6 +30358,14 @@ app.post("/sheet-control", async (req, res) => {
   let stripeCheckoutSessionId =
   null;
 
+
+  if (isManualRemoved) {
+    console.log("MANUAL REMOVED CONFIRMED FOR COLLECTION:", {
+      jobId: job.id, checkedBy: String(req.body?.checkedBy || ""),
+      sheetName: String(req.body?.sheetName || ""),
+      confirmedAt,
+    });
+  }
 
   // ========================================
   // 1. ยืนยัน CURRENT JOB ก่อน
