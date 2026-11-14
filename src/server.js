@@ -23689,14 +23689,71 @@ if (
 // CLASSIFY IMAGE WITH AI
 // ========================================
 
-const imageClassification =
-  await classifyCustomerImage({
-    buffer:
-      imageContent.buffer,
-
-    contentType:
-      imageContent.contentType,
+// LINE image classification: bounded wait with fail-safe notification.
+// This does NOT verify payment; only the existing verification path may do so.
+const lineImageClassificationStart = Date.now();
+const lineImageClassificationTimeoutMs = 20000;
+console.log("LINE IMAGE CLASSIFICATION START:", {
+  messageId,
+  bytes: imageContent.buffer.length,
+  timeoutMs: lineImageClassificationTimeoutMs,
+});
+let lineImageClassificationTimer;
+let imageClassification;
+try {
+  imageClassification = await Promise.race([
+    classifyCustomerImage({
+      buffer: imageContent.buffer,
+      contentType: imageContent.contentType,
+    }),
+    new Promise((_, reject) => {
+      lineImageClassificationTimer = setTimeout(
+        () => reject(new Error("LINE_IMAGE_CLASSIFICATION_TIMEOUT")),
+        lineImageClassificationTimeoutMs
+      );
+    }),
+  ]);
+  console.log("LINE IMAGE CLASSIFICATION FINISHED:", {
+    messageId,
+    elapsedMs: Date.now() - lineImageClassificationStart,
+    type: imageClassification?.type || null,
   });
+} catch (error) {
+  console.error("LINE IMAGE CLASSIFICATION FAILED:", {
+    messageId,
+    elapsedMs: Date.now() - lineImageClassificationStart,
+    error: error?.message || String(error),
+  });
+  // Notify customer through PUSH. The reply token may have expired after 20s.
+  const pendingText = "ได้รับรูปแล้วครับ ระบบยังตรวจสอบอัตโนมัติไม่สำเร็จ ทีมงานจะตรวจสอบและแจ้งผลให้ทราบครับ";
+  try {
+    await sendMessageToCustomer({
+      platform: "line",
+      platformUserId,
+      text: pendingText,
+    });
+  } catch (sendError) {
+    console.error("LINE IMAGE PENDING ACK FAILED:", {
+      messageId, error: sendError?.message || String(sendError),
+    });
+  }
+  try {
+    await pushTelegramSales([
+      "⚠️ GMR LINE IMAGE — MANUAL REVIEW REQUIRED",
+      `LINE user: ${platformUserId}`,
+      `Message ID: ${messageId}`,
+      `Error: ${String(error?.message || error).slice(0, 240)}`,
+      "กรุณาตรวจรูปใน LINE OA และตรวจยอดรับเงินจริงก่อน MARK_PAID",
+    ].join("\n"));
+  } catch (alertError) {
+    console.error("LINE IMAGE MANUAL REVIEW ALERT FAILED:", {
+      messageId, error: alertError?.message || String(alertError),
+    });
+  }
+  continue;
+} finally {
+  clearTimeout(lineImageClassificationTimer);
+}
 
 
 console.log(
