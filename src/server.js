@@ -9022,7 +9022,8 @@ if (
                   "✅ รับงานและเริ่มดำเนินการแล้ว",
                   `ลูกค้า: ${confirmed.customer?.display_name || "-"}`,
                   `Platform: ${getPlatformLabel(confirmed.customer)}`,
-                  `ราคา: ${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`,
+                  `ราคา: ${prepared.reviewItems.length > 1 && new Set(prepared.reviewItems.map((item) => `${item.price ?? prepared.draft.price}:${item.currency || prepared.draft.currency}`)).size > 1 ? "แยกตามงาน" : `${formatMoney(prepared.draft.price, prepared.draft.currency)} ${prepared.draft.currency}/รีวิว`}`,
+                  ...prepared.reviewItems.map((item, index) => `งาน ${index + 1}: ${formatMoney(item.price ?? prepared.draft.price, item.currency || prepared.draft.currency)} ${item.currency || prepared.draft.currency} / ${item.workType}`),
                   `จำนวน: ${confirmed.startedJobs.length} รีวิว`,
                   `Context: ${pricingContext.source}`,
                   "",
@@ -12112,7 +12113,53 @@ function parseV2SalesOrderText(text) {
     currency = amount >= 2500 ? "THB" : "USD";
   }
 
-  return { price: amount, currency, reviewUrls, workTypeOverride };
+  // Per-item Telegram Sales order: each price + T0/T2 header begins a block.
+  // Preserve the historical single-price command when fewer than two
+  // explicit blocks are present. Never silently assign the first price
+  // to all URLs when multiple blocks were supplied.
+  const blocks = [];
+  let activeBlock = null;
+  let malformed = null;
+  for (const sourceLine of raw.split(/\r?\n/)) {
+    const line = String(sourceLine || "").trim();
+    if (!line || /^(?:FINAL|งาน|\/job)$/i.test(line)) continue;
+    const header = line.match(/^(?:ราคา\s*[:=]?\s*)?(\$?\d[\d,]*(?:\.\d{1,2})?)\s*(?:(USD|THB|บาท)\s*)?(T0|T2)(?:\s*(USD|THB|บาท))?$/i);
+    if (header) {
+      const p = Number(header[1].replace(/[$,]/g, ""));
+      const token = String(header[2] || header[4] || "").toUpperCase();
+      const c = token === "USD" || header[1].startsWith("$") ? "USD"
+        : token === "THB" || token === "บาท" ? "THB"
+        : p >= 2500 ? "THB" : "USD";
+      if (!Number.isFinite(p) || p <= 0) malformed = "INVALID_ITEM_PRICE";
+      activeBlock = { price: p, currency: c, workType: header[3].toUpperCase(), reviewUrls: [] };
+      blocks.push(activeBlock);
+      continue;
+    }
+    const urlTokens = line.match(/https?:\/\/[^\s]+/gi) || [];
+    for (const url of urlTokens) {
+      const normalizedUrl = url.replace(/[)\]}>，。、,.;:!?]+$/g, "").trim();
+      if (!isPotentialGoogleMapsUrl(normalizedUrl)) {
+        if (blocks.length) malformed = "NON_GOOGLE_REVIEW_URL";
+        continue;
+      }
+      if (!activeBlock && blocks.length) malformed = "URL_WITHOUT_ITEM_HEADER";
+      if (activeBlock) activeBlock.reviewUrls.push(normalizedUrl);
+    }
+  }
+  if (blocks.length >= 2) {
+    const orderItems = blocks.flatMap((block) => block.reviewUrls.map((reviewUrl) => ({
+      reviewUrl, price: block.price, currency: block.currency, workType: block.workType,
+    })));
+    if (blocks.some((block) => !block.reviewUrls.length)) malformed = "ITEM_HEADER_WITHOUT_REVIEW_URL";
+    if (orderItems.length !== reviewUrls.length || new Set(orderItems.map((x) => x.reviewUrl)).size !== orderItems.length) {
+      malformed = "DUPLICATE_OR_UNASSIGNED_REVIEW_URL";
+    }
+    return { price: blocks[0].price, currency: blocks[0].currency,
+      reviewUrls, workTypeOverride: null, orderItems, multiItem: true,
+      parseError: malformed };
+  }
+  return { price: amount, currency, reviewUrls, workTypeOverride, orderItems: null,
+    multiItem: false, parseError: null };
 }
 
 function buildV2CustomerQuoteText({ customer, draft, reviewItems }) {
@@ -12223,6 +12270,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
   if (!customer) throw new Error("ไม่พบลูกค้าที่ผูกกับข้อความนี้");
 
   const parsed = parseV2SalesOrderText(groupText);
+  if (parsed.parseError) throw new Error(`รายการหลายงานไม่ถูกต้อง: ${parsed.parseError} — แต่ละหัวข้อราคา T0/T2 ต้องมีลิงก์ของตัวเอง`);
   if (!Number.isFinite(parsed.price) || parsed.price <= 0) {
     throw new Error("กรุณาระบุราคา เช่น 5500 THB หรือ 250 USD");
   }
@@ -12235,12 +12283,16 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
 
   for (let index = 0; index < parsed.reviewUrls.length; index++) {
     const originalUrl = parsed.reviewUrls[index];
+    const pricedItem = parsed.multiItem ? parsed.orderItems.find((x) => x.reviewUrl === originalUrl) : null;
+    const itemWorkType = pricedItem?.workType || parsed.workTypeOverride;
+    const itemPrice = pricedItem?.price ?? parsed.price;
+    const itemCurrency = pricedItem?.currency || parsed.currency;
     try {
       // Explicit FINAL is the administrator's own verification of this link.
       // Never use the provider to overrule that classification; duplicates,
       // pricing, department and customer association are still validated.
       if (adminFinalActorId) {
-        const forcedType = parsed.workTypeOverride;
+        const forcedType = itemWorkType;
         if (!["T0", "T2"].includes(forcedType)) {
           errors.push(`${index + 1}. FINAL ต้องระบุ T0 หรือ T2 ให้ชัดเจน: ${originalUrl}`);
           continue;
@@ -12261,6 +12313,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
           reviewDate: null, providerReviewId: null, reviewAgeDays: null,
           workType: forcedType, ageSource: "ADMIN_FINAL_OVERRIDE",
           departmentId: department.id,
+          price: itemPrice, currency: itemCurrency,
         });
         console.warn("GMR ADMIN FINAL REVIEW OVERRIDE", {
           customerId: customer.id, actorId: String(adminFinalActorId),
@@ -12301,7 +12354,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
       let ageDays = Number.isFinite(Number(directResult?.v223AgeDays))
         ? Number(directResult.v223AgeDays)
         : (review ? getReviewAgeDays(review) : null);
-      let forcedWorkType = null;
+      let forcedWorkType = parsed.multiItem ? itemWorkType : null;
       let autoAgeSource = directResult?.v223AgeSource || null;
 
       // Some provider payloads expose only a relative date string rather than
@@ -12340,8 +12393,8 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
 
         // Explicit Sales override always wins when supplied. It remains the
         // emergency fallback, not the normal workflow.
-        if (parsed.workTypeOverride && looksLikeResolvedDirectReview) {
-          forcedWorkType = parsed.workTypeOverride;
+        if (itemWorkType && looksLikeResolvedDirectReview) {
+          forcedWorkType = itemWorkType;
           canonicalUrl = resolvedDirectUrl || originalUrl;
           ageDays = forcedWorkType === "T0" ? 14 : 15;
           review = {
@@ -12458,7 +12511,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
         continue;
       }
 
-      const department = await getDepartmentForReviewAge(Number(ageDays));
+      const department = await getDepartmentForReviewAge(forcedWorkType === "T0" ? 1 : forcedWorkType === "T2" ? 15 : Number(ageDays));
       if (!department?.id) {
         errors.push(`${index + 1}. หาแผนก T0/T2 ไม่ได้: ${canonicalUrl}`);
         continue;
@@ -12477,6 +12530,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
         workType: forcedWorkType || (Number(ageDays) <= 14 ? "T0" : "T2"),
         ageSource: forcedWorkType ? "MANUAL_OVERRIDE" : (autoAgeSource || "PROVIDER"),
         departmentId: department.id,
+        price: itemPrice, currency: itemCurrency,
       });
     } catch (error) {
       errors.push(`${index + 1}. ตรวจลิงก์ไม่ได้: ${originalUrl} (${error.message})`);
@@ -12532,7 +12586,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     createdByLineUserId: lineUserId,
   });
 
-  const total = parsed.price * reviewItems.length;
+  const total = reviewItems.reduce((sum, item) => sum + Number(item.price ?? parsed.price), 0);
   const totalText = parsed.currency === "THB"
     ? `${formatMoney(total, "THB")} บาท`
     : `$${formatMoney(total, "USD")} USD`;
@@ -12557,7 +12611,7 @@ async function prepareV2SalesOrderDraft({ leadCard, groupText, lineUserId = null
     `Platform: ${getPlatformLabel(customer)}`,
     `Customer ID: ${customer.id}`,
     "",
-    `ราคา: ${formatMoney(parsed.price, parsed.currency)} ${parsed.currency} / รีวิว`,
+    parsed.multiItem ? "ราคา: แยกตามรายการด้านล่าง" : `ราคา: ${formatMoney(parsed.price, parsed.currency)} ${parsed.currency} / รีวิว`,
     `จำนวน: ${reviewItems.length} รีวิว`,
     `รวมกรณีสำเร็จทั้งหมด: ${totalText}`,
     "",
@@ -12746,8 +12800,8 @@ async function confirmV2SalesOrderDraft(draft, {
     }
 
     job = await updateJob(job.id, {
-      price: Number(draft.price),
-      currency: String(draft.currency || "THB").toUpperCase(),
+      price: Number(item.price ?? draft.price),
+      currency: String(item.currency || draft.currency || "THB").toUpperCase(),
       status: "waiting_credit_approval",
       source: adminFinalActorId
         ? `sales_line:${draft.id}:ADMIN_FINAL:${adminFinalActorId}`
@@ -23692,7 +23746,8 @@ if (
 // LINE image classification: bounded wait with fail-safe notification.
 // This does NOT verify payment; only the existing verification path may do so.
 const lineImageClassificationStart = Date.now();
-const lineImageClassificationTimeoutMs = 20000;
+const lineImageClassificationTimeoutMs = Math.min(45000, Math.max(10000,
+  Number(process.env.LINE_IMAGE_CLASSIFICATION_TIMEOUT_MS || 35000) || 35000));
 console.log("LINE IMAGE CLASSIFICATION START:", {
   messageId,
   bytes: imageContent.buffer.length,
@@ -23723,6 +23778,9 @@ try {
     messageId,
     elapsedMs: Date.now() - lineImageClassificationStart,
     error: error?.message || String(error),
+    errorCode: error?.code || error?.cause?.code || null,
+    category: String(error?.message || "").includes("TIMEOUT") ? "AI_TIMEOUT" : "AI_SERVICE_OR_INPUT_ERROR",
+    imageBytes: imageContent.buffer?.length || 0,
   });
   // Notify customer through PUSH. The reply token may have expired after 20s.
   const pendingText = "ได้รับรูปแล้วครับ ระบบยังตรวจสอบอัตโนมัติไม่สำเร็จ ทีมงานจะตรวจสอบและแจ้งผลให้ทราบครับ";
