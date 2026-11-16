@@ -4463,14 +4463,23 @@ async function runDepartmentDispatch({ departmentCode = null } = {}) {
         // + สร้าง round status=sending
         // ========================================
 
-        const claimResult =
-          await claimDepartmentDispatch({
-            departmentId:
-              department.id,
-
-            claimedAt:
-              dispatchedAt,
-          });
+        // Telegram "แจกงาน" uses a separate DB atomic claim that skips ONLY
+        // the interval gate. Scheduled dispatch continues using its original RPC.
+        const claimResult = requestedCode
+          ? await (async () => {
+              const { data, error } = await supabase.rpc(
+                "claim_department_dispatch_manual",
+                { p_department_id: department.id, p_claimed_at: dispatchedAt }
+              );
+              if (error) throw new Error(
+                `Manual department claim RPC failed: ${error.message}`
+              );
+              return data;
+            })()
+          : await claimDepartmentDispatch({
+              departmentId: department.id,
+              claimedAt: dispatchedAt,
+            });
 
 
         if (
