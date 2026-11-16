@@ -7995,6 +7995,84 @@ const allowed = new Set(
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
     
+// Human-verified payment after AI classification TIMEOUT. Only an authorized
+// admin replying directly to this bot-generated alert can use this command.
+// The employee must first verify incoming funds through the bank/KTC, not a screenshot.
+const manualTimeoutPaymentMatch = groupText.match(
+  /^ยืนยันชำระ\s+([0-9]+(?:\.[0-9]{1,2})?)\s+([A-Za-z0-9_\/-]{6,120})$/i
+);
+if (
+  upsalesChatId && chatId === upsalesChatId && manualTimeoutPaymentMatch &&
+  quotedMessageId
+) {
+  const quoted = String(msg?.reply_to_message?.text || "");
+  const tagged = quoted.includes("GMR PAYMENT SLIP — AUTO CHECK FAILED / MANUAL REVIEW REQUIRED") &&
+    quoted.includes("PAYMENT_SLIP_CLASSIFICATION_TIMEOUT") &&
+    msg?.reply_to_message?.from?.is_bot === true;
+  const customerId = quoted.match(/^Customer ID:\s*([0-9a-f-]{36})\s*$/im)?.[1] || "";
+  const answer = async (v) => replyTelegramInternal(chatId, msg.message_id, v);
+  if (!tagged || !customerId) {
+    await answer("⚠️ คำสั่งนี้ใช้ Reply เฉพาะ Alert PAYMENT_SLIP_CLASSIFICATION_TIMEOUT ของบอตเท่านั้น");
+    return res.sendStatus(200);
+  }
+  if (!isAuthorizedGmrFinalAdmin(actorId)) {
+    await answer("⛔ เฉพาะ Telegram Admin ที่มีสิทธิ์ GMR_FINAL_ADMIN_TELEGRAM_IDS สามารถยืนยันการรับชำระได้");
+    return res.sendStatus(200);
+  }
+  const amount = Number(manualTimeoutPaymentMatch[1]);
+  const reference = manualTimeoutPaymentMatch[2];
+  const customer = await getCustomerById(customerId);
+  if (!customer) { await answer("❌ ไม่พบ Customer ID นี้ในระบบ"); return res.sendStatus(200); }
+  const pendingJobs = await getWaitingPaymentJobsByCustomerId(customerId);
+  if (pendingJobs.length !== 1) {
+    await answer(`⛔ พบงานรอชำระ ${pendingJobs.length} งาน ต้องมีเพียง 1 งานจึงจะยืนยันผ่านคำสั่งนี้ได้ โปรดตรวจในชีต`);
+    return res.sendStatus(200);
+  }
+  const job = pendingJobs[0];
+  const price = Number(job.price || 0);
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(price) ||
+      Math.abs(amount-price)>0.005) {
+    await answer(`⛔ ยอดไม่ตรงกับ Job (Job: ${price}, คำสั่ง: ${amount}) ไม่มีการเปลี่ยนสถานะ`);
+    return res.sendStatus(200);
+  }
+  if (await getVerifiedPaymentByJobId(job.id)) {
+    await answer("✅ งานนี้มี Verified Payment อยู่แล้ว ระบบไม่สร้างซ้ำ");
+    return res.sendStatus(200);
+  }
+  if (await isPaymentReferenceUsed(reference)) {
+    await answer("⛔ เลขอ้างอิงธุรกรรมนี้ถูกใช้แล้ว ไม่อนุมัติซ้ำ");
+    return res.sendStatus(200);
+  }
+  // Record the payment reference in the verified payment table BEFORE changing Job.
+  const verifiedAt = new Date().toISOString();
+  const payment = await createPayment({
+    jobId:job.id, amount:price, paymentMethod:"MANUAL_BANK_CONFIRMED",
+    slipReceived:true, paymentVerified:true, verifiedAt,
+    transactionReference:reference,
+  });
+  await updateJob(job.id,{status:"paid",paid_at:verifiedAt});
+  let syncOk = true;
+  try {
+    await updateJobInGoogleSheet({jobId:job.id,status:"paid",paidAt:verifiedAt});
+    await movePaidJobToDepartmentDoneSheet(job,verifiedAt);
+  } catch(e) { syncOk=false; console.error("GMR MANUAL TIMEOUT PAYMENT SHEET SYNC FAILED:", e); }
+  await syncExistingCustomerAfterVerifiedPayment(customer.id,"TELEGRAM_TIMEOUT_MANUAL_VERIFIED");
+  const followUp = await buildPostPaymentCustomerFollowUp(customer,[job.id]);
+  await updateConversationForPostPayment(customer,followUp);
+  let customerNotified = false;
+  try {
+    await sendMessageToCustomer({platform:customer.platform,platformUserId:customer.platform_user_id,text:followUp.text});
+    customerNotified = true;
+    await saveMessage({customerId:customer.id,platform:customer.platform,direction:"outbound",messageType:"text",messageText:followUp.text});
+    await updateLastBotMessage(customer.id,followUp.text);
+  } catch(e) {console.error("GMR MANUAL TIMEOUT PAYMENT CUSTOMER SEND FAILED:",e);}
+  console.log("GMR MANUAL TIMEOUT PAYMENT VERIFIED:",{customerId,jobId:job.id,paymentId:payment?.id||null,reference,syncOk,customerNotified,actorId});
+  await answer(["✅ บันทึกยอดรับเงินจริงเป็น Paid แล้ว",`Job: ${job.id}`,`ยอด: ${price}`,`อ้างอิง: ${reference}`,
+    customerNotified?"✅ ส่งข้อความขอบคุณลูกค้าแล้ว":"⚠️ ส่งข้อความลูกค้าไม่สำเร็จ กรุณาตอบเอง",
+    syncOk?"✅ อัปเดตชีตแล้ว":"⚠️ อัปเดตชีตไม่ครบ กรุณาตรวจด้วยตนเอง"].join("\n"));
+  return res.sendStatus(200);
+}
+
 const paymentDecisionCommands = new Set([
   "ok",
   "okay",
@@ -27010,6 +27088,14 @@ app.post("/manychat/inbound", async (req, res) => {
                 `Error: ${detail}`,
                 "Image URL (may expire):", inboundImageUrl,
                 "ตรวจยอดเข้าจริงก่อนอนุมัติ ห้ามกด Verified โดยอ้างอิงเพียงรูป",
+                "",
+                "📋 วิธีดำเนินการเมื่อ AI TIMEOUT:",
+                "1) ตรวจยอดเงินจริงที่เข้าบัญชี KTC/ธนาคาร และเลขอ้างอิงธุรกรรม (ห้ามดูแค่รูป)",
+                "2) ถ้าพบเงินเข้าแล้ว ให้ Reply ข้อความเตือนนี้ด้วยรูปแบบ:",
+                "ยืนยันชำระ 3500 BANKREF123456   (แทนยอดและเลขอ้างอิงจริง)",
+                "3) ระบบจะยืนยันเฉพาะเมื่อมี Job เดียวที่รอชำระ และยอดตรงเท่านั้น",
+                "4) ถ้ายอดไม่ตรง/หลายงาน/ไม่พบรายการ ให้ตรวจและทำผ่านระบบงานแทน",
+                "หมายเหตุ: คำสั่ง ok ใช้กับบัตร PAYMENT ที่มี Payment ID เท่านั้น ไม่ใช้กับ Timeout Alert",
               ].join("\n"));
             } catch (alertError) {
               console.error("MANYCHAT PAYMENT FALLBACK TELEGRAM ALERT FAILED:", alertError);
