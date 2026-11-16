@@ -8038,8 +8038,12 @@ if (
     await answer("⚠️ กรุณา Reply ข้อความแจ้งเตือน MANUAL REVIEW ของบอตในกลุ่ม Upsales เท่านั้น");
     return res.sendStatus(200);
   }
-  if (!isAuthorizedGmrFinalAdmin(actorId)) {
-    await answer("⛔ เฉพาะ Telegram Admin ที่มีสิทธิ์ GMR_FINAL_ADMIN_TELEGRAM_IDS สามารถยืนยันการรับชำระได้");
+  // Upsales group membership is sufficient for this specific slip-timeout
+  // manual approval. The Telegram webhook already restricts chatId to the
+  // configured Upsales group, and the command MUST reply to the bot's exact
+  // customer-linked manual-review alert. Do not change FINAL override rights.
+  if (!actorId || msg?.from?.is_bot === true || msg?.sender_chat) {
+    await answer("⛔ คำสั่งอนุมัติต้องส่งจากบัญชีสมาชิก Telegram โดยตรงในกลุ่ม GMR Upsales");
     return res.sendStatus(200);
   }
   // For one-word approval, read the actual amount from the SINGLE pending Job.
