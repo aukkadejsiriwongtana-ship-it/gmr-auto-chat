@@ -8015,32 +8015,37 @@ const allowed = new Set(
     const actorId = msg?.from?.id ? String(msg.from.id) : null;
 
     
-// Human-verified payment after AI classification TIMEOUT. Only an authorized
+// Human-verified payment after AI classification failure. Only an authorized
 // admin replying directly to this bot-generated alert can use this command.
 // The employee must first verify incoming funds through the bank/KTC, not a screenshot.
 const manualTimeoutPaymentMatch = groupText.match(
   /^ยืนยันชำระ\s+([0-9]+(?:\.[0-9]{1,2})?)\s+([A-Za-z0-9_\/-]{6,120})$/i
 );
+// A one-word approval is a HUMAN ATTESTATION of a bank-verified transfer,
+// NOT OCR/AI verification. It must reply to this exact bot alert in Upsales.
+const oneWordManualApproval = normalizedGroupText === "อนุมัติ";
 if (
-  upsalesChatId && chatId === upsalesChatId && manualTimeoutPaymentMatch &&
+  upsalesChatId && chatId === upsalesChatId &&
+  (manualTimeoutPaymentMatch || oneWordManualApproval) &&
   quotedMessageId
 ) {
   const quoted = String(msg?.reply_to_message?.text || "");
   const tagged = quoted.includes("GMR PAYMENT SLIP — AUTO CHECK FAILED / MANUAL REVIEW REQUIRED") &&
-    quoted.includes("PAYMENT_SLIP_CLASSIFICATION_TIMEOUT") &&
     msg?.reply_to_message?.from?.is_bot === true;
   const customerId = quoted.match(/^Customer ID:\s*([0-9a-f-]{36})\s*$/im)?.[1] || "";
   const answer = async (v) => replyTelegramInternal(chatId, msg.message_id, v);
   if (!tagged || !customerId) {
-    await answer("⚠️ คำสั่งนี้ใช้ Reply เฉพาะ Alert PAYMENT_SLIP_CLASSIFICATION_TIMEOUT ของบอตเท่านั้น");
+    await answer("⚠️ กรุณา Reply ข้อความแจ้งเตือน MANUAL REVIEW ของบอตในกลุ่ม Upsales เท่านั้น");
     return res.sendStatus(200);
   }
   if (!isAuthorizedGmrFinalAdmin(actorId)) {
     await answer("⛔ เฉพาะ Telegram Admin ที่มีสิทธิ์ GMR_FINAL_ADMIN_TELEGRAM_IDS สามารถยืนยันการรับชำระได้");
     return res.sendStatus(200);
   }
-  const amount = Number(manualTimeoutPaymentMatch[1]);
-  const reference = manualTimeoutPaymentMatch[2];
+  // For one-word approval, read the actual amount from the SINGLE pending Job.
+  // Do not manufacture a bank transaction reference from a Telegram message ID.
+  const amount = manualTimeoutPaymentMatch ? Number(manualTimeoutPaymentMatch[1]) : null;
+  const reference = manualTimeoutPaymentMatch ? manualTimeoutPaymentMatch[2] : null;
   const customer = await getCustomerById(customerId);
   if (!customer) { await answer("❌ ไม่พบ Customer ID นี้ในระบบ"); return res.sendStatus(200); }
   const pendingJobs = await getWaitingPaymentJobsByCustomerId(customerId);
@@ -8050,8 +8055,8 @@ if (
   }
   const job = pendingJobs[0];
   const price = Number(job.price || 0);
-  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(price) ||
-      Math.abs(amount-price)>0.005) {
+  if (!Number.isFinite(price) || price <= 0 ||
+      (manualTimeoutPaymentMatch && (!Number.isFinite(amount) || amount <= 0 || Math.abs(amount-price)>0.005))) {
     await answer(`⛔ ยอดไม่ตรงกับ Job (Job: ${price}, คำสั่ง: ${amount}) ไม่มีการเปลี่ยนสถานะ`);
     return res.sendStatus(200);
   }
@@ -8059,16 +8064,19 @@ if (
     await answer("✅ งานนี้มี Verified Payment อยู่แล้ว ระบบไม่สร้างซ้ำ");
     return res.sendStatus(200);
   }
-  if (await isPaymentReferenceUsed(reference)) {
+  if (reference && await isPaymentReferenceUsed(reference)) {
     await answer("⛔ เลขอ้างอิงธุรกรรมนี้ถูกใช้แล้ว ไม่อนุมัติซ้ำ");
     return res.sendStatus(200);
   }
   // Record the payment reference in the verified payment table BEFORE changing Job.
   const verifiedAt = new Date().toISOString();
   const payment = await createPayment({
-    jobId:job.id, amount:price, paymentMethod:"MANUAL_BANK_CONFIRMED",
+    jobId:job.id, amount:price,
+    paymentMethod:oneWordManualApproval ? "TELEGRAM_ADMIN_BANK_CONFIRMED" : "MANUAL_BANK_CONFIRMED",
     slipReceived:true, paymentVerified:true, verifiedAt,
-    transactionReference:reference,
+    // Null means the bank reference was not recorded; the audit trail instead
+    // includes the Telegram approval message ID and the authorized actor.
+    ...(reference ? {transactionReference:reference} : {}),
   });
   await updateJob(job.id,{status:"paid",paid_at:verifiedAt});
   let syncOk = true;
@@ -8086,8 +8094,14 @@ if (
     await saveMessage({customerId:customer.id,platform:customer.platform,direction:"outbound",messageType:"text",messageText:followUp.text});
     await updateLastBotMessage(customer.id,followUp.text);
   } catch(e) {console.error("GMR MANUAL TIMEOUT PAYMENT CUSTOMER SEND FAILED:",e);}
-  console.log("GMR MANUAL TIMEOUT PAYMENT VERIFIED:",{customerId,jobId:job.id,paymentId:payment?.id||null,reference,syncOk,customerNotified,actorId});
-  await answer(["✅ บันทึกยอดรับเงินจริงเป็น Paid แล้ว",`Job: ${job.id}`,`ยอด: ${price}`,`อ้างอิง: ${reference}`,
+  console.log("GMR MANUAL TIMEOUT PAYMENT VERIFIED:",{
+    customerId,jobId:job.id,paymentId:payment?.id||null,reference,
+    approvalMode:oneWordManualApproval ? "ADMIN_ATTESTED_BANK_TRANSFER" : "BANK_REFERENCE_PROVIDED",
+    telegramApprovalMessageId:msg.message_id,
+    telegramAlertMessageId:quotedMessageId,
+    syncOk,customerNotified,actorId,
+  });
+  await answer(["✅ บันทึกยอดรับเงินจริงเป็น Paid แล้ว",`Job: ${job.id}`,`ยอด: ${price} ${String(job.currency || "").toUpperCase()}`,`อ้างอิง: ${reference || "ไม่ได้บันทึก — ผู้อนุมัติยืนยันว่าได้ตรวจรายการเงินจริงแล้ว"}`,
     customerNotified?"✅ ส่งข้อความขอบคุณลูกค้าแล้ว":"⚠️ ส่งข้อความลูกค้าไม่สำเร็จ กรุณาตอบเอง",
     syncOk?"✅ อัปเดตชีตแล้ว":"⚠️ อัปเดตชีตไม่ครบ กรุณาตรวจด้วยตนเอง"].join("\n"));
   return res.sendStatus(200);
@@ -27151,11 +27165,12 @@ app.post("/manychat/inbound", async (req, res) => {
                 "",
                 "📋 วิธีดำเนินการเมื่อ AI TIMEOUT:",
                 "1) ตรวจยอดเงินจริงที่เข้าบัญชี KTC/ธนาคาร และเลขอ้างอิงธุรกรรม (ห้ามดูแค่รูป)",
-                "2) ถ้าพบเงินเข้าแล้ว ให้ Reply ข้อความเตือนนี้ด้วยรูปแบบ:",
-                "ยืนยันชำระ 3500 BANKREF123456   (แทนยอดและเลขอ้างอิงจริง)",
-                "3) ระบบจะยืนยันเฉพาะเมื่อมี Job เดียวที่รอชำระ และยอดตรงเท่านั้น",
-                "4) ถ้ายอดไม่ตรง/หลายงาน/ไม่พบรายการ ให้ตรวจและทำผ่านระบบงานแทน",
-                "หมายเหตุ: คำสั่ง ok ใช้กับบัตร PAYMENT ที่มี Payment ID เท่านั้น ไม่ใช้กับ Timeout Alert",
+                "2) หากตรวจพบเงินเข้าแล้ว ให้ Reply แจ้งเตือนนี้ว่า: อนุมัติ",
+                "   การพิมพ์ อนุมัติ ถือว่าแอดมินรับรองว่าได้ตรวจเงินเข้าบัญชีจริงแล้ว (ไม่ใช่แค่ตรวจภาพ)",
+                "   หรือระบุเลขอ้างอิงด้วยคำสั่ง: ยืนยันชำระ 3500 BANKREF123456",
+                "3) ระบบรับคำสั่งเฉพาะ Admin ที่ได้รับสิทธิ์ และกรณีมี Job เดียวที่รอชำระ โดยใช้ยอดจาก Job อัตโนมัติ",
+                "4) หากมีหลายงาน/ยอดไม่ตรง/ไม่พบเงินเข้า ห้ามอนุมัติ ให้ตรวจในระบบงานแทน",
+                "หมายเหตุ: คำสั่ง ok ใช้กับบัตร PAYMENT ที่มี Payment ID เท่านั้น",
               ].join("\n"));
             } catch (alertError) {
               console.error("MANYCHAT PAYMENT FALLBACK TELEGRAM ALERT FAILED:", alertError);
