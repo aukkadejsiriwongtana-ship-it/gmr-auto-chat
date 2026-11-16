@@ -4384,7 +4384,7 @@ async function reconcileT2ActiveSheet({ apply = false, offset = 0, pageSize = 15
 let departmentDispatchRunning =
   false;
 
-async function runDepartmentDispatch() {
+async function runDepartmentDispatch({ departmentCode = null } = {}) {
   if (departmentDispatchRunning) {
     console.log(
       "DEPARTMENT DISPATCH SKIPPED: already running"
@@ -4407,9 +4407,20 @@ async function runDepartmentDispatch() {
       new Date().toISOString();
 
 
-    const departments =
+    const allDepartments =
       await getActiveDepartments();
 
+    // Manual Telegram requests select only the department matching their chat.
+    // Scheduled dispatches still include every active department.
+    const requestedCode = String(departmentCode || "").trim().toUpperCase();
+    const departments = requestedCode
+      ? (allDepartments || []).filter((department) =>
+          String(department.code || "").trim().toUpperCase() === requestedCode)
+      : (allDepartments || []);
+
+    if (requestedCode && departments.length !== 1) {
+      return { ok: false, reason: "department_not_active_or_not_unique", departmentCode: requestedCode, results: [] };
+    }
 
     const results = [];
 
@@ -8207,6 +8218,46 @@ if (addOutworkChatId && chatId === addOutworkChatId) {
     // -----------------------------------------------------
     if (chatId === t0ChatId || chatId === t2ChatId) {
       const departmentCode = chatId === t0ChatId ? "T0" : "T2";
+
+      // Dispatch the NEXT queued batch for this group only, without waiting for
+      // the scheduled 00/08/12/16/20 Bangkok slot. Existing atomic DB claim
+      // remains responsible for preventing the same Job being dispatched twice.
+      if (normalizedGroupText === "แจกงาน") {
+        // Acknowledging the webhook before sending avoids Telegram retries on
+        // slow Google Sheet / Telegram APIs. This does not run Apify.
+        res.sendStatus(200);
+        void runDepartmentDispatch({ departmentCode })
+          .then(async (result) => {
+            const item = result?.results?.find((entry) =>
+              String(entry.departmentCode || "").trim().toUpperCase() === departmentCode);
+            let report;
+            if (result?.skipped && result.reason === "already_running") {
+              report = `⏳ ${departmentCode} มีรอบแจกงานกำลังทำงานอยู่ กรุณาตรวจผลก่อนส่งคำสั่งซ้ำ`;
+            } else if (!result?.ok) {
+              report = `❌ ${departmentCode} แจกงานไม่ได้: ${result?.reason || "ไม่พบแผนกที่เปิดใช้งาน"}`;
+            } else if (item?.dispatched) {
+              report = `✅ ${departmentCode} แจกงานแล้ว ${Number(item.jobCount || 0)} รีวิว\n` +
+                `Dispatch Round: ${item.dispatchRoundId || "-"}` +
+                (item.sheetSyncFailedCount ? `\n⚠️ ชีตยังซิงก์ไม่ครบ ${item.sheetSyncFailedCount} รายการ` : "");
+            } else if (item?.reason === "no_queued_jobs" || item?.reason === "nothing_to_dispatch" ||
+                       item?.reason === "no_jobs" || item?.reason === "no_queued") {
+              report = `ℹ️ ${departmentCode} ไม่มีงานใหม่ที่พร้อมแจกในขณะนี้`;
+            } else {
+              report = `ℹ️ ${departmentCode} ยังไม่มีการแจกงานใหม่: ${item?.reason || "ไม่มีรายการที่รับงานได้"}`;
+            }
+            await replyTelegramInternal(chatId, msg.message_id, report);
+          })
+          .catch(async (error) => {
+            console.error(`TELEGRAM ${departmentCode} ON-DEMAND DISPATCH FAILED:`, error);
+            try {
+              await replyTelegramInternal(chatId, msg.message_id,
+                `❌ ${departmentCode} แจกงานไม่สำเร็จ: ${String(error?.message || error).slice(0, 220)}`);
+            } catch (replyError) {
+              console.error(`TELEGRAM ${departmentCode} DISPATCH REPORT FAILED:`, replyError);
+            }
+          });
+        return;
+      }
 
       if (normalizedGroupText === "check") {
         if (telegramDepartmentManualCheckRunning.has(departmentCode)) {
