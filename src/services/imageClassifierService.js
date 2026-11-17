@@ -1,7 +1,16 @@
 import OpenAI from "openai";
 
+// Give the model request its own deadline shorter than LINE's outer 35s
+// timeout. Disable SDK-level automatic retries; a timed-out classification
+// must promptly reach the HUMAN REVIEW path, never auto-verify a payment.
+const configuredTimeout = Number(process.env.GMR_IMAGE_CLASSIFIER_TIMEOUT_MS || 22000);
+const imageClassifierTimeoutMs = Number.isFinite(configuredTimeout)
+  ? Math.min(30000, Math.max(10000, configuredTimeout))
+  : 22000;
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  timeout: imageClassifierTimeoutMs,
+  maxRetries: 0,
 });
 
 // This prompt deliberately does NOT disclose the expected destination card
@@ -213,8 +222,9 @@ export async function classifyCustomerImage({
   const dataUrl = `data:${contentType};base64,${base64}`;
 
   const response = await openai.responses.create({
-    // Preserve the model configured by the existing working deployment.
-    model: "gpt-6-luna",
+    // Preserve the production model by default. Operators may explicitly
+    // configure GMR_IMAGE_CLASSIFIER_MODEL after validating speed/accuracy.
+    model: String(process.env.GMR_IMAGE_CLASSIFIER_MODEL || "gpt-6-luna").trim(),
     input: [{
       role: "user",
       content: [
