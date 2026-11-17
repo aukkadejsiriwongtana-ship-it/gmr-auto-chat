@@ -401,7 +401,7 @@ async function sendStripePaymentReceivedEnUtility({ customer, session }) {
   if (currency !== "usd" || !Number.isInteger(cents) || cents <= 0) {
     throw new Error("Stripe receipt utility requires a paid USD Checkout amount");
   }
-  const amount = (cents / 100).toFixed(2);
+  const amount = Number((cents / 100).toFixed(2));
   // Set the field BEFORE starting the Flow to avoid sending a stale invoice amount.
   await setManychatCustomFieldByName({
     platform,
