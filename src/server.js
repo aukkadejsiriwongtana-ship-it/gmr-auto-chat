@@ -26147,6 +26147,7 @@ async function processManychatPaymentSlipImage({
   platformUserId,
   displayName,
   imageUrl,
+  allowDraftManualReview = false,
 }) {
   const safeImageUrl = String(imageUrl || "").trim();
   if (!safeImageUrl) {
@@ -26265,6 +26266,16 @@ async function processManychatPaymentSlipImage({
   });
 
   if (imageClassification?.type !== "PAYMENT_SLIP") {
+    // In WAITING_MAP with a draft job, unrelated images still belong to the
+    // ordinary Google Map flow. Do not tell that customer to resend a slip.
+    if (allowDraftManualReview) {
+      return {
+        ok: true,
+        handled: false,
+        reason: "NOT_PAYMENT_SLIP",
+        classification: imageClassification?.type || null,
+      };
+    }
     const retryText = getCustomerText(
       customer,
       "รูปนี้ยังอ่านเป็นสลิปการชำระเงินไม่ได้ครับ รบกวนส่งรูปสลิปที่เห็นยอด วันที่ เวลา และผู้รับให้ชัดเจนอีกครั้งครับ",
@@ -26302,6 +26313,56 @@ async function processManychatPaymentSlipImage({
   );
 
   if (!Array.isArray(waitingPaymentJobs) || waitingPaymentJobs.length === 0) {
+    if (allowDraftManualReview) {
+      // This is deliberately NOT a payment approval. A draft has neither a
+      // confirmed billable amount nor a waiting-payment job to settle.
+      const draftJob = await getLatestJobByCustomerId(customer.id);
+      if (String(draftJob?.status || "").toLowerCase() !== "draft") {
+        return { ok: true, handled: false, reason: "NO_ELIGIBLE_DRAFT" };
+      }
+      const alert = [
+        "⚠️ GMR SLIP — UNMATCHED DRAFT / MANUAL REVIEW REQUIRED",
+        `Customer: ${displayName || customer.display_name || "-"}`,
+        `Customer ID: ${customer.id}`,
+        `Platform: ${platform}`,
+        `Draft Job ID: ${draftJob.id}`,
+        `Draft price: ${draftJob.price ?? "NOT SET"} ${draftJob.currency || ""}`,
+        `Slip amount (AI, UNVERIFIED): ${imageClassification?.amount ?? "unknown"}`,
+        `Slip reference (AI, UNVERIFIED): ${imageClassification?.reference || "unknown"}`,
+        `Image URL (may expire): ${safeImageUrl}`,
+        "⛔ NOT PAID: No waiting-payment job found.",
+        "1) ตรวจเงินเข้าจริงจากบัญชีธนาคาร/รายงาน KTC และตรวจหมายเลขอ้างอิงซ้ำ",
+        "2) ให้ Sales ยืนยันว่า Draft Job นี้เป็นงานที่ชำระจริง แล้วกำหนดราคาที่ถูกต้องผ่านกระบวนการปกติ",
+        "3) ใช้ขั้นตอนชำระเงินที่ผูก Job กับยอดได้ถูกต้อง ก่อนบันทึก Paid",
+        "4) ห้าม Reply 'อนุมัติ' กับ Alert นี้: คำสั่งอนุมัติใช้สำหรับ Job ที่รอชำระและจับคู่แล้วเท่านั้น",
+      ];
+      await pushTelegramUpsales(alert.join("\n"));
+      console.log("MANYCHAT UNMATCHED DRAFT SLIP ESCALATED:", {
+        customerId: customer.id,
+        jobId: draftJob.id,
+        platform,
+        amountUnverified: imageClassification?.amount ?? null,
+      });
+      const pendingText = getCustomerText(
+        customer,
+        "ได้รับหลักฐานการชำระเงินแล้วครับ ทีมงานกำลังตรวจสอบยอดกับรายการงาน และจะแจ้งผลให้ทราบครับ",
+        "We've received your payment evidence. Our team will match it to the correct job and confirm after reviewing the payment."
+      );
+      try {
+        await sendMessageToCustomer({
+          platform: customer.platform,
+          platformUserId: customer.platform_user_id,
+          text: pendingText,
+        });
+        await saveMessage({ customerId: customer.id, platform: customer.platform,
+          direction: "outbound", messageType: "text", messageText: pendingText });
+        await updateLastBotMessage(customer.id, pendingText);
+      } catch (notificationError) {
+        console.error("MANYCHAT UNMATCHED DRAFT ACK FAILED:", notificationError);
+      }
+      return { ok: true, handled: true, needsReview: true,
+        reason: "UNMATCHED_DRAFT_PAYMENT", draftJobId: draftJob.id };
+    }
     const noJobText = getCustomerText(
       customer,
       "ยังไม่พบงานที่กำลังรอชำระเงินครับ หากเพิ่งได้รับแจ้งยอด รบกวนติดต่อทีมงานได้เลยครับ",
@@ -27120,10 +27181,20 @@ app.post("/manychat/inbound", async (req, res) => {
             existingCustomer.id
           );
 
-        if (
-          existingConversation?.state ===
-          GMR_STATES.REMOVED_WAITING_PAYMENT
-        ) {
+        // A returning customer can submit a slip while the conversation is
+        // still WAITING_MAP and the newest job has not been priced. Classify
+        // the image, but ALWAYS escalate a slip instead of auto-marking paid.
+        const isWaitingPaymentState = existingConversation?.state ===
+          GMR_STATES.REMOVED_WAITING_PAYMENT;
+        let isDraftMapCandidate = false;
+        if (!isWaitingPaymentState && existingConversation?.state === GMR_STATES.WAITING_MAP) {
+          const draftJob = await getLatestJobByCustomerId(existingCustomer.id);
+          if (String(draftJob?.status || "").toLowerCase() === "draft") {
+            const waitingJobs = await getWaitingPaymentJobsByCustomerId(existingCustomer.id);
+            isDraftMapCandidate = !Array.isArray(waitingJobs) || waitingJobs.length === 0;
+          }
+        }
+        if (isWaitingPaymentState || isDraftMapCandidate) {
           console.log(
             "MANYCHAT WAITING PAYMENT IMAGE FALLBACK:",
             {
@@ -27142,6 +27213,7 @@ app.post("/manychat/inbound", async (req, res) => {
               platformUserId,
               displayName,
               imageUrl: inboundImageUrl,
+              allowDraftManualReview: isDraftMapCandidate,
             });
             console.log("MANYCHAT PAYMENT FALLBACK RESULT:", {
               customerId: existingCustomer.id,
@@ -27204,16 +27276,25 @@ app.post("/manychat/inbound", async (req, res) => {
             });
           }
 
-          return res.status(200).json({
-            ok: true,
-            payment_slip_fallback: true,
-            reply: null,
-            should_reply: false,
-            customer_id: existingCustomer.id,
-            state_before: existingConversation.state,
-            state_after: existingConversation.state,
-            payment_result: paymentSlipResult,
-          });
+          if (isDraftMapCandidate && paymentSlipResult?.reason === "NOT_PAYMENT_SLIP") {
+            // Ordinary map imagery must continue through the existing GMR
+            // state machine; do not consume the message as a payment.
+            console.log("MANYCHAT DRAFT IMAGE NOT SLIP — CONTINUE MAP FLOW:", {
+              customerId: existingCustomer.id,
+              classification: paymentSlipResult?.classification || null,
+            });
+          } else {
+            return res.status(200).json({
+              ok: true,
+              payment_slip_fallback: true,
+              reply: null,
+              should_reply: false,
+              customer_id: existingCustomer.id,
+              state_before: existingConversation.state,
+              state_after: existingConversation.state,
+              payment_result: paymentSlipResult,
+            });
+          }
         }
       }
     }
