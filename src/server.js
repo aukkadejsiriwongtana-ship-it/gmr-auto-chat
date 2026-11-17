@@ -23951,18 +23951,53 @@ try {
       messageId, error: sendError?.message || String(sendError),
     });
   }
+  // LINE payment images can time out BEFORE classification. Route any
+  // customer with waiting-payment jobs to Upsales, including the actual job IDs
+  // and prices. Do not mark paid, trust the image as settlement, or attach an
+  // automatic approval command to a non-payment-specific classification error.
+  let timeoutCustomer = null;
+  let timeoutWaitingJobs = [];
   try {
-    await pushTelegramSales([
-      "⚠️ GMR LINE IMAGE — MANUAL REVIEW REQUIRED",
-      `LINE user: ${platformUserId}`,
-      `Message ID: ${messageId}`,
-      `Error: ${String(error?.message || error).slice(0, 240)}`,
-      "กรุณาตรวจรูปใน LINE OA และตรวจยอดรับเงินจริงก่อน MARK_PAID",
-    ].join("\n"));
+    timeoutCustomer = await getCustomerByPlatformUserId("line", platformUserId);
+    if (timeoutCustomer?.id) {
+      timeoutWaitingJobs = await getWaitingPaymentJobsByCustomerId(timeoutCustomer.id);
+      if (!Array.isArray(timeoutWaitingJobs)) timeoutWaitingJobs = [];
+    }
+  } catch (lookupError) {
+    console.error("LINE IMAGE TIMEOUT JOB LOOKUP FAILED:", {
+      messageId, error: lookupError?.message || String(lookupError),
+    });
+  }
+  const timeoutAlertLines = [
+    timeoutWaitingJobs.length > 0
+      ? "⚠️ GMR PAYMENT IMAGE — AI TIMEOUT / MANUAL REVIEW REQUIRED"
+      : "⚠️ GMR LINE IMAGE — AI TIMEOUT / MANUAL REVIEW REQUIRED",
+    `Customer: ${timeoutCustomer?.display_name || lineDisplayName || "-"}`,
+    `Customer ID: ${timeoutCustomer?.id || "-"}`,
+    `LINE user: ${platformUserId}`,
+    `Message ID: ${messageId}`,
+    `Error: ${String(error?.message || error).slice(0, 240)}`,
+    `Waiting-payment jobs: ${timeoutWaitingJobs.length}`,
+    ...timeoutWaitingJobs.map((job) =>
+      `Job: ${job.id} | expected: ${job.price ?? "-"} ${job.currency || "THB"}`
+    ),
+    "ตรวจภาพต้นฉบับใน LINE OA และตรวจเงินเข้าจริง/เลขอ้างอิงกับบัญชีรับเงิน",
+    "ห้ามกดอนุมัติหรือบันทึก Paid โดยอาศัยเพียงสลิป/AI Timeout",
+    "หากมีหลายงาน ให้จับคู่กับ Job และป้องกันบันทึกรับเงินซ้ำก่อนอนุมัติ",
+  ];
+  try {
+    await pushTelegramUpsales(timeoutAlertLines.join("\n"));
   } catch (alertError) {
-    console.error("LINE IMAGE MANUAL REVIEW ALERT FAILED:", {
+    console.error("LINE IMAGE UPSELLS MANUAL REVIEW ALERT FAILED:", {
       messageId, error: alertError?.message || String(alertError),
     });
+    try {
+      await pushTelegramSales(timeoutAlertLines.join("\n"));
+    } catch (fallbackAlertError) {
+      console.error("LINE IMAGE SALES FALLBACK ALERT FAILED:", {
+        messageId, error: fallbackAlertError?.message || String(fallbackAlertError),
+      });
+    }
   }
   continue;
 } finally {
