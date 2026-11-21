@@ -1072,6 +1072,10 @@ export async function syncCustomerMapsForExistingCustomer(
         place_id:
           placeId,
 
+        // Required map identity; aligns with the other map upsert helpers.
+        map_key:
+          `place:${placeId}`,
+
         map_url:
           mapUrl ||
           null,
