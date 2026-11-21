@@ -17192,6 +17192,42 @@ if (
   conversation.state ===
   GMR_STATES.MAP_FOUND_WAITING_CONFIRMATION
 ) {
+  // V2.2.55 — Stale Map-confirmation guard.
+  // A casual acknowledgement to a human agent (e.g. "รับทราบครับ") is
+  // NOT a new Map confirmation. Old conversations can retain this state.
+  // Auto-confirmation is set only after a new Map has actually been parsed.
+  if (!autoConfirmDirectMap) {
+    const confirmationText = String(message || "")
+      .trim().toLowerCase()
+      .replace(/[.!?。！？\s]+$/g, "");
+    const explicitYes = new Set([
+      "ใช่", "ใช่ครับ", "ใช่ค่ะ", "ถูกต้อง", "ถูกครับ", "ถูกค่ะ",
+      "yes", "y", "yeah", "yep", "ok", "okay"
+    ]);
+    const explicitNo = new Set([
+      "ไม่ใช่", "ไม่ใช่ครับ", "ไม่ใช่ค่ะ", "ผิด", "ผิดร้าน",
+      "no", "n", "nope"
+    ]);
+    const isMapDecision = explicitYes.has(confirmationText) ||
+      explicitNo.has(confirmationText);
+
+    if (!isMapDecision) {
+      console.log("V255 STALE MAP CONFIRMATION REPLY SUPPRESSED:", {
+        customerId: customer.id,
+        state: conversation.state,
+        message: String(message || "").slice(0, 120),
+      });
+      return {
+        ok: true,
+        customerId: customer.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        botReply: null,
+        softHandoff: true,
+        note: "Non-Map acknowledgement; no duplicate review-link request.",
+      };
+    }
+  }
   const normalized =
   autoConfirmDirectMap
     ? "ใช่"
@@ -17485,6 +17521,26 @@ const imageReviews =
   // =====================================================
 
   {
+    // V2.2.55 — Only a fresh draft Map may generate this request.
+    // A stale confirmation state attached to a processing/paid Job must
+    // never reset the conversation or ask for links again.
+    if (String(latestJob.status || "").toLowerCase() !== "draft") {
+      console.log("V255 NON-DRAFT MAP RE-PROMPT SUPPRESSED:", {
+        customerId: customer.id,
+        jobId: latestJob.id,
+        jobStatus: latestJob.status,
+      });
+      return {
+        ok: true,
+        customerId: customer.id,
+        jobId: latestJob.id,
+        stateBefore: conversation.state,
+        stateAfter: conversation.state,
+        botReply: null,
+        softHandoff: true,
+        note: "Map link request skipped; latest Job is not a new draft.",
+      };
+    }
     const botReply = getCustomerText(
       customer,
       "ได้รับ Google Maps แล้วครับ รบกวนส่งลิงก์รีวิวที่ต้องการดำเนินการมาได้เลยครับ",
